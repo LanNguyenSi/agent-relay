@@ -1,0 +1,18 @@
+# Example .relay.yml — place in your app's root directory on the VPS
+name: my-app
+health: /api/health
+
+# Optional: override default docker-compose.yml
+# compose_file: docker-compose.prod.yml
+
+# Optional: run custom command instead of default flow
+# command: make deploy
+
+# Optional: commands before/after deploy
+# pre_update:
+#   - make db-generate
+# post_update:
+#   - docker compose exec backend npx prisma migrate deploy
+
+# Auto-rollback on health check failure (default: true)
+rollback: true

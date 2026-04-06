@@ -1,0 +1,13 @@
+services:
+  relay:
+    build: .
+    ports:
+      - "8222:8222"
+    environment:
+      - PORT=8222
+      - AUTH_TOKEN=${AUTH_TOKEN:-dev-token}
+      - APPS_DIR=/apps
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPS_DIR:-./apps}:/apps
+    restart: unless-stopped
