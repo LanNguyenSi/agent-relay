@@ -149,7 +149,7 @@ async function runHealthCheck(
   // Try each running service with node fetch, with retries for startup time
   const healthStep = await runStep("health check", async () => {
     const maxRetries = 5;
-    const delayMs = 5000;
+    const delayMs = process.env.NODE_ENV === "test" ? 0 : 5000;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
