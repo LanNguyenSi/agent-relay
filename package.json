@@ -11,12 +11,14 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "lint": "eslint src/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
+    "@hono/node-server": "^1.14.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dockerode": "^4.0.4",
-    "@hono/node-server": "^1.14.1",
     "hono": "^4.7.9",
     "js-yaml": "^4.1.0",
     "zod": "^3.24.4"
@@ -26,6 +28,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.15.18",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.2"
   }
 }
