@@ -111,6 +111,6 @@ async function checkGitRemoteReachable(appDir: string): Promise<PreflightCheck> 
     name: "git_remote_reachable",
     passed: reachable,
     message: reachable ? "Git remote is reachable" : "Cannot reach git remote",
-    critical: true,
+    critical: false,
   };
 }

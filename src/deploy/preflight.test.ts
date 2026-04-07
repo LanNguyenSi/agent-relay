@@ -116,7 +116,7 @@ describe("runPreflightChecks", () => {
     expect(report.passed).toBe(false);
     const check = report.checks.find((c) => c.name === "git_remote_reachable");
     expect(check?.passed).toBe(false);
-    expect(check?.critical).toBe(true);
+    expect(check?.critical).toBe(false);
   });
 
   it("force flag ignores non-critical failures", async () => {
