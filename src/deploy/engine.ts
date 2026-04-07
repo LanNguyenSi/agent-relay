@@ -25,7 +25,13 @@ export interface DeployOptions {
 }
 
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
-  const { appDir, config, branch = "main" } = options;
+  const { appDir, config } = options;
+  // Detect current branch if not specified
+  let branch = options.branch;
+  if (!branch) {
+    const branchResult = await shell("git rev-parse --abbrev-ref HEAD", appDir);
+    branch = branchResult.stdout.trim() || "main";
+  }
   const steps: DeployStep[] = [];
   const start = Date.now();
 
