@@ -120,7 +120,7 @@ describe("deploy — default flow", () => {
     const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
     expect(rollbackSteps.length).toBe(3);
     expect(rollbackSteps.map((s) => s.name)).toEqual([
-      "rollback: git checkout",
+      "rollback: git reset",
       "rollback: compose build",
       "rollback: compose up",
     ]);

@@ -58,7 +58,7 @@ async function defaultFlowDeploy(
 
   // Git pull
   const pullStep = await runStep("git pull", () =>
-    shell(`git pull origin ${branch}`, appDir),
+    shell(`git pull origin '${branch}'`, appDir),
   );
   steps.push(pullStep);
   if (pullStep.status === "failure") {
@@ -67,7 +67,7 @@ async function defaultFlowDeploy(
 
   // Docker compose build
   const buildStep = await runStep("compose build", () =>
-    shell(`docker compose -f ${config.compose_file} build`, appDir),
+    shell(`docker compose -f '${config.compose_file}' build`, appDir),
   );
   steps.push(buildStep);
   if (buildStep.status === "failure") {
@@ -77,7 +77,7 @@ async function defaultFlowDeploy(
 
   // Docker compose up
   const upStep = await runStep("compose up", () =>
-    shell(`docker compose -f ${config.compose_file} up -d`, appDir),
+    shell(`docker compose -f '${config.compose_file}' up -d`, appDir),
   );
   steps.push(upStep);
   if (upStep.status === "failure") {
@@ -166,20 +166,20 @@ async function rollbackIfEnabled(
     return;
   }
 
-  const checkoutStep = await runStep("rollback: git checkout", () =>
-    shell(`git checkout ${commitSha}`, appDir),
+  const checkoutStep = await runStep("rollback: git reset", () =>
+    shell(`git reset --hard '${commitSha}'`, appDir),
   );
   steps.push(checkoutStep);
   if (checkoutStep.status === "failure") return;
 
   const rebuildStep = await runStep("rollback: compose build", () =>
-    shell(`docker compose -f ${config.compose_file} build`, appDir),
+    shell(`docker compose -f '${config.compose_file}' build`, appDir),
   );
   steps.push(rebuildStep);
   if (rebuildStep.status === "failure") return;
 
   const restartStep = await runStep("rollback: compose up", () =>
-    shell(`docker compose -f ${config.compose_file} up -d`, appDir),
+    shell(`docker compose -f '${config.compose_file}' up -d`, appDir),
   );
   steps.push(restartStep);
 }
