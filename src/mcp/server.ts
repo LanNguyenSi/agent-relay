@@ -1,11 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { env } from "../config/env.js";
-import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
-import { deploy } from "../deploy/engine.js";
-import { runPreflightChecks } from "../deploy/preflight.js";
-import { shell } from "../deploy/exec.js";
-import { resolve } from "node:path";
+import * as apps from "../services/apps.js";
+import { recordDeploy } from "../services/history.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: true };
 
@@ -17,17 +13,8 @@ function err(message: string): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify({ success: false, error: message }, null, 2) }], isError: true };
 }
 
-function safeAppDir(app: string): string {
-  const dir = resolve(env.APPS_DIR, app);
-  if (!dir.startsWith(resolve(env.APPS_DIR))) {
-    throw new Error("Invalid app path: directory traversal detected");
-  }
-  return dir;
-}
-
 const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
 const SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
-const MAX_LOG_LINES = 1000;
 
 export function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -46,16 +33,11 @@ export function createMcpServer(): McpServer {
     },
     async ({ app, branch, force }) => {
       try {
-        const dir = safeAppDir(app);
-        const config = await loadRelayConfig(dir);
-
-        // Run preflight
-        const preflight = await runPreflightChecks({ appDir: dir, config, force });
-        if (!preflight.passed) {
-          return ok({ success: false, blocked: true, preflight });
+        const result = await apps.deployApp(app, { branch, force });
+        if ("blocked" in result && result.blocked) {
+          return ok(result);
         }
-
-        const result = await deploy({ appDir: dir, config, branch });
+        await recordDeploy(app, result, "mcp");
         return ok(result);
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
@@ -73,18 +55,10 @@ export function createMcpServer(): McpServer {
     async ({ app }) => {
       try {
         if (app) {
-          const status = await getAppStatus(app);
-          return ok(status);
+          const detail = await apps.getAppDetail(app);
+          return ok(detail);
         }
-
-        // List all apps
-        const result = await shell("ls -1", env.APPS_DIR);
-        if (result.exitCode !== 0) {
-          return err("Failed to list apps: " + result.stderr);
-        }
-        const apps = result.stdout.trim().split("\n").filter(Boolean);
-        const statuses = await Promise.all(apps.map(getAppStatus));
-        return ok({ apps: statuses });
+        return ok({ apps: await apps.listApps() });
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }
@@ -101,29 +75,9 @@ export function createMcpServer(): McpServer {
     },
     async ({ app, to_commit }) => {
       try {
-        const dir = safeAppDir(app);
-        const config = await loadRelayConfig(dir);
-        const target = to_commit ?? "HEAD~1";
-
-        const commitBefore = (await shell("git rev-parse HEAD", dir)).stdout.trim();
-
-        const checkout = await shell(`git reset --hard '${target}'`, dir);
-        if (checkout.exitCode !== 0) {
-          return err("Rollback failed: " + checkout.stderr);
-        }
-
-        const build = await shell(`docker compose -f '${config.compose_file}' build`, dir);
-        if (build.exitCode !== 0) {
-          return err("Rebuild failed: " + build.stderr);
-        }
-
-        const up = await shell(`docker compose -f '${config.compose_file}' up -d`, dir);
-        if (up.exitCode !== 0) {
-          return err("Restart failed: " + up.stderr);
-        }
-
-        const commitAfter = (await shell("git rev-parse HEAD", dir)).stdout.trim();
-        return ok({ success: true, commitBefore, commitAfter, message: `Rolled back to ${commitAfter}` });
+        const result = await apps.rollbackApp(app, to_commit);
+        await recordDeploy(app, result, "mcp");
+        return ok({ ...result, message: `Rolled back to ${result.commitAfter}` });
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }
@@ -136,26 +90,12 @@ export function createMcpServer(): McpServer {
     "Get recent docker compose logs for an app.",
     {
       app: z.string().min(1).describe("App directory name"),
-      lines: z.number().max(MAX_LOG_LINES).optional().describe("Number of log lines (default: 50, max: 1000)"),
+      lines: z.number().max(1000).optional().describe("Number of log lines (default: 50, max: 1000)"),
       service: z.string().regex(SERVICE_NAME, "Invalid service name").optional().describe("Specific service name"),
     },
     async ({ app, lines, service }) => {
       try {
-        const dir = safeAppDir(app);
-        const config = await loadRelayConfig(dir);
-        const n = Math.min(lines ?? 50, MAX_LOG_LINES);
-        const svc = service ?? "";
-
-        const result = await shell(
-          `docker compose -f '${config.compose_file}' logs --tail=${n} --no-color ${svc}`.trim(),
-          dir,
-        );
-
-        if (result.exitCode !== 0) {
-          return err("Failed to get logs: " + result.stderr);
-        }
-
-        return ok({ app, lines: n, logs: result.stdout });
+        return ok(await apps.fetchLogs(app, lines, service));
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }
@@ -171,9 +111,7 @@ export function createMcpServer(): McpServer {
     },
     async ({ app }) => {
       try {
-        const dir = safeAppDir(app);
-        const config = await loadRelayConfig(dir);
-        const report = await runPreflightChecks({ appDir: dir, config });
+        const report = await apps.runPreflight(app);
         return ok({ app, ...report });
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
@@ -182,29 +120,4 @@ export function createMcpServer(): McpServer {
   );
 
   return server;
-}
-
-async function getAppStatus(app: string): Promise<Record<string, unknown>> {
-  const dir = safeAppDir(app);
-
-  let config;
-  try {
-    config = await loadRelayConfig(dir);
-  } catch (e) {
-    return { app, configured: false, error: e instanceof RelayConfigError ? e.message : String(e) };
-  }
-
-  const [commitResult, psResult] = await Promise.all([
-    shell("git rev-parse --short HEAD", dir),
-    shell(`docker compose -f '${config.compose_file}' ps --format json`, dir),
-  ]);
-
-  return {
-    app,
-    configured: true,
-    name: config.name,
-    health: config.health,
-    commit: commitResult.stdout.trim() || "unknown",
-    containers: psResult.exitCode === 0 ? psResult.stdout.trim() : "error: " + psResult.stderr,
-  };
 }
