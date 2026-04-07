@@ -3,6 +3,7 @@ import type { RelayConfig } from "../config/relay.js";
 
 vi.mock("./exec.js", () => ({
   shell: vi.fn(),
+  exec: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -11,10 +12,11 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 import { runPreflightChecks } from "./preflight.js";
-import { shell } from "./exec.js";
+import { shell, exec } from "./exec.js";
 import { access, readFile } from "node:fs/promises";
 
 const mockShell = vi.mocked(shell);
+const mockExec = vi.mocked(exec);
 const mockAccess = vi.mocked(access);
 const mockReadFile = vi.mocked(readFile);
 
@@ -33,10 +35,8 @@ beforeEach(() => {
   // Defaults: everything passes
   mockAccess.mockResolvedValue(undefined);
   mockReadFile.mockResolvedValue("services:\n  app:\n    labels:\n      - traefik.enable=true\n" as any);
+  mockExec.mockResolvedValue({ stdout: "abc123\n", stderr: "", exitCode: 0 });
   mockShell.mockImplementation(async (cmd) => {
-    if (cmd.includes("docker compose")) {
-      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-    }
     if (cmd.includes("git status")) {
       return { stdout: "", stderr: "", exitCode: 0 };
     }
@@ -68,14 +68,7 @@ describe("runPreflightChecks", () => {
   });
 
   it("fails when no containers running", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.includes("docker compose")) {
-        return { stdout: "", stderr: "", exitCode: 0 };
-      }
-      if (cmd.includes("git status")) return { stdout: "", stderr: "", exitCode: 0 };
-      if (cmd.includes("git ls-remote")) return { stdout: "ref", stderr: "", exitCode: 0 };
-      return { stdout: "", stderr: "", exitCode: 0 };
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
     const report = await runPreflightChecks({ appDir: "/app", config: baseConfig });
 
@@ -161,6 +154,17 @@ describe("runPreflightChecks", () => {
       expect(check).toHaveProperty("message");
       expect(check).toHaveProperty("critical");
     }
+  });
+
+  it("fails when health endpoint is empty/whitespace", async () => {
+    const config: RelayConfig = { ...baseConfig, health: "  " };
+
+    const report = await runPreflightChecks({ appDir: "/app", config });
+
+    expect(report.passed).toBe(false);
+    const check = report.checks.find((c) => c.name === "health_defined");
+    expect(check?.passed).toBe(false);
+    expect(check?.critical).toBe(true);
   });
 
   it("runs all 6 checks", async () => {

@@ -1,7 +1,7 @@
 import { readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import type { RelayConfig } from "../config/relay.js";
-import { shell } from "./exec.js";
+import { exec, shell } from "./exec.js";
 
 export interface PreflightCheck {
   name: string;
@@ -51,16 +51,16 @@ async function checkComposeFileExists(appDir: string, composeFile: string): Prom
 }
 
 async function checkContainersRunning(appDir: string, composeFile: string): Promise<PreflightCheck> {
-  const result = await shell(`docker compose -f '${composeFile}' ps --format json -q`, appDir);
+  const result = await exec("docker", ["compose", "-f", composeFile, "ps", "--format", "json", "-q"], appDir);
   if (result.exitCode !== 0) {
-    return { name: "containers_running", passed: false, message: "Failed to check containers: " + result.stderr, critical: true };
+    return { name: "containers_running", passed: false, message: "Failed to check containers: " + result.stderr, critical: false };
   }
   const hasContainers = result.stdout.trim().length > 0;
   return {
     name: "containers_running",
     passed: hasContainers,
-    message: hasContainers ? "Containers are running" : "No running containers found",
-    critical: true,
+    message: hasContainers ? "Containers are running" : "No running containers found — initial deploy?",
+    critical: false,
   };
 }
 
@@ -81,7 +81,7 @@ async function checkTraefikLabels(appDir: string, composeFile: string): Promise<
 }
 
 async function checkHealthDefined(config: RelayConfig): Promise<PreflightCheck> {
-  const hasHealth = config.health.length > 0;
+  const hasHealth = config.health.trim().length > 0;
   return {
     name: "health_defined",
     passed: hasHealth,
