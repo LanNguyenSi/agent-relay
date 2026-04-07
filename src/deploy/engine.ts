@@ -146,25 +146,32 @@ async function runHealthCheck(
   const { appDir, config } = options;
   const healthPath = config.health;
 
-  // Try each running service with node fetch (available in Node containers)
+  // Try each running service with node fetch, with retries for startup time
   const healthStep = await runStep("health check", async () => {
-    const services = await shell(`docker compose -f '${config.compose_file}' ps --services --status running`, appDir);
-    const serviceList = services.stdout.trim().split("\n").filter(Boolean);
+    const maxRetries = 5;
+    const delayMs = 5000;
 
-    for (const service of serviceList) {
-      for (const port of [3000, 4000, 8080]) {
-        const check = await shell(
-          `docker compose -f '${config.compose_file}' exec -T ${service} ` +
-          `node -e "fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))"`,
-          appDir,
-        );
-        if (check.exitCode === 0) {
-          return { stdout: `Health check passed: ${service}:${port}${healthPath}`, stderr: "", exitCode: 0 };
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
+
+      const services = await shell(`docker compose -f '${config.compose_file}' ps --services --status running`, appDir);
+      const serviceList = services.stdout.trim().split("\n").filter(Boolean);
+
+      for (const service of serviceList) {
+        for (const port of [3000, 4000, 8080]) {
+          const check = await shell(
+            `docker compose -f '${config.compose_file}' exec -T ${service} ` +
+            `node -e "fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))"`,
+            appDir,
+          );
+          if (check.exitCode === 0) {
+            return { stdout: `Health check passed: ${service}:${port}${healthPath} (attempt ${attempt + 1})`, stderr: "", exitCode: 0 };
+          }
         }
       }
     }
 
-    return { stdout: `Health check failed: no service responded on ${healthPath}`, stderr: "", exitCode: 1 };
+    return { stdout: `Health check failed: no service responded on ${healthPath} after ${maxRetries} attempts`, stderr: "", exitCode: 1 };
   });
   steps.push(healthStep);
 
