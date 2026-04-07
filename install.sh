@@ -81,10 +81,10 @@ services:
       - "--providers.docker.network=traefik-public"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
 $(if [ -n "$TRAEFIK_EMAIL" ]; then
 cat <<ACME
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
       - "--certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/acme.json"
@@ -112,22 +112,29 @@ fi
 mkdir -p "$RELAY_DIR" "$APPS_DIR"
 
 # Generate token if not set
-if [ -f "$RELAY_DIR/.env" ] && grep -q AUTH_TOKEN "$RELAY_DIR/.env"; then
-  source "$RELAY_DIR/.env"
+# Preserve existing token or generate new one
+if [ -f "$RELAY_DIR/.env" ] && grep -q '^AUTH_TOKEN=' "$RELAY_DIR/.env"; then
+  AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$RELAY_DIR/.env" | cut -d= -f2-)
   log "Using existing auth token"
 else
   AUTH_TOKEN=$(openssl rand -hex 32)
-  cat > "$RELAY_DIR/.env" <<ENV_EOF
+  log "Generated auth token"
+fi
+
+# Always rewrite .env to pick up config changes (port, apps dir)
+cat > "$RELAY_DIR/.env" <<ENV_EOF
 AUTH_TOKEN=${AUTH_TOKEN}
 APPS_DIR=/apps
 PORT=${RELAY_PORT}
 ENV_EOF
-  log "Generated auth token"
-fi
 
 # Create relay docker-compose
 RELAY_LABELS=""
-if [ -n "$RELAY_DOMAIN" ]; then
+if [ -n "$RELAY_DOMAIN" ] && [ -z "$TRAEFIK_EMAIL" ]; then
+  warn "RELAY_DOMAIN is set but TRAEFIK_EMAIL is empty — TLS will not work."
+  warn "Set TRAEFIK_EMAIL=you@example.com and re-run, or unset RELAY_DOMAIN for port-only mode."
+fi
+if [ -n "$RELAY_DOMAIN" ] && [ -n "$TRAEFIK_EMAIL" ]; then
   RELAY_LABELS="    labels:
       - traefik.enable=true
       - traefik.http.routers.relay.rule=Host(\`${RELAY_DOMAIN}\`)
@@ -146,7 +153,7 @@ services:
     ports:
       - "${RELAY_PORT}:${RELAY_PORT}"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock  # read-write: relay manages app containers
       - ${APPS_DIR}:/apps
 ${RELAY_LABELS}
     networks:
