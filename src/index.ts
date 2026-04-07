@@ -1,8 +1,11 @@
-import { serve } from "@hono/node-server";
+import { createServer } from "node:http";
+import { getRequestListener } from "@hono/node-server";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { env } from "./config/env.js";
 import { api } from "./api/routes.js";
+import { createMcpServer } from "./mcp/server.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 const app = new Hono();
 
@@ -16,13 +19,35 @@ app.get("/health", (c) =>
 // Authenticated API
 app.route("/api", api);
 
-// MCP endpoint placeholder
-app.get("/mcp", (c) =>
-  c.json({ message: "MCP endpoint — will be implemented in R5" }),
-);
+// Hono request listener for non-MCP routes
+const honoListener = getRequestListener(app.fetch);
 
-serve({ fetch: app.fetch, port: env.PORT }, (info) => {
-  console.log(`agent-relay listening on port ${info.port}`);
-  console.log(`  API: http://localhost:${info.port}/api`);
-  console.log(`  MCP: http://localhost:${info.port}/mcp`);
+// Node.js HTTP server — routes MCP separately
+const server = createServer(async (req, res) => {
+  if (req.url?.startsWith("/mcp")) {
+    // Auth check for MCP
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith("Bearer ") || auth.slice(7) !== env.AUTH_TOKEN) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+
+    // Create per-session transport
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const mcpServer = createMcpServer();
+    await mcpServer.connect(transport);
+    await transport.handleRequest(req, res);
+    return;
+  }
+
+  // All other routes handled by Hono
+  honoListener(req, res);
+});
+
+server.listen(env.PORT, () => {
+  console.log(`agent-relay listening on port ${env.PORT}`);
+  console.log(`  API:  http://localhost:${env.PORT}/api`);
+  console.log(`  MCP:  http://localhost:${env.PORT}/mcp`);
+  console.log(`  Tools: relay_deploy, relay_status, relay_rollback, relay_logs, relay_preflight`);
 });
