@@ -107,7 +107,8 @@ describe("deploy — default flow", () => {
     mockShell.mockImplementation(async (cmd) => {
       if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
       if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("health") || cmd.includes("wget")) return { stdout: "HEALTH_FAILED", stderr: "", exitCode: 0 };
+      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 };
       return { stdout: "ok", stderr: "", exitCode: 0 };
     });
 
@@ -127,7 +128,8 @@ describe("deploy — default flow", () => {
     mockShell.mockImplementation(async (cmd) => {
       if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
       if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("health") || cmd.includes("wget")) return { stdout: "HEALTH_FAILED", stderr: "", exitCode: 0 };
+      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 };
       return { stdout: "ok", stderr: "", exitCode: 0 };
     });
     const config: RelayConfig = { ...baseConfig, rollback: false };
@@ -176,7 +178,8 @@ describe("deploy — custom command flow", () => {
   it("rolls back on health failure after custom command", async () => {
     mockShell.mockImplementation(async (cmd) => {
       if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("health") || cmd.includes("wget")) return { stdout: "HEALTH_FAILED", stderr: "", exitCode: 0 };
+      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 };
       return { stdout: "ok", stderr: "", exitCode: 0 };
     });
     const config: RelayConfig = { ...baseConfig, command: "./deploy.sh" };

@@ -146,20 +146,25 @@ async function runHealthCheck(
   const { appDir, config } = options;
   const healthPath = config.health;
 
-  // Use docker compose exec to check health from inside the container network
+  // Try each running service with node fetch (available in Node containers)
   const healthStep = await runStep("health check", async () => {
-    // Try to find the first running service and curl its health endpoint
-    const result = await shell(
-      `docker compose -f '${config.compose_file}' exec -T $(docker compose -f '${config.compose_file}' ps --services | head -1) ` +
-      `sh -c "wget -qO- http://localhost:3000${healthPath} 2>/dev/null || wget -qO- http://localhost:4000${healthPath} 2>/dev/null || echo HEALTH_FAILED"`,
-      appDir,
-    );
-    const ok = result.exitCode === 0 && !result.stdout.includes("HEALTH_FAILED");
-    return {
-      stdout: ok ? `Health check passed: ${healthPath}` : `Health check failed: ${healthPath} — ${result.stdout}`,
-      stderr: result.stderr,
-      exitCode: ok ? 0 : 1,
-    };
+    const services = await shell(`docker compose -f '${config.compose_file}' ps --services --status running`, appDir);
+    const serviceList = services.stdout.trim().split("\n").filter(Boolean);
+
+    for (const service of serviceList) {
+      for (const port of [3000, 4000, 8080]) {
+        const check = await shell(
+          `docker compose -f '${config.compose_file}' exec -T ${service} ` +
+          `node -e "fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))"`,
+          appDir,
+        );
+        if (check.exitCode === 0) {
+          return { stdout: `Health check passed: ${service}:${port}${healthPath}`, stderr: "", exitCode: 0 };
+        }
+      }
+    }
+
+    return { stdout: `Health check failed: no service responded on ${healthPath}`, stderr: "", exitCode: 1 };
   });
   steps.push(healthStep);
 
