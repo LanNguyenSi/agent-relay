@@ -6,17 +6,10 @@ vi.mock("./exec.js", () => ({
   shell: vi.fn(),
 }));
 
-// Mock health module
-vi.mock("./health.js", () => ({
-  checkHealth: vi.fn(),
-}));
-
 import { deploy } from "./engine.js";
 import { shell } from "./exec.js";
-import { checkHealth } from "./health.js";
 
 const mockShell = vi.mocked(shell);
-const mockHealth = vi.mocked(checkHealth);
 
 const baseConfig: RelayConfig = {
   name: "test-app",
@@ -38,7 +31,6 @@ beforeEach(() => {
     return { stdout: "ok", stderr: "", exitCode: 0 };
   });
 
-  mockHealth.mockResolvedValue(true);
 });
 
 describe("deploy — default flow", () => {
@@ -112,7 +104,12 @@ describe("deploy — default flow", () => {
   });
 
   it("rolls back on health check failure", async () => {
-    mockHealth.mockResolvedValue(false);
+    mockShell.mockImplementation(async (cmd) => {
+      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("health") || cmd.includes("wget")) return { stdout: "HEALTH_FAILED", stderr: "", exitCode: 0 };
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
 
     const result = await deploy({ appDir: "/app", config: baseConfig });
 
@@ -127,7 +124,12 @@ describe("deploy — default flow", () => {
   });
 
   it("skips rollback when disabled", async () => {
-    mockHealth.mockResolvedValue(false);
+    mockShell.mockImplementation(async (cmd) => {
+      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("health") || cmd.includes("wget")) return { stdout: "HEALTH_FAILED", stderr: "", exitCode: 0 };
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
     const config: RelayConfig = { ...baseConfig, rollback: false };
 
     const result = await deploy({ appDir: "/app", config });
@@ -172,7 +174,11 @@ describe("deploy — custom command flow", () => {
   });
 
   it("rolls back on health failure after custom command", async () => {
-    mockHealth.mockResolvedValue(false);
+    mockShell.mockImplementation(async (cmd) => {
+      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("health") || cmd.includes("wget")) return { stdout: "HEALTH_FAILED", stderr: "", exitCode: 0 };
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
     const config: RelayConfig = { ...baseConfig, command: "./deploy.sh" };
 
     const result = await deploy({ appDir: "/app", config });

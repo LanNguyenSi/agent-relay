@@ -1,6 +1,5 @@
 import type { RelayConfig } from "../config/relay.js";
 import { shell } from "./exec.js";
-import { checkHealth } from "./health.js";
 
 export interface DeployStep {
   name: string;
@@ -144,15 +143,21 @@ async function runHealthCheck(
   options: DeployOptions,
   steps: DeployStep[],
 ): Promise<boolean> {
-  const { config, healthBaseUrl } = options;
-  const baseUrl = healthBaseUrl ?? "http://localhost";
-  const healthUrl = `${baseUrl}${config.health}`;
+  const { appDir, config } = options;
+  const healthPath = config.health;
 
+  // Use docker compose exec to check health from inside the container network
   const healthStep = await runStep("health check", async () => {
-    const ok = await checkHealth({ url: healthUrl });
+    // Try to find the first running service and curl its health endpoint
+    const result = await shell(
+      `docker compose -f '${config.compose_file}' exec -T $(docker compose -f '${config.compose_file}' ps --services | head -1) ` +
+      `sh -c "wget -qO- http://localhost:3000${healthPath} 2>/dev/null || wget -qO- http://localhost:4000${healthPath} 2>/dev/null || echo HEALTH_FAILED"`,
+      appDir,
+    );
+    const ok = result.exitCode === 0 && !result.stdout.includes("HEALTH_FAILED");
     return {
-      stdout: ok ? `Health check passed: ${healthUrl}` : `Health check failed: ${healthUrl}`,
-      stderr: "",
+      stdout: ok ? `Health check passed: ${healthPath}` : `Health check failed: ${healthPath} — ${result.stdout}`,
+      stderr: result.stderr,
       exitCode: ok ? 0 : 1,
     };
   });
