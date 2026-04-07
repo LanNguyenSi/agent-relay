@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { serve } from "@hono/node-server";
+import { getRequestListener } from "@hono/node-server";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { env } from "./config/env.js";
@@ -19,13 +19,11 @@ app.get("/health", (c) =>
 // Authenticated API
 app.route("/api", api);
 
-// MCP setup
-const mcpServer = createMcpServer();
-const mcpTransport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-mcpServer.connect(mcpTransport);
+// Hono request listener for non-MCP routes
+const honoListener = getRequestListener(app.fetch);
 
-// Node.js HTTP server — handles both Hono routes and MCP
-const nodeServer = createServer(async (req, res) => {
+// Node.js HTTP server — routes MCP separately
+const server = createServer(async (req, res) => {
   if (req.url?.startsWith("/mcp")) {
     // Auth check for MCP
     const auth = req.headers.authorization;
@@ -35,21 +33,21 @@ const nodeServer = createServer(async (req, res) => {
       return;
     }
 
-    await mcpTransport.handleRequest(req, res);
+    // Create per-session transport
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const mcpServer = createMcpServer();
+    await mcpServer.connect(transport);
+    await transport.handleRequest(req, res);
     return;
   }
 
   // All other routes handled by Hono
-  return serve({ fetch: app.fetch, createServer: () => nodeServer }); // placeholder, won't be used
+  honoListener(req, res);
 });
 
-// Use @hono/node-server to handle non-MCP routes
-serve(
-  { fetch: app.fetch, port: env.PORT },
-  (info) => {
-    console.log(`agent-relay listening on port ${info.port}`);
-    console.log(`  API:  http://localhost:${info.port}/api`);
-    console.log(`  MCP:  http://localhost:${info.port}/mcp`);
-    console.log(`  Tools: relay_deploy, relay_status, relay_rollback, relay_logs, relay_preflight`);
-  },
-);
+server.listen(env.PORT, () => {
+  console.log(`agent-relay listening on port ${env.PORT}`);
+  console.log(`  API:  http://localhost:${env.PORT}/api`);
+  console.log(`  MCP:  http://localhost:${env.PORT}/mcp`);
+  console.log(`  Tools: relay_deploy, relay_status, relay_rollback, relay_logs, relay_preflight`);
+});

@@ -5,7 +5,7 @@ import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy } from "../deploy/engine.js";
 import { runPreflightChecks } from "../deploy/preflight.js";
 import { shell } from "../deploy/exec.js";
-import { join } from "node:path";
+import { resolve } from "node:path";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: true };
 
@@ -17,9 +17,17 @@ function err(message: string): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify({ success: false, error: message }, null, 2) }], isError: true };
 }
 
-function appDir(app: string): string {
-  return join(env.APPS_DIR, app);
+function safeAppDir(app: string): string {
+  const dir = resolve(env.APPS_DIR, app);
+  if (!dir.startsWith(resolve(env.APPS_DIR))) {
+    throw new Error("Invalid app path: directory traversal detected");
+  }
+  return dir;
 }
+
+const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
+const SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
+const MAX_LOG_LINES = 1000;
 
 export function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -38,7 +46,7 @@ export function createMcpServer(): McpServer {
     },
     async ({ app, branch, force }) => {
       try {
-        const dir = appDir(app);
+        const dir = safeAppDir(app);
         const config = await loadRelayConfig(dir);
 
         // Run preflight
@@ -89,11 +97,11 @@ export function createMcpServer(): McpServer {
     "Rollback an app to a previous commit, rebuild, and restart.",
     {
       app: z.string().min(1).describe("App directory name"),
-      to_commit: z.string().optional().describe("Target commit SHA (default: HEAD~1)"),
+      to_commit: z.string().regex(COMMIT_REF, "Must be a hex SHA or HEAD~N").optional().describe("Target commit SHA (default: HEAD~1)"),
     },
     async ({ app, to_commit }) => {
       try {
-        const dir = appDir(app);
+        const dir = safeAppDir(app);
         const config = await loadRelayConfig(dir);
         const target = to_commit ?? "HEAD~1";
 
@@ -128,14 +136,14 @@ export function createMcpServer(): McpServer {
     "Get recent docker compose logs for an app.",
     {
       app: z.string().min(1).describe("App directory name"),
-      lines: z.number().optional().describe("Number of log lines (default: 50)"),
-      service: z.string().optional().describe("Specific service name"),
+      lines: z.number().max(MAX_LOG_LINES).optional().describe("Number of log lines (default: 50, max: 1000)"),
+      service: z.string().regex(SERVICE_NAME, "Invalid service name").optional().describe("Specific service name"),
     },
     async ({ app, lines, service }) => {
       try {
-        const dir = appDir(app);
+        const dir = safeAppDir(app);
         const config = await loadRelayConfig(dir);
-        const n = lines ?? 50;
+        const n = Math.min(lines ?? 50, MAX_LOG_LINES);
         const svc = service ?? "";
 
         const result = await shell(
@@ -163,7 +171,7 @@ export function createMcpServer(): McpServer {
     },
     async ({ app }) => {
       try {
-        const dir = appDir(app);
+        const dir = safeAppDir(app);
         const config = await loadRelayConfig(dir);
         const report = await runPreflightChecks({ appDir: dir, config });
         return ok({ app, ...report });
@@ -177,7 +185,7 @@ export function createMcpServer(): McpServer {
 }
 
 async function getAppStatus(app: string): Promise<Record<string, unknown>> {
-  const dir = appDir(app);
+  const dir = safeAppDir(app);
 
   let config;
   try {
