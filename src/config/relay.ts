@@ -6,6 +6,7 @@ import { join } from "node:path";
 export const relayConfigSchema = z.object({
   name: z.string().min(1, "name is required"),
   health: z.string().min(1, "health endpoint is required"),
+  health_port: z.number().optional(),
   compose_file: z.string().default("docker-compose.yml"),
   command: z.string().optional(),
   pre_update: z.array(z.string()).default([]),

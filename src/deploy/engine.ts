@@ -158,7 +158,8 @@ async function runHealthCheck(
       const serviceList = services.stdout.trim().split("\n").filter(Boolean);
 
       for (const service of serviceList) {
-        for (const port of [3000, 4000, 8080]) {
+        const ports = config.health_port ? [config.health_port] : [3000, 3001, 4000, 5000, 8000, 8080];
+        for (const port of ports) {
           const check = await shell(
             `docker compose -f '${config.compose_file}' exec -T ${service} ` +
             `node -e "fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))"`,
