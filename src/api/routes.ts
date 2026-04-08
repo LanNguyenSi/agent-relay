@@ -20,6 +20,25 @@ api.get("/health", (c) => {
   return c.json({ status: "ok", version: "0.1.0", uptime: process.uptime() });
 });
 
+// ── GET /api/system — host CPU/RAM/Disk metrics ────────────────────────────
+api.get("/system", async (c) => {
+  const { execSync } = await import("node:child_process");
+  try {
+    const cpu = execSync("top -bn1 | grep 'Cpu(s)' | awk '{print $2}'", { timeout: 5000 }).toString().trim();
+    const mem = execSync("free -m | awk '/Mem:/{printf \"%d %d\", $3, $2}'", { timeout: 5000 }).toString().trim().split(" ");
+    const disk = execSync("df -h / | awk 'NR==2{printf \"%s %s %s\", $3, $2, $5}'", { timeout: 5000 }).toString().trim().split(" ");
+
+    return c.json({
+      cpu: { usage: parseFloat(cpu) || 0 },
+      memory: { usedMb: parseInt(mem[0]) || 0, totalMb: parseInt(mem[1]) || 0 },
+      disk: { used: disk[0] || "?", total: disk[1] || "?", percent: disk[2] || "?" },
+      uptime: process.uptime(),
+    });
+  } catch {
+    return c.json({ error: "Failed to collect system metrics" }, 500);
+  }
+});
+
 // ── GET /api/apps ───────────────────────────────────────────────────────────
 api.get("/apps", async (c) => {
   return c.json({ apps: await apps.listApps() });
