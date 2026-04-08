@@ -60,7 +60,54 @@ api.get("/apps/:name", async (c) => {
 api.post("/apps/:name/deploy", async (c) => {
   const name = c.req.param("name");
   const body = await c.req.json().catch(() => ({}));
+  const stream = c.req.query("stream") === "true";
 
+  // SSE streaming mode
+  if (stream) {
+    try {
+      return new Response(
+        new ReadableStream({
+          async start(controller) {
+            const encoder = new TextEncoder();
+            function send(event: string, data: unknown) {
+              controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+            }
+
+            try {
+              const result = await apps.deployAppStreaming(
+                name,
+                { branch: body.branch, force: body.force },
+                (step) => send("step", step),
+              );
+
+              if ("blocked" in result && result.blocked) {
+                send("blocked", result.preflight);
+              } else {
+                await recordDeploy(name, result, "api");
+                send("done", result);
+              }
+            } catch (err: any) {
+              send("error", { message: err.message });
+            }
+
+            controller.close();
+          },
+        }),
+        {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          },
+        },
+      );
+    } catch (err) {
+      if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
+      throw err;
+    }
+  }
+
+  // Regular mode (existing behavior)
   try {
     const result = await apps.deployApp(name, { branch: body.branch, force: body.force });
     if ("blocked" in result && result.blocked) {
