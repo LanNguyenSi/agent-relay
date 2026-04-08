@@ -7,7 +7,7 @@ COPY src/ src/
 RUN npm run build
 
 FROM node:22-alpine
-RUN apk add --no-cache git docker-cli docker-cli-compose
+RUN apk add --no-cache git docker-cli docker-cli-compose openssh-client
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
