@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy } from "../deploy/engine.js";
@@ -37,7 +37,18 @@ export function clampLogLines(lines?: number): number {
 export async function listApps(): Promise<Array<{ name: string; configured: boolean; health?: string; commit?: string }>> {
   try {
     const entries = await readdir(env.APPS_DIR, { withFileTypes: true });
-    const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    // Follow symlinks: isDirectory() returns false for symlinks, so stat() to resolve
+    const names = await Promise.all(
+      entries.map(async (e) => {
+        if (e.isDirectory()) return e.name;
+        if (e.isSymbolicLink()) {
+          const s = await stat(resolve(env.APPS_DIR, e.name)).catch(() => null);
+          if (s?.isDirectory()) return e.name;
+        }
+        return null;
+      }),
+    );
+    const dirs = names.filter((n): n is string => n !== null);
 
     return Promise.all(dirs.map(async (name) => {
       const dir = resolve(env.APPS_DIR, name);

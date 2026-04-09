@@ -105,7 +105,7 @@ async function checkGitClean(appDir: string): Promise<PreflightCheck> {
 }
 
 async function checkGitRemoteReachable(appDir: string): Promise<PreflightCheck> {
-  const result = await shell("git ls-remote --exit-code --heads origin HEAD", appDir);
+  const result = await shell("git ls-remote --exit-code origin HEAD", appDir);
   const reachable = result.exitCode === 0;
   return {
     name: "git_remote_reachable",
