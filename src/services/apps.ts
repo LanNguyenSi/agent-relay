@@ -98,6 +98,22 @@ export async function deployApp(name: string, options?: { branch?: string; force
   return deploy({ appDir: dir, config, branch: options?.branch });
 }
 
+export async function deployAppStreaming(
+  name: string,
+  options?: { branch?: string; force?: boolean },
+  onStep?: (step: import("../deploy/engine.js").DeployStep) => void,
+) {
+  const dir = safeAppDir(name);
+  const config = await loadRelayConfig(dir);
+
+  const preflight = await runPreflightChecks({ appDir: dir, config, force: options?.force });
+  if (!preflight.passed) {
+    return { success: false, blocked: true, preflight };
+  }
+
+  return deploy({ appDir: dir, config, branch: options?.branch, onStep });
+}
+
 export async function rollbackApp(name: string, toCommit?: string) {
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);

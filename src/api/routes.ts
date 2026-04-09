@@ -20,6 +20,25 @@ api.get("/health", (c) => {
   return c.json({ status: "ok", version: "0.1.0", uptime: process.uptime() });
 });
 
+// ── GET /api/system — host CPU/RAM/Disk metrics ────────────────────────────
+api.get("/system", async (c) => {
+  const { execSync } = await import("node:child_process");
+  try {
+    const cpu = execSync("top -bn1 | grep 'Cpu(s)' | awk '{print $2}'", { timeout: 5000 }).toString().trim();
+    const mem = execSync("free -m | awk '/Mem:/{printf \"%d %d\", $3, $2}'", { timeout: 5000 }).toString().trim().split(" ");
+    const disk = execSync("df -h / | awk 'NR==2{printf \"%s %s %s\", $3, $2, $5}'", { timeout: 5000 }).toString().trim().split(" ");
+
+    return c.json({
+      cpu: { usage: parseFloat(cpu) || 0 },
+      memory: { usedMb: parseInt(mem[0]) || 0, totalMb: parseInt(mem[1]) || 0 },
+      disk: { used: disk[0] || "?", total: disk[1] || "?", percent: disk[2] || "?" },
+      uptime: process.uptime(),
+    });
+  } catch {
+    return c.json({ error: "Failed to collect system metrics" }, 500);
+  }
+});
+
 // ── GET /api/apps ───────────────────────────────────────────────────────────
 api.get("/apps", async (c) => {
   return c.json({ apps: await apps.listApps() });
@@ -41,7 +60,54 @@ api.get("/apps/:name", async (c) => {
 api.post("/apps/:name/deploy", async (c) => {
   const name = c.req.param("name");
   const body = await c.req.json().catch(() => ({}));
+  const stream = c.req.query("stream") === "true";
 
+  // SSE streaming mode
+  if (stream) {
+    try {
+      return new Response(
+        new ReadableStream({
+          async start(controller) {
+            const encoder = new TextEncoder();
+            function send(event: string, data: unknown) {
+              controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+            }
+
+            try {
+              const result = await apps.deployAppStreaming(
+                name,
+                { branch: body.branch, force: body.force },
+                (step) => send("step", step),
+              );
+
+              if ("blocked" in result && result.blocked) {
+                send("blocked", result.preflight);
+              } else {
+                await recordDeploy(name, result, "api");
+                send("done", result);
+              }
+            } catch (err: any) {
+              send("error", { message: err.message });
+            }
+
+            controller.close();
+          },
+        }),
+        {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          },
+        },
+      );
+    } catch (err) {
+      if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
+      throw err;
+    }
+  }
+
+  // Regular mode (existing behavior)
   try {
     const result = await apps.deployApp(name, { branch: body.branch, force: body.force });
     if ("blocked" in result && result.blocked) {

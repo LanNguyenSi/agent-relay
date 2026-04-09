@@ -10,4 +10,5 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${APPS_DIR:-./apps}:/apps
+      - ${SSH_DIR:-/root/.ssh}:/root/.ssh:ro
     restart: unless-stopped

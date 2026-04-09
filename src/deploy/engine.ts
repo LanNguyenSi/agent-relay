@@ -21,6 +21,7 @@ export interface DeployOptions {
   config: RelayConfig;
   branch?: string;
   healthBaseUrl?: string;
+  onStep?: (step: DeployStep) => void;
 }
 
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
@@ -50,12 +51,17 @@ async function defaultFlowDeploy(
   steps: DeployStep[],
   start: number,
 ): Promise<DeployResult> {
-  const { appDir, config } = options;
+  const { appDir, config, onStep } = options;
+
+  function emit(step: DeployStep) {
+    steps.push(step);
+    onStep?.(step);
+  }
 
   // Pre-update commands
   for (const cmd of config.pre_update) {
     const step = await runStep(`pre_update: ${cmd}`, () => shell(cmd, appDir));
-    steps.push(step);
+    emit(step);
     if (step.status === "failure") {
       return result(false, commitBefore, commitBefore, steps, start);
     }
@@ -65,7 +71,7 @@ async function defaultFlowDeploy(
   const pullStep = await runStep("git pull", () =>
     shell(`git pull origin '${branch}'`, appDir),
   );
-  steps.push(pullStep);
+  emit(pullStep);
   if (pullStep.status === "failure") {
     return result(false, commitBefore, commitBefore, steps, start);
   }
@@ -74,7 +80,7 @@ async function defaultFlowDeploy(
   const buildStep = await runStep("compose build", () =>
     shell(`docker compose -f '${config.compose_file}' build`, appDir),
   );
-  steps.push(buildStep);
+  emit(buildStep);
   if (buildStep.status === "failure") {
     await rollbackIfEnabled(config, appDir, commitBefore, steps);
     return result(false, commitBefore, commitBefore, steps, start);
@@ -84,7 +90,7 @@ async function defaultFlowDeploy(
   const upStep = await runStep("compose up", () =>
     shell(`docker compose -f '${config.compose_file}' up -d`, appDir),
   );
-  steps.push(upStep);
+  emit(upStep);
   if (upStep.status === "failure") {
     await rollbackIfEnabled(config, appDir, commitBefore, steps);
     return result(false, commitBefore, commitBefore, steps, start);
@@ -93,7 +99,7 @@ async function defaultFlowDeploy(
   // Post-update commands
   for (const cmd of config.post_update) {
     const step = await runStep(`post_update: ${cmd}`, () => shell(cmd, appDir));
-    steps.push(step);
+    emit(step);
     if (step.status === "failure") {
       await rollbackIfEnabled(config, appDir, commitBefore, steps);
       return result(false, commitBefore, commitBefore, steps, start);
@@ -102,6 +108,7 @@ async function defaultFlowDeploy(
 
   // Health check
   const healthOk = await runHealthCheck(options, steps);
+  if (steps.length > 0) onStep?.(steps[steps.length - 1]); // emit health check step
   if (!healthOk) {
     await rollbackIfEnabled(config, appDir, commitBefore, steps);
     const commitAfter = await getCurrentCommit(appDir);
@@ -158,7 +165,8 @@ async function runHealthCheck(
       const serviceList = services.stdout.trim().split("\n").filter(Boolean);
 
       for (const service of serviceList) {
-        for (const port of [3000, 4000, 8080]) {
+        const ports = config.health_port ? [config.health_port] : [3000, 3001, 4000, 5000, 8000, 8080];
+        for (const port of ports) {
           const check = await shell(
             `docker compose -f '${config.compose_file}' exec -T ${service} ` +
             `node -e "fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))"`,
