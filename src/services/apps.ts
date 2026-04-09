@@ -103,7 +103,7 @@ export async function deployAppStreaming(
   options?: { branch?: string; force?: boolean },
   onStep?: (step: import("../deploy/engine.js").DeployStep) => void,
 ) {
-  const dir = safeAppDir(name);
+  const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
 
   const preflight = await runPreflightChecks({ appDir: dir, config, force: options?.force });
