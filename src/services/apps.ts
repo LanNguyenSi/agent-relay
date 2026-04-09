@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy } from "../deploy/engine.js";
@@ -13,11 +13,15 @@ const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
 const SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
 const MAX_LOG_LINES = 1000;
 
-export function safeAppDir(name: string): string {
+export async function safeAppDir(name: string): Promise<string> {
   if (!APP_NAME.test(name)) throw new RelayConfigError("Invalid app name");
   const dir = resolve(env.APPS_DIR, name);
   if (!dir.startsWith(resolve(env.APPS_DIR))) throw new RelayConfigError("Invalid app path");
-  return dir;
+  // Resolve symlinks and verify the real path is still inside APPS_DIR
+  const real = await realpath(dir).catch(() => dir);
+  const appsReal = await realpath(env.APPS_DIR).catch(() => resolve(env.APPS_DIR));
+  if (!real.startsWith(appsReal)) throw new RelayConfigError("App path escapes APPS_DIR");
+  return real;
 }
 
 export function validateCommitRef(ref: string): string {
@@ -42,7 +46,10 @@ export async function listApps(): Promise<Array<{ name: string; configured: bool
       entries.map(async (e) => {
         if (e.isDirectory()) return e.name;
         if (e.isSymbolicLink()) {
-          const s = await stat(resolve(env.APPS_DIR, e.name)).catch(() => null);
+          const s = await stat(resolve(env.APPS_DIR, e.name)).catch((err: NodeJS.ErrnoException) => {
+            if (err.code === "ENOENT" || err.code === "ELOOP") return null;
+            throw err;
+          });
           if (s?.isDirectory()) return e.name;
         }
         return null;
@@ -66,7 +73,7 @@ export async function listApps(): Promise<Array<{ name: string; configured: bool
 }
 
 export async function getAppDetail(name: string) {
-  const dir = safeAppDir(name);
+  const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
   const commit = await shell("git rev-parse --short HEAD", dir);
   const ps = await shell(`docker compose -f '${config.compose_file}' ps --format json`, dir);
@@ -80,7 +87,7 @@ export async function getAppDetail(name: string) {
 }
 
 export async function deployApp(name: string, options?: { branch?: string; force?: boolean }) {
-  const dir = safeAppDir(name);
+  const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
 
   const preflight = await runPreflightChecks({ appDir: dir, config, force: options?.force });
@@ -92,7 +99,7 @@ export async function deployApp(name: string, options?: { branch?: string; force
 }
 
 export async function rollbackApp(name: string, toCommit?: string) {
-  const dir = safeAppDir(name);
+  const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
   const target = toCommit ? validateCommitRef(toCommit) : "HEAD~1";
 
@@ -112,7 +119,7 @@ export async function rollbackApp(name: string, toCommit?: string) {
 }
 
 export async function fetchLogs(name: string, lines?: number, service?: string) {
-  const dir = safeAppDir(name);
+  const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
   const n = clampLogLines(lines);
   const svc = service ? validateServiceName(service) : "";
@@ -127,7 +134,7 @@ export async function fetchLogs(name: string, lines?: number, service?: string) 
 }
 
 export async function runPreflight(name: string) {
-  const dir = safeAppDir(name);
+  const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
   return runPreflightChecks({ appDir: dir, config });
 }
