@@ -1,0 +1,27 @@
+# Production template — copy to VPS and adjust:
+#   - volumes: set host path for /apps mount
+#   - ports: expose 8222 if relay must be reachable from other hosts
+#   - labels: add traefik labels if behind reverse proxy
+#   - networks: add traefik network if using traefik
+#
+# Required .env on VPS:
+#   AUTH_TOKEN=<relay-token>
+#   APPS_DIR=/apps
+
+services:
+  relay:
+    build: .
+    container_name: agent-relay
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.ssh:/root/.ssh:ro
+      # Adjust this path to where your app repos live on the host:
+      - /path/to/apps:/apps
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
