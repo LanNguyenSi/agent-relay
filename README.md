@@ -71,21 +71,44 @@ rollback: true                      # auto-rollback on health check failure (def
 | `command` | `string` | No | -- | Custom deploy command (replaces default git+compose flow) |
 | `pre_update` | `string[]` | No | `[]` | Commands to run before the deploy |
 | `post_update` | `string[]` | No | `[]` | Commands to run after compose up |
+| `health_port` | `number` | No | -- | Port for health check requests (if different from Traefik-routed port) |
 | `rollback` | `boolean` | No | `true` | Auto-rollback to previous commit on failure |
 
 ## HTTP API reference
 
-All endpoints require `Authorization: Bearer <AUTH_TOKEN>` header.
+All `/api` endpoints require `Authorization: Bearer <AUTH_TOKEN>` header unless noted otherwise.
 
 Base path: `/api`
 
+### `GET /health`
+
+Public relay health check. **No authentication required.** Returns status and version but does not include uptime. Useful for external uptime monitors and load balancer probes.
+
+**Response:**
+```json
+{ "status": "ok", "version": "0.1.0" }
+```
+
 ### `GET /api/health`
 
-Relay health check (no deploy-level check).
+Authenticated relay health check. Same as `/health` but includes server uptime. Requires `Authorization` header.
 
 **Response:**
 ```json
 { "status": "ok", "version": "0.1.0", "uptime": 12345.67 }
+```
+
+### `GET /api/system`
+
+Returns server resource metrics (CPU, memory, disk usage).
+
+**Response:**
+```json
+{
+  "cpu": { "cores": 4, "usage": 23.5 },
+  "memory": { "totalMb": 8192, "usedMb": 4096, "usage": 50.0 },
+  "disk": { "totalGb": 100, "usedGb": 42, "usage": 42.0 }
+}
 ```
 
 ### `GET /api/apps`
@@ -123,6 +146,12 @@ Get detailed status for a single app including config, containers, and recent de
 
 Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compose up + health check.
 
+**Query params:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `stream` | `boolean` | `false` | When `true`, returns an SSE (Server-Sent Events) stream of deploy steps instead of a single JSON response. Each event has a `step` and `status` field. |
+
 **Request body (optional):**
 ```json
 { "branch": "main", "force": false }
@@ -133,7 +162,7 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | `branch` | `string` | `main` | Git branch to pull |
 | `force` | `boolean` | `false` | Skip non-critical preflight checks |
 
-**Response:** Deploy result with step-by-step output, commit before/after, and duration.
+**Response:** Deploy result with step-by-step output, commit before/after, and duration. When `stream=true`, the response is `text/event-stream` with one event per deploy step.
 
 ### `POST /api/apps/:name/rollback`
 
