@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { env } from "../config/env.js";
 import { RelayConfigError } from "../config/relay.js";
 import * as apps from "../services/apps.js";
+import * as appEnv from "../services/env.js";
 import { recordDeploy, getHistory } from "../services/history.js";
 
 export const api = new Hono();
@@ -168,4 +169,66 @@ api.get("/apps/:name/preflight", async (c) => {
 api.get("/deploys", async (c) => {
   const app = c.req.query("app");
   return c.json({ deploys: await getHistory(app || undefined) });
+});
+
+// ── Env vars (per-app .env) ────────────────────────────────────────────────
+//
+// No masking here. The relay returns raw values; the panel is the consent
+// boundary that decides what users see. A human operator who can call the
+// relay directly already has Bearer-token access to the whole VPS.
+
+// Strict upper bounds to keep the relay from being DoS'd by a runaway client.
+const ENV_MAX_ENTRIES = 500;
+const ENV_MAX_KEY = 128;
+const ENV_MAX_VALUE = 32_768;
+
+api.get("/apps/:name/env", async (c) => {
+  try {
+    const entries = await appEnv.readAppEnv(c.req.param("name"));
+    return c.json({ entries });
+  } catch (err) {
+    if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
+    throw err;
+  }
+});
+
+api.put("/apps/:name/env", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || !Array.isArray(body.entries)) {
+    return c.json({ error: "Body must be { entries: [{ key, value }] }" }, 400);
+  }
+  const raw = body.entries as unknown[];
+  if (raw.length > ENV_MAX_ENTRIES) {
+    return c.json({ error: `Too many entries (max ${ENV_MAX_ENTRIES})` }, 400);
+  }
+  const seen = new Set<string>();
+  const entries: appEnv.EnvEntry[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== "object") {
+      return c.json({ error: "Each entry must be { key, value }" }, 400);
+    }
+    const { key, value } = row as { key?: unknown; value?: unknown };
+    if (typeof key !== "string" || typeof value !== "string") {
+      return c.json({ error: "key and value must be strings" }, 400);
+    }
+    if (key.length === 0 || key.length > ENV_MAX_KEY) {
+      return c.json({ error: `Key length must be 1..${ENV_MAX_KEY}` }, 400);
+    }
+    if (value.length > ENV_MAX_VALUE) {
+      return c.json({ error: `Value for ${key} exceeds ${ENV_MAX_VALUE} chars` }, 400);
+    }
+    if (seen.has(key)) {
+      return c.json({ error: `Duplicate key: ${key}` }, 400);
+    }
+    seen.add(key);
+    entries.push({ key, value });
+  }
+  try {
+    await appEnv.writeAppEnv(c.req.param("name"), entries);
+    return c.json({ entries });
+  } catch (err) {
+    if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
+    if (err instanceof Error) return c.json({ error: err.message }, 400);
+    throw err;
+  }
 });
