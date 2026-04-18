@@ -36,9 +36,9 @@ their deploy smoke test against the published image.
 #### Pre-flight checks
 
 - `src/deploy/preflight.ts` — six pre-deploy validation checks run
-  before any container is touched: config validity, container state,
-  Traefik labels, git status, remote reachability (non-critical),
-  and disk space.
+  before any container is touched: compose file exists, container
+  state, Traefik labels, health endpoint defined, git working tree
+  clean, and git remote reachable (non-critical).
 
 #### Health check + rollback
 
@@ -52,8 +52,10 @@ their deploy smoke test against the published image.
 #### MCP server
 
 - `src/mcp/server.ts` — Model Context Protocol surface for AI
-  agents. Five tools: list apps, deploy, rollback, status, history.
-- Stdio + HTTP transports.
+  agents. Five tools: `relay_deploy`, `relay_status`,
+  `relay_rollback`, `relay_logs`, `relay_preflight`. Served over
+  HTTP via `StreamableHTTPServerTransport` (no stdio transport in
+  v0.1.0).
 
 #### HTTP API
 
@@ -62,8 +64,8 @@ their deploy smoke test against the published image.
   external uptime monitors; authenticated `GET /api/*` for everything
   else.
 - `GET /api/system` — host CPU / RAM / disk metrics.
-- `GET/POST /api/apps/:name/env` — read/write app `.env` via the
-  relay (gated by auth).
+- `GET /api/apps/:name/env` (read) and `PUT /api/apps/:name/env`
+  (write) — manage app `.env` via the relay (gated by auth).
 - Deploy history persisted to a JSON file (last 100 entries) and
   exposed via the API.
 
