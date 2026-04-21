@@ -11,12 +11,13 @@ VPS deployment relay for AI agents. Runs as a daemon on your server and exposes 
 
 Each app on your VPS is a git repo with a `docker-compose.yml` and a `.relay.yml` config file. agent-relay manages the deploy lifecycle:
 
-1. **Pre-flight checks** -- validate config, containers, Traefik labels, git status
-2. **Deploy** -- `pre_update` commands, `git pull`, **re-read `.relay.yml`**, `docker compose build`, `docker compose up -d`, `post_update` commands
-3. **Health check** -- HTTP health endpoint with exponential backoff retries
-4. **Auto-rollback** -- revert to previous commit on health check failure
+1. **Deploy** -- `pre_update` commands, `git pull`, **re-read `.relay.yml`**, **pre-flight checks** (validate config, containers, Traefik labels, git status), `docker compose build`, `docker compose up -d`, `post_update` commands
+2. **Health check** -- HTTP health endpoint with exponential backoff retries
+3. **Auto-rollback** -- revert to previous commit on health check failure
 
-`.relay.yml` is re-read after `git pull` so config edits shipped in the same commit as the code they support take effect on that same deploy — `compose_file`, `post_update`, `health`, and `health_port` all use the post-pull values. Pre-flight checks and `pre_update` commands intentionally run against the pre-pull config (they answer "is it safe to pull?", not "will the new config work?"). Rollback also keeps the pre-pull config, because `git reset --hard` restores the old tree where the old `compose_file` is on disk.
+`.relay.yml` is re-read after `git pull` so config edits shipped in the same commit as the code they support take effect on that same deploy — `compose_file`, `post_update`, `health`, `health_port`, AND pre-flight checks all use the post-pull values. This matters when a commit *fixes* a broken `.relay.yml`: pre-flight sees the fixed config and lets the deploy through, instead of gating on the stale pre-pull copy. `pre_update` commands still run against the pre-pull tree (they may need pre-pull state to checkpoint). Rollback also keeps the pre-pull config, because `git reset --hard` restores the old tree where the old `compose_file` is on disk.
+
+Command-mode deploys (`.relay.yml` with a `command:` field) run pre-flight *before* the command, since the command is opaque and has no natural post-pull checkpoint.
 
 ## Architecture
 
@@ -39,7 +40,7 @@ VPS
 | Config | `src/config/relay.ts` | `.relay.yml` schema and parser (Zod) |
 | Env | `src/config/env.ts` | Environment variable validation |
 | Deploy Engine | `src/deploy/engine.ts` | Full deploy flow with step tracking |
-| Pre-flight | `src/deploy/preflight.ts` | 6 pre-deploy validation checks |
+| Pre-flight | `src/deploy/preflight.ts` | 6 validation checks run inside the engine after `git pull` + config reload (default flow), or pre-command (command mode) |
 | Health | `src/deploy/health.ts` | HTTP health check with retries |
 | MCP Server | `src/mcp/server.ts` | 5 MCP tools for AI agents |
 | HTTP API | `src/api/routes.ts` | REST API for deploy-panel |

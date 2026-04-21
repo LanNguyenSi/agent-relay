@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Pre-flight now runs AFTER `git pull` + `.relay.yml` reload.** Default-flow deploys previously invoked pre-flight in `services/apps.ts` before the engine had a chance to pull. That meant a commit that *fixed* a broken `.relay.yml` (wrong `compose_file`, missing `command:` field, etc.) would keep failing on every first-deploy-after-merge because pre-flight saw the stale pre-pull copy — operators had to SSH in and run `git pull` by hand before the fix applied. Pre-flight is now a step inside `defaultFlowDeploy` that runs against the post-pull config, with a corresponding `preflight` entry in the SSE step stream. Command-mode deploys keep pre-flight pre-command (the command is opaque). Failure returns a new `DeployBlockedResult` shape; the API contract (`{ success: false, blocked: true, preflight }`) is preserved.
+
+### Added
+
+- `DeployOptions.force` (boolean). Propagates the HTTP API's existing `?force=true` query-param into pre-flight so non-critical checks can be skipped — identical semantics to what `services/apps.ts` did before the move.
+
+### Notes
+
+- `checkGitClean` and `checkGitRemoteReachable` become tautologies in default-flow pre-flight (a successful pull proves both). They stay meaningful for command-mode deploys and for the standalone `GET /api/apps/:name/preflight` endpoint. A clean pre-/post-pull split is filed as a follow-up.
+
 ## [0.1.0] - 2026-04-18
 
 **Headline: First tagged release of agent-relay — the VPS-side daemon

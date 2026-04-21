@@ -24,6 +24,16 @@ export interface PreflightOptions {
 export async function runPreflightChecks(options: PreflightOptions): Promise<PreflightReport> {
   const { appDir, config, force = false } = options;
 
+  // Note: after PR #21 preflight runs post-pull in `defaultFlowDeploy`.
+  // `checkGitClean` and `checkGitRemoteReachable` are then effectively
+  // tautologies (a successful pull already proved clean-tree + reachable
+  // remote). Kept for:
+  //   1. The standalone `GET /api/apps/:name/preflight` endpoint, which
+  //      NEVER pulls — they still carry real signal there.
+  //   2. Command-mode deploys, where preflight runs pre-command against
+  //      whatever is on disk.
+  // A proper split (pre-pull git checks, post-pull config checks) is
+  // tracked as a follow-up task.
   const checks = await Promise.all([
     checkComposeFileExists(appDir, config.compose_file),
     checkContainersRunning(appDir, config.compose_file),

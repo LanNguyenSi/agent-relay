@@ -135,6 +135,7 @@ async function defaultFlowDeploy(
   // operators actually want. No rollback on failure: the tree is at the
   // new commit but nothing else has changed; the running containers are
   // still on the old image.
+  const preflightStart = Date.now();
   const preflight = await runPreflightChecks({ appDir, config, force: options.force });
   const preflightStep: DeployStep = {
     name: "preflight",
@@ -142,7 +143,7 @@ async function defaultFlowDeploy(
     output: preflight.checks
       .map((c) => `${c.passed ? "✓" : "✗"} ${c.name}: ${c.message}`)
       .join("\n"),
-    durationMs: 0,
+    durationMs: Date.now() - preflightStart,
   };
   emit(preflightStep);
   if (!preflight.passed) {
@@ -217,6 +218,7 @@ async function customCommandDeploy(
   // …`), this does mean preflight sees the pre-pull config; operators
   // who edit .relay.yml in command mode should expect one stale
   // preflight before the next deploy picks up the new config.
+  const preflightStart = Date.now();
   const preflight = await runPreflightChecks({ appDir, config, force: options.force });
   const preflightStep: DeployStep = {
     name: "preflight",
@@ -224,7 +226,7 @@ async function customCommandDeploy(
     output: preflight.checks
       .map((c) => `${c.passed ? "✓" : "✗"} ${c.name}: ${c.message}`)
       .join("\n"),
-    durationMs: 0,
+    durationMs: Date.now() - preflightStart,
   };
   steps.push(preflightStep);
   onStep?.(preflightStep);
