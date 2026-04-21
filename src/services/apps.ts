@@ -104,6 +104,10 @@ export async function deployAppStreaming(
   onStep?: (step: import("../deploy/engine.js").DeployStep) => void,
 ) {
   const dir = await safeAppDir(name);
+  // Pre-pull config: preflight + pre_update consume this. The deploy engine
+  // re-loads .relay.yml after `git pull` so build/up/post_update/health see
+  // the post-pull config. Preflight intentionally runs against pre-pull —
+  // it answers "is it safe to pull?", not "will the new config work?".
   const config = await loadRelayConfig(dir);
 
   const preflight = await runPreflightChecks({ appDir: dir, config, force: options?.force });

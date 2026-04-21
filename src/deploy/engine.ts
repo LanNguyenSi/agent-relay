@@ -1,4 +1,4 @@
-import type { RelayConfig } from "../config/relay.js";
+import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
 import { shell } from "./exec.js";
 
 export interface DeployStep {
@@ -51,15 +51,16 @@ async function defaultFlowDeploy(
   steps: DeployStep[],
   start: number,
 ): Promise<DeployResult> {
-  const { appDir, config, onStep } = options;
+  const { appDir, config: prePullConfig, onStep } = options;
 
   function emit(step: DeployStep) {
     steps.push(step);
     onStep?.(step);
   }
 
-  // Pre-update commands
-  for (const cmd of config.pre_update) {
+  // Pre-update commands run against the PRE-pull working tree, so the
+  // pre-pull config is the right source of truth for them.
+  for (const cmd of prePullConfig.pre_update) {
     const step = await runStep(`pre_update: ${cmd}`, () => shell(cmd, appDir));
     emit(step);
     if (step.status === "failure") {
@@ -76,13 +77,38 @@ async function defaultFlowDeploy(
     return result(false, commitBefore, commitBefore, steps, start);
   }
 
+  // Re-load .relay.yml against the freshly-pulled tree. Anything below
+  // describes the NEW desired state (compose_file, post_update, health,
+  // health_port, rollback) and must see the post-pull values. Without
+  // this reload, a config edit shipped in the same commit as the code
+  // change it supports does not take effect until the NEXT deploy. If
+  // the new config is invalid, fail loudly and roll back — the tree is
+  // already at the new commit so the broken config is live.
+  const reloadStep = await runStep("reload .relay.yml", async () => {
+    try {
+      await loadRelayConfig(appDir);
+      return { stdout: "Re-read .relay.yml at new commit", stderr: "", exitCode: 0 };
+    } catch (err) {
+      const msg = err instanceof RelayConfigError ? err.message : String(err);
+      return { stdout: "", stderr: msg, exitCode: 1 };
+    }
+  });
+  emit(reloadStep);
+  if (reloadStep.status === "failure") {
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
+    const commitAfter = await getCurrentCommit(appDir);
+    return result(false, commitBefore, commitAfter, steps, start);
+  }
+  // Safe: reload step above already validated.
+  const config = await loadRelayConfig(appDir);
+
   // Docker compose build
   const buildStep = await runStep("compose build", () =>
     shell(`docker compose -f '${config.compose_file}' build`, appDir),
   );
   emit(buildStep);
   if (buildStep.status === "failure") {
-    await rollbackIfEnabled(config, appDir, commitBefore, steps);
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
     return result(false, commitBefore, commitBefore, steps, start);
   }
 
@@ -92,7 +118,7 @@ async function defaultFlowDeploy(
   );
   emit(upStep);
   if (upStep.status === "failure") {
-    await rollbackIfEnabled(config, appDir, commitBefore, steps);
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
     return result(false, commitBefore, commitBefore, steps, start);
   }
 
@@ -101,16 +127,16 @@ async function defaultFlowDeploy(
     const step = await runStep(`post_update: ${cmd}`, () => shell(cmd, appDir));
     emit(step);
     if (step.status === "failure") {
-      await rollbackIfEnabled(config, appDir, commitBefore, steps);
+      await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
       return result(false, commitBefore, commitBefore, steps, start);
     }
   }
 
-  // Health check
-  const healthOk = await runHealthCheck(options, steps);
+  // Health check uses the post-pull config (new health path / port).
+  const healthOk = await runHealthCheck({ ...options, config }, steps);
   if (steps.length > 0) onStep?.(steps[steps.length - 1]); // emit health check step
   if (!healthOk) {
-    await rollbackIfEnabled(config, appDir, commitBefore, steps);
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
     const commitAfter = await getCurrentCommit(appDir);
     return result(false, commitBefore, commitAfter, steps, start);
   }

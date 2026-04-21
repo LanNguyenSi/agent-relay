@@ -12,9 +12,11 @@ VPS deployment relay for AI agents. Runs as a daemon on your server and exposes 
 Each app on your VPS is a git repo with a `docker-compose.yml` and a `.relay.yml` config file. agent-relay manages the deploy lifecycle:
 
 1. **Pre-flight checks** -- validate config, containers, Traefik labels, git status
-2. **Deploy** -- `git pull`, `docker compose build`, `docker compose up -d`
+2. **Deploy** -- `pre_update` commands, `git pull`, **re-read `.relay.yml`**, `docker compose build`, `docker compose up -d`, `post_update` commands
 3. **Health check** -- HTTP health endpoint with exponential backoff retries
 4. **Auto-rollback** -- revert to previous commit on health check failure
+
+`.relay.yml` is re-read after `git pull` so config edits shipped in the same commit as the code they support take effect on that same deploy — `compose_file`, `post_update`, `health`, and `health_port` all use the post-pull values. Pre-flight checks and `pre_update` commands intentionally run against the pre-pull config (they answer "is it safe to pull?", not "will the new config work?"). Rollback also keeps the pre-pull config, because `git reset --hard` restores the old tree where the old `compose_file` is on disk.
 
 ## Architecture
 
