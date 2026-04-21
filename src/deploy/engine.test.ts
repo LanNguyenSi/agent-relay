@@ -1,15 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { RelayConfig } from "../config/relay.js";
+import { RelayConfigError, type RelayConfig } from "../config/relay.js";
 
 // Mock exec module
 vi.mock("./exec.js", () => ({
   shell: vi.fn(),
 }));
 
+// Mock loadRelayConfig so we can simulate `.relay.yml` mutating between
+// the pre-pull load (in services/apps.ts) and the post-pull reload (in
+// engine.ts). By default it returns whatever config the test passed in;
+// the bug-regression suite below overrides it per-test.
+vi.mock("../config/relay.js", async () => {
+  const actual = await vi.importActual<typeof import("../config/relay.js")>(
+    "../config/relay.js",
+  );
+  return { ...actual, loadRelayConfig: vi.fn() };
+});
+
 import { deploy } from "./engine.js";
 import { shell } from "./exec.js";
+import { loadRelayConfig } from "../config/relay.js";
 
 const mockShell = vi.mocked(shell);
+const mockLoadRelayConfig = vi.mocked(loadRelayConfig);
 
 const baseConfig: RelayConfig = {
   name: "test-app",
@@ -31,6 +44,9 @@ beforeEach(() => {
     return { stdout: "ok", stderr: "", exitCode: 0 };
   });
 
+  // Default: post-pull reload returns the same config as the caller passed.
+  // Tests that care about the pre/post-pull divergence override this.
+  mockLoadRelayConfig.mockImplementation(async () => baseConfig);
 });
 
 describe("deploy — default flow", () => {
@@ -41,6 +57,7 @@ describe("deploy — default flow", () => {
     expect(result.commitBefore).toBe("abc123");
     expect(result.steps.map((s) => s.name)).toEqual([
       "git pull",
+      "reload .relay.yml",
       "compose build",
       "compose up",
       "health check",
@@ -55,6 +72,7 @@ describe("deploy — default flow", () => {
       pre_update: ["make db-generate"],
       post_update: ["npx prisma migrate deploy"],
     };
+    mockLoadRelayConfig.mockResolvedValue(config);
 
     const result = await deploy({ appDir: "/app", config });
 
@@ -62,6 +80,7 @@ describe("deploy — default flow", () => {
     expect(result.steps.map((s) => s.name)).toEqual([
       "pre_update: make db-generate",
       "git pull",
+      "reload .relay.yml",
       "compose build",
       "compose up",
       "post_update: npx prisma migrate deploy",
@@ -74,6 +93,7 @@ describe("deploy — default flow", () => {
       ...baseConfig,
       compose_file: "docker-compose.prod.yml",
     };
+    mockLoadRelayConfig.mockResolvedValue(config);
 
     await deploy({ appDir: "/app", config });
 
@@ -139,6 +159,131 @@ describe("deploy — default flow", () => {
     expect(result.success).toBe(false);
     const rollbackStep = result.steps.find((s) => s.name === "rollback");
     expect(rollbackStep?.status).toBe("skipped");
+  });
+
+  // Regression for https://github.com/LanNguyenSi/agent-tasks task 7183a634:
+  // .relay.yml read before git pull → config changes took 2 deploys to apply.
+  describe("post-pull config reload", () => {
+    it("uses post-pull config for compose_file, post_update, health_port", async () => {
+      const prePull: RelayConfig = {
+        ...baseConfig,
+        compose_file: "docker-compose.yml",
+        post_update: [],
+        health_port: 3000,
+      };
+      const postPull: RelayConfig = {
+        ...baseConfig,
+        compose_file: "docker-compose.prod.yml",
+        post_update: ["npx prisma db push --accept-data-loss"],
+        health_port: 4000,
+      };
+      mockLoadRelayConfig.mockResolvedValue(postPull);
+
+      const result = await deploy({ appDir: "/app", config: prePull });
+      expect(result.success).toBe(true);
+
+      const cmds = mockShell.mock.calls.map(([c]) => c);
+
+      // compose build/up must reference the NEW compose_file
+      const buildCmd = cmds.find((c) => c.includes("compose") && c.includes("build"));
+      expect(buildCmd).toContain("docker-compose.prod.yml");
+      expect(buildCmd).not.toContain("'docker-compose.yml'");
+
+      // post_update from the NEW config must run
+      expect(cmds).toContain("npx prisma db push --accept-data-loss");
+
+      // health check must probe the NEW health_port
+      const healthProbe = cmds.find((c) => c.includes("node -e"));
+      expect(healthProbe).toContain("localhost:4000");
+      expect(healthProbe).not.toContain("localhost:3000");
+    });
+
+    it("uses pre-pull config for pre_update (runs before git pull)", async () => {
+      const prePull: RelayConfig = {
+        ...baseConfig,
+        pre_update: ["echo from-old-config"],
+      };
+      const postPull: RelayConfig = {
+        ...baseConfig,
+        pre_update: ["echo from-new-config"],
+      };
+      mockLoadRelayConfig.mockResolvedValue(postPull);
+
+      await deploy({ appDir: "/app", config: prePull });
+
+      const cmds = mockShell.mock.calls.map(([c]) => c);
+      expect(cmds).toContain("echo from-old-config");
+      expect(cmds).not.toContain("echo from-new-config");
+    });
+
+    it("rolls back using pre-pull compose_file when reload fails", async () => {
+      const prePull: RelayConfig = {
+        ...baseConfig,
+        compose_file: "docker-compose.yml",
+      };
+      mockLoadRelayConfig.mockRejectedValue(
+        new RelayConfigError("Invalid .relay.yml: missing 'name'"),
+      );
+
+      const result = await deploy({ appDir: "/app", config: prePull });
+      expect(result.success).toBe(false);
+
+      const reloadStep = result.steps.find((s) => s.name === "reload .relay.yml");
+      expect(reloadStep?.status).toBe("failure");
+      expect(reloadStep?.output).toContain("missing 'name'");
+
+      // Rollback must have fired (config was on a bad commit) and used the
+      // OLD compose_file — `git reset --hard` restored the OLD tree, so the
+      // NEW compose_file path may not exist.
+      const rollbackBuild = result.steps.find(
+        (s) => s.name === "rollback: compose build",
+      );
+      expect(rollbackBuild?.status).toBe("success");
+      const rollbackCmds = mockShell.mock.calls
+        .map(([c]) => c)
+        .filter((c) => c.includes("compose") && c.includes("build"));
+      expect(rollbackCmds.at(-1)).toContain("'docker-compose.yml'");
+    });
+
+    it("rollback after post-pull build failure uses pre-pull compose_file", async () => {
+      // Scenario: the pulled commit has a syntactically valid .relay.yml but
+      // it points compose_file at a path that the new tree does not actually
+      // contain. compose build fails. Rollback resets the tree to the OLD
+      // commit and must compose-build using the OLD compose_file (the path
+      // that exists at commitBefore), not the broken NEW one.
+      const prePull: RelayConfig = {
+        ...baseConfig,
+        compose_file: "docker-compose.yml",
+      };
+      const postPull: RelayConfig = {
+        ...baseConfig,
+        compose_file: "missing/compose.yml",
+      };
+      mockLoadRelayConfig.mockResolvedValue(postPull);
+      mockShell.mockImplementation(async (cmd) => {
+        if (cmd.startsWith("git rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (cmd.includes("'missing/compose.yml'") && cmd.includes("build")) {
+          return { stdout: "", stderr: "no such file", exitCode: 1 };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: prePull });
+      expect(result.success).toBe(false);
+
+      const rollbackBuild = result.steps.find(
+        (s) => s.name === "rollback: compose build",
+      );
+      expect(rollbackBuild).toBeDefined();
+      const lastBuildCmd = mockShell.mock.calls
+        .map(([c]) => c)
+        .filter((c) => c.includes("compose") && c.includes("build"))
+        .at(-1);
+      expect(lastBuildCmd).toContain("'docker-compose.yml'");
+      expect(lastBuildCmd).not.toContain("missing/compose.yml");
+    });
   });
 
   it("stops on pre_update failure", async () => {
