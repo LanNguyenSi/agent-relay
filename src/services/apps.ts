@@ -6,6 +6,17 @@ import { deploy } from "../deploy/engine.js";
 import { runPreflightChecks } from "../deploy/preflight.js";
 import { shell } from "../deploy/exec.js";
 
+// Preflight used to run here before git pull. That meant a commit that
+// *fixed* a broken .relay.yml (wrong compose_file, missing `command:`,
+// etc.) failed preflight against the still-broken pre-pull copy on
+// disk — the merged fix couldn't be applied. Preflight now runs inside
+// the deploy engine (`deploy/engine.ts`) against the post-pull config
+// for default-flow deploys; command-mode deploys keep the pre-command
+// preflight since the command is opaque. Operators who need the
+// standalone preflight view (e.g. the ops dashboard) use
+// `runPreflight(name)` below, which still reads the current working
+// tree.
+
 export { RelayConfigError };
 
 const APP_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -89,13 +100,7 @@ export async function getAppDetail(name: string) {
 export async function deployApp(name: string, options?: { branch?: string; force?: boolean }) {
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
-
-  const preflight = await runPreflightChecks({ appDir: dir, config, force: options?.force });
-  if (!preflight.passed) {
-    return { success: false, blocked: true, preflight };
-  }
-
-  return deploy({ appDir: dir, config, branch: options?.branch });
+  return deploy({ appDir: dir, config, branch: options?.branch, force: options?.force });
 }
 
 export async function deployAppStreaming(
@@ -104,18 +109,16 @@ export async function deployAppStreaming(
   onStep?: (step: import("../deploy/engine.js").DeployStep) => void,
 ) {
   const dir = await safeAppDir(name);
-  // Pre-pull config: preflight + pre_update consume this. The deploy engine
-  // re-loads .relay.yml after `git pull` so build/up/post_update/health see
-  // the post-pull config. Preflight intentionally runs against pre-pull —
-  // it answers "is it safe to pull?", not "will the new config work?".
+  // Pre-pull config: the engine re-loads .relay.yml after `git pull`
+  // so build/up/post_update/health/preflight see the post-pull config.
   const config = await loadRelayConfig(dir);
-
-  const preflight = await runPreflightChecks({ appDir: dir, config, force: options?.force });
-  if (!preflight.passed) {
-    return { success: false, blocked: true, preflight };
-  }
-
-  return deploy({ appDir: dir, config, branch: options?.branch, onStep });
+  return deploy({
+    appDir: dir,
+    config,
+    branch: options?.branch,
+    force: options?.force,
+    onStep,
+  });
 }
 
 export async function rollbackApp(name: string, toCommit?: string) {

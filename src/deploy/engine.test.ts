@@ -4,7 +4,22 @@ import { RelayConfigError, type RelayConfig } from "../config/relay.js";
 // Mock exec module
 vi.mock("./exec.js", () => ({
   shell: vi.fn(),
+  exec: vi.fn(),
 }));
+
+// Mock preflight — the engine now runs it after git pull + reload. Most
+// tests in this file don't care about preflight details; keep it passing
+// by default. Dedicated preflight tests (the `preflight gate` describe
+// below) override per-test.
+vi.mock("./preflight.js", async () => {
+  const actual = await vi.importActual<typeof import("./preflight.js")>(
+    "./preflight.js",
+  );
+  return {
+    ...actual,
+    runPreflightChecks: vi.fn(),
+  };
+});
 
 // Mock loadRelayConfig so we can simulate `.relay.yml` mutating between
 // the pre-pull load (in services/apps.ts) and the post-pull reload (in
@@ -20,9 +35,11 @@ vi.mock("../config/relay.js", async () => {
 import { deploy } from "./engine.js";
 import { shell } from "./exec.js";
 import { loadRelayConfig } from "../config/relay.js";
+import { runPreflightChecks } from "./preflight.js";
 
 const mockShell = vi.mocked(shell);
 const mockLoadRelayConfig = vi.mocked(loadRelayConfig);
+const mockRunPreflightChecks = vi.mocked(runPreflightChecks);
 
 const baseConfig: RelayConfig = {
   name: "test-app",
@@ -47,6 +64,15 @@ beforeEach(() => {
   // Default: post-pull reload returns the same config as the caller passed.
   // Tests that care about the pre/post-pull divergence override this.
   mockLoadRelayConfig.mockImplementation(async () => baseConfig);
+
+  // Default: preflight passes. Preflight-specific tests override.
+  mockRunPreflightChecks.mockResolvedValue({
+    passed: true,
+    checks: [
+      { name: "compose_file_exists", passed: true, message: "ok", critical: true },
+      { name: "health_defined", passed: true, message: "ok", critical: true },
+    ],
+  });
 });
 
 describe("deploy — default flow", () => {
@@ -58,6 +84,7 @@ describe("deploy — default flow", () => {
     expect(result.steps.map((s) => s.name)).toEqual([
       "git pull",
       "reload .relay.yml",
+      "preflight",
       "compose build",
       "compose up",
       "health check",
@@ -81,6 +108,7 @@ describe("deploy — default flow", () => {
       "pre_update: make db-generate",
       "git pull",
       "reload .relay.yml",
+      "preflight",
       "compose build",
       "compose up",
       "post_update: npx prisma migrate deploy",
@@ -348,6 +376,119 @@ describe("deploy — default flow", () => {
   });
 });
 
+// Regression for agent-tasks task 1210d61f:
+// Preflight used to run in services/apps.ts BEFORE git pull, so a commit
+// that fixed a broken .relay.yml never got applied — preflight kept failing
+// against the stale pre-pull config on disk. Preflight now runs inside
+// deploy() after pull+reload, so the merged fix wins on the first deploy.
+describe("deploy — preflight gate", () => {
+  it("runs preflight AFTER git pull + reload (default flow)", async () => {
+    const onStep = vi.fn();
+    const result = await deploy({ appDir: "/app", config: baseConfig, onStep });
+    expect(result.success).toBe(true);
+    const names = result.steps.map((s) => s.name);
+    // Ordering invariant: pull → reload → preflight → build …
+    expect(names.indexOf("preflight")).toBeGreaterThan(names.indexOf("git pull"));
+    expect(names.indexOf("preflight")).toBeGreaterThan(names.indexOf("reload .relay.yml"));
+    expect(names.indexOf("preflight")).toBeLessThan(names.indexOf("compose build"));
+  });
+
+  it("regression: preflight against a broken pre-pull config but fixed post-pull config SUCCEEDS", async () => {
+    // Scenario: a commit fixes .relay.yml (pre-pull = busted, post-pull = ok).
+    // Pre-PR: deployAppStreaming read pre-pull config → preflight failed →
+    // deploy never reached git pull → broken config stays on disk → next
+    // deploy repeats the same failure forever. Operator workaround was SSH
+    // + manual `git pull`.
+    //
+    // Post-PR: preflight runs AFTER pull+reload, so it sees the fixed
+    // post-pull config. Deploy proceeds.
+    const prePullBusted: RelayConfig = {
+      ...baseConfig,
+      // Points at a non-compose file — mimics the agent-planforge #63 bug.
+      compose_file: "server/Dockerfile",
+    };
+    const postPullFixed: RelayConfig = {
+      ...baseConfig,
+      compose_file: "docker-compose.yml",
+    };
+    mockLoadRelayConfig.mockResolvedValue(postPullFixed);
+    // Preflight only sees what `deploy()` passes in (= post-pull config).
+    // The mock just asserts "was invoked with compose_file=docker-compose.yml"
+    // by returning pass only in that case.
+    mockRunPreflightChecks.mockImplementation(async (opts) => {
+      if (opts.config.compose_file === "docker-compose.yml") {
+        return { passed: true, checks: [] };
+      }
+      return {
+        passed: false,
+        checks: [
+          { name: "compose_file_exists", passed: false, message: "bad file", critical: true },
+        ],
+      };
+    });
+
+    const result = await deploy({ appDir: "/app", config: prePullBusted });
+    expect(result.success).toBe(true);
+    expect("blocked" in result && result.blocked).toBeFalsy();
+    // Verify preflight actually got the post-pull config.
+    const callArgs = mockRunPreflightChecks.mock.calls[0][0];
+    expect(callArgs.config.compose_file).toBe("docker-compose.yml");
+  });
+
+  it("blocks the deploy with a DeployBlockedResult when preflight fails", async () => {
+    mockRunPreflightChecks.mockResolvedValue({
+      passed: false,
+      checks: [
+        { name: "compose_file_exists", passed: false, message: "not found", critical: true },
+        { name: "health_defined", passed: true, message: "/health", critical: true },
+      ],
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+    expect(result.success).toBe(false);
+    expect("blocked" in result && result.blocked).toBe(true);
+    if ("blocked" in result) {
+      expect(result.preflight.passed).toBe(false);
+      expect(result.preflight.checks).toHaveLength(2);
+      // Preflight step is emitted to the stream as a failure
+      const preflightStep = result.steps.find((s) => s.name === "preflight");
+      expect(preflightStep?.status).toBe("failure");
+      // No compose build / up ran — we aborted before them
+      expect(result.steps.find((s) => s.name === "compose build")).toBeUndefined();
+    }
+  });
+
+  it("command-mode preflight runs BEFORE the command (pre-pull gate preserved)", async () => {
+    // Command mode is opaque — the command may or may not pull, so preflight
+    // happens pre-command against whatever .relay.yml is on disk. This
+    // matches the pre-PR behavior for command mode.
+    const config: RelayConfig = { ...baseConfig, command: "./custom.sh" };
+    const result = await deploy({ appDir: "/app", config });
+    expect(result.success).toBe(true);
+    const names = result.steps.map((s) => s.name);
+    expect(names.indexOf("preflight")).toBe(0);
+    expect(names.indexOf("preflight")).toBeLessThan(names.indexOf("command: ./custom.sh"));
+  });
+
+  it("command-mode preflight failure blocks before the command runs", async () => {
+    mockRunPreflightChecks.mockResolvedValue({
+      passed: false,
+      checks: [{ name: "compose_file_exists", passed: false, message: "x", critical: true }],
+    });
+    const config: RelayConfig = { ...baseConfig, command: "./custom.sh" };
+    const result = await deploy({ appDir: "/app", config });
+    expect(result.success).toBe(false);
+    expect("blocked" in result && result.blocked).toBe(true);
+    expect(result.steps.find((s) => s.name.startsWith("command:"))).toBeUndefined();
+  });
+
+  it("propagates `force` into preflight (non-critical checks skipped)", async () => {
+    await deploy({ appDir: "/app", config: baseConfig, force: true });
+    const callArgs = mockRunPreflightChecks.mock.calls[0][0];
+    expect(callArgs.force).toBe(true);
+  });
+});
+
 describe("deploy — custom command flow", () => {
   it("runs custom command instead of default flow", async () => {
     const config: RelayConfig = { ...baseConfig, command: "./deploy.sh" };
@@ -356,6 +497,7 @@ describe("deploy — custom command flow", () => {
 
     expect(result.success).toBe(true);
     expect(result.steps.map((s) => s.name)).toEqual([
+      "preflight",
       "command: ./deploy.sh",
       "health check",
     ]);
