@@ -245,6 +245,49 @@ describe("deploy — default flow", () => {
       expect(rollbackCmds.at(-1)).toContain("'docker-compose.yml'");
     });
 
+    it("rollback boolean honors pre-pull config, not post-pull", async () => {
+      // Intentional invariant: rollback is a safety net. An operator
+      // shipping a bad commit that ALSO disables rollback in the same
+      // commit should NOT be able to strand the server — the pre-pull
+      // `rollback: true` keeps the safety net on for the deploy that
+      // introduces the change. Flipping to `rollback: false` only takes
+      // effect on the NEXT deploy.
+      const prePull: RelayConfig = { ...baseConfig, rollback: true };
+      const postPull: RelayConfig = { ...baseConfig, rollback: false };
+      mockLoadRelayConfig.mockResolvedValue(postPull);
+      mockShell.mockImplementation(async (cmd) => {
+        if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
+        if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
+        if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 }; // health fails
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: prePull });
+
+      expect(result.success).toBe(false);
+      // Pre-pull rollback=true wins: rollback steps must fire
+      const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
+      expect(rollbackSteps.length).toBe(3);
+      // Verify the skipped-rollback branch did NOT fire (would have produced
+      // a single "rollback" step with status=skipped)
+      expect(result.steps.find((s) => s.name === "rollback" && s.status === "skipped"))
+        .toBeUndefined();
+    });
+
+    it("emits `reload .relay.yml` on the onStep stream", async () => {
+      const seen: string[] = [];
+      await deploy({
+        appDir: "/app",
+        config: baseConfig,
+        onStep: (s) => seen.push(s.name),
+      });
+      expect(seen).toContain("reload .relay.yml");
+      // Must appear between git pull and compose build
+      expect(seen.indexOf("reload .relay.yml")).toBeGreaterThan(seen.indexOf("git pull"));
+      expect(seen.indexOf("reload .relay.yml")).toBeLessThan(seen.indexOf("compose build"));
+    });
+
     it("rollback after post-pull build failure uses pre-pull compose_file", async () => {
       // Scenario: the pulled commit has a syntactically valid .relay.yml but
       // it points compose_file at a path that the new tree does not actually
