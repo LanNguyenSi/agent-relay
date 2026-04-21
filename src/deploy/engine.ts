@@ -1,4 +1,5 @@
 import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
+import { runPreflightChecks, type PreflightReport } from "./preflight.js";
 import { shell } from "./exec.js";
 
 export interface DeployStep {
@@ -16,15 +17,39 @@ export interface DeployResult {
   steps: DeployStep[];
 }
 
+/**
+ * Returned when preflight rejects the deploy. Distinct shape from a
+ * regular DeployResult because the HTTP / MCP surface emits a dedicated
+ * `blocked` event for this case so dashboards can show a preflight UI
+ * instead of a generic "deploy failed" banner.
+ */
+export interface DeployBlockedResult {
+  success: false;
+  blocked: true;
+  preflight: PreflightReport;
+  durationMs: number;
+  commitBefore: string;
+  commitAfter: string;
+  steps: DeployStep[];
+}
+
 export interface DeployOptions {
   appDir: string;
   config: RelayConfig;
   branch?: string;
   healthBaseUrl?: string;
   onStep?: (step: DeployStep) => void;
+  /**
+   * Skip non-critical preflight checks. Mirrors the API's `force` query
+   * param — the critical ones (`compose_file_exists`, `health_defined`)
+   * still gate because a deploy with those failing cannot succeed.
+   */
+  force?: boolean;
 }
 
-export async function deploy(options: DeployOptions): Promise<DeployResult> {
+export async function deploy(
+  options: DeployOptions,
+): Promise<DeployResult | DeployBlockedResult> {
   const { appDir, config } = options;
   // Detect current branch if not specified
   let branch = options.branch;
@@ -50,7 +75,7 @@ async function defaultFlowDeploy(
   commitBefore: string,
   steps: DeployStep[],
   start: number,
-): Promise<DeployResult> {
+): Promise<DeployResult | DeployBlockedResult> {
   const { appDir, config: prePullConfig, onStep } = options;
 
   function emit(step: DeployStep) {
@@ -102,6 +127,38 @@ async function defaultFlowDeploy(
   // Safe: reload step above already validated.
   const config = await loadRelayConfig(appDir);
 
+  // Preflight against the POST-pull config. Pre-PR #64 this ran in
+  // `services/apps.ts` before pull, so a commit that *fixed* a broken
+  // `.relay.yml` would fail preflight against the still-broken pre-pull
+  // copy on disk — the merged fix never got a chance to apply. Post-pull
+  // preflight means "is the new state safe to deploy?" — which is what
+  // operators actually want. No rollback on failure: the tree is at the
+  // new commit but nothing else has changed; the running containers are
+  // still on the old image.
+  const preflightStart = Date.now();
+  const preflight = await runPreflightChecks({ appDir, config, force: options.force });
+  const preflightStep: DeployStep = {
+    name: "preflight",
+    status: preflight.passed ? "success" : "failure",
+    output: preflight.checks
+      .map((c) => `${c.passed ? "✓" : "✗"} ${c.name}: ${c.message}`)
+      .join("\n"),
+    durationMs: Date.now() - preflightStart,
+  };
+  emit(preflightStep);
+  if (!preflight.passed) {
+    const commitAfter = await getCurrentCommit(appDir);
+    return {
+      success: false,
+      blocked: true,
+      preflight,
+      durationMs: Date.now() - start,
+      commitBefore,
+      commitAfter,
+      steps,
+    };
+  }
+
   // Docker compose build
   const buildStep = await runStep("compose build", () =>
     shell(`docker compose -f '${config.compose_file}' build`, appDir),
@@ -150,13 +207,46 @@ async function customCommandDeploy(
   commitBefore: string,
   steps: DeployStep[],
   start: number,
-): Promise<DeployResult> {
-  const { appDir, config } = options;
+): Promise<DeployResult | DeployBlockedResult> {
+  const { appDir, config, onStep } = options;
+
+  // Preflight in command mode runs pre-command. The command is opaque
+  // — it may or may not pull — so there's no natural post-pull
+  // checkpoint to gate on. This matches the behavior before PR #64 and
+  // keeps command-mode deploys' first-run semantics unchanged. For the
+  // common command-mode use case (`git pull && docker compose build
+  // …`), this does mean preflight sees the pre-pull config; operators
+  // who edit .relay.yml in command mode should expect one stale
+  // preflight before the next deploy picks up the new config.
+  const preflightStart = Date.now();
+  const preflight = await runPreflightChecks({ appDir, config, force: options.force });
+  const preflightStep: DeployStep = {
+    name: "preflight",
+    status: preflight.passed ? "success" : "failure",
+    output: preflight.checks
+      .map((c) => `${c.passed ? "✓" : "✗"} ${c.name}: ${c.message}`)
+      .join("\n"),
+    durationMs: Date.now() - preflightStart,
+  };
+  steps.push(preflightStep);
+  onStep?.(preflightStep);
+  if (!preflight.passed) {
+    return {
+      success: false,
+      blocked: true,
+      preflight,
+      durationMs: Date.now() - start,
+      commitBefore,
+      commitAfter: commitBefore,
+      steps,
+    };
+  }
 
   const cmdStep = await runStep(`command: ${config.command}`, () =>
     shell(config.command!, appDir),
   );
   steps.push(cmdStep);
+  onStep?.(cmdStep);
   if (cmdStep.status === "failure") {
     return result(false, commitBefore, commitBefore, steps, start);
   }
