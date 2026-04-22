@@ -70,12 +70,18 @@ rollback: true                      # auto-rollback on health check failure (def
 |-------|------|----------|---------|-------------|
 | `name` | `string` | Yes | -- | App identifier |
 | `health` | `string` | Yes | -- | Health check endpoint path (e.g. `/api/health`) |
-| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name |
-| `command` | `string` | No | -- | Custom deploy command (replaces default git+compose flow) |
-| `pre_update` | `string[]` | No | `[]` | Commands to run before the deploy |
-| `post_update` | `string[]` | No | `[]` | Commands to run after compose up |
+| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name. Must match `[A-Za-z0-9._/-]+` and not contain `..` segments — value is interpolated into shell. |
+| `command` | `string` | No | -- | Custom deploy command (replaces default git+compose flow). **Arbitrary shell.** |
+| `pre_update` | `string[]` | No | `[]` | Commands to run before the deploy. **Arbitrary shell.** |
+| `post_update` | `string[]` | No | `[]` | Commands to run after compose up. **Arbitrary shell.** |
 | `health_port` | `number` | No | -- | Port for health check requests (if different from Traefik-routed port) |
 | `rollback` | `boolean` | No | `true` | Auto-rollback to previous commit on failure |
+
+### Trust boundary
+
+`command`, `pre_update`, and `post_update` execute as arbitrary shell on the deploy host. The implicit trust boundary is **push access to the deployed branch** — anyone who can land a commit that edits `.relay.yml` can run anything as the relay user. Treat the deploy branch like a deploy key.
+
+`compose_file` is the one exception: it is path-restricted (`[A-Za-z0-9._/-]+`, no `..`) so a typo or a hostile commit cannot escape the single-quoted shell context where it is interpolated.
 
 ## HTTP API reference
 
