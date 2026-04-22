@@ -499,6 +499,7 @@ describe("deploy — custom command flow", () => {
     expect(result.steps.map((s) => s.name)).toEqual([
       "preflight",
       "command: ./deploy.sh",
+      "reload .relay.yml",
       "health check",
     ]);
     // No git pull, compose build/up
@@ -518,6 +519,62 @@ describe("deploy — custom command flow", () => {
 
     expect(result.success).toBe(false);
     expect(result.steps.find((s) => s.name.startsWith("rollback:"))).toBeDefined();
+  });
+
+  it("reloads .relay.yml after the custom command so health uses post-command config", async () => {
+    const preCommand: RelayConfig = { ...baseConfig, command: "./deploy.sh", health: "/old-health" };
+    const postCommand: RelayConfig = { ...baseConfig, command: "./deploy.sh", health: "/new-health" };
+    mockLoadRelayConfig.mockResolvedValue(postCommand);
+
+    let probedPath = "";
+    mockShell.mockImplementation(async (cmd) => {
+      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
+      if (cmd.includes("node -e")) {
+        const match = cmd.match(/fetch\('http:\/\/localhost:\d+(\/[^']+)'\)/);
+        if (match) probedPath = match[1]!;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: preCommand });
+
+    expect(result.success).toBe(true);
+    expect(probedPath).toBe("/new-health");
+  });
+
+  it("rolls back with pre-command config when reload fails", async () => {
+    const preCommand: RelayConfig = { ...baseConfig, command: "./deploy.sh", compose_file: "pre.yml" };
+    mockLoadRelayConfig.mockRejectedValue(
+      new (await import("../config/relay.js")).RelayConfigError("Invalid .relay.yml:\n  name: required"),
+    );
+
+    const result = await deploy({ appDir: "/app", config: preCommand });
+
+    expect(result.success).toBe(false);
+    const reloadStep = result.steps.find((s) => s.name === "reload .relay.yml");
+    expect(reloadStep?.status).toBe("failure");
+    expect(reloadStep?.output).toContain("Invalid .relay.yml");
+    // Rollback uses pre-command compose_file.
+    const rollbackBuild = result.steps.find((s) => s.name === "rollback: compose build");
+    expect(rollbackBuild).toBeDefined();
+    const rollbackRebuild = mockShell.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("docker compose") && c[0].includes("pre.yml") && c[0].includes("build"),
+    );
+    expect(rollbackRebuild).toBeDefined();
+    // Health check must not have run — reload failed before it.
+    expect(result.steps.find((s) => s.name === "health check")).toBeUndefined();
+  });
+
+  it("emits reload .relay.yml on the onStep stream after command", async () => {
+    const config: RelayConfig = { ...baseConfig, command: "./deploy.sh" };
+    const seen: string[] = [];
+    await deploy({ appDir: "/app", config, onStep: (s) => seen.push(s.name) });
+
+    expect(seen).toContain("reload .relay.yml");
+    expect(seen.indexOf("reload .relay.yml")).toBeGreaterThan(seen.indexOf("command: ./deploy.sh"));
+    expect(seen.indexOf("reload .relay.yml")).toBeLessThan(seen.indexOf("health check"));
   });
 });
 

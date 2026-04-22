@@ -208,7 +208,7 @@ async function customCommandDeploy(
   steps: DeployStep[],
   start: number,
 ): Promise<DeployResult | DeployBlockedResult> {
-  const { appDir, config, onStep } = options;
+  const { appDir, config: preCommandConfig, onStep } = options;
 
   // Preflight in command mode runs pre-command. The command is opaque
   // — it may or may not pull — so there's no natural post-pull
@@ -219,7 +219,7 @@ async function customCommandDeploy(
   // who edit .relay.yml in command mode should expect one stale
   // preflight before the next deploy picks up the new config.
   const preflightStart = Date.now();
-  const preflight = await runPreflightChecks({ appDir, config, force: options.force });
+  const preflight = await runPreflightChecks({ appDir, config: preCommandConfig, force: options.force });
   const preflightStep: DeployStep = {
     name: "preflight",
     status: preflight.passed ? "success" : "failure",
@@ -242,8 +242,8 @@ async function customCommandDeploy(
     };
   }
 
-  const cmdStep = await runStep(`command: ${config.command}`, () =>
-    shell(config.command!, appDir),
+  const cmdStep = await runStep(`command: ${preCommandConfig.command}`, () =>
+    shell(preCommandConfig.command!, appDir),
   );
   steps.push(cmdStep);
   onStep?.(cmdStep);
@@ -251,9 +251,36 @@ async function customCommandDeploy(
     return result(false, commitBefore, commitBefore, steps, start);
   }
 
-  const healthOk = await runHealthCheck(options, steps);
+  // The custom command is opaque — it may have run `git pull` and the
+  // pulled commit may have edited `.relay.yml`. Mirror the default-flow
+  // reload so subsequent health and rollback steps see post-command
+  // values (`health`, `health_port`, `rollback`, `compose_file`). If
+  // the command did not touch `.relay.yml` this is a cheap idempotent
+  // re-read. If it broke the config we fail loudly and roll back with
+  // the pre-command config — the tree may already be at a new commit.
+  const reloadStep = await runStep("reload .relay.yml", async () => {
+    try {
+      await loadRelayConfig(appDir);
+      return { stdout: "Re-read .relay.yml after custom command", stderr: "", exitCode: 0 };
+    } catch (err) {
+      const msg = err instanceof RelayConfigError ? err.message : String(err);
+      return { stdout: "", stderr: msg, exitCode: 1 };
+    }
+  });
+  steps.push(reloadStep);
+  onStep?.(reloadStep);
+  if (reloadStep.status === "failure") {
+    await rollbackIfEnabled(preCommandConfig, appDir, commitBefore, steps);
+    const commitAfter = await getCurrentCommit(appDir);
+    return result(false, commitBefore, commitAfter, steps, start);
+  }
+  // Safe: reload step above already validated.
+  const config = await loadRelayConfig(appDir);
+
+  const healthOk = await runHealthCheck({ ...options, config }, steps);
+  if (steps.length > 0) onStep?.(steps[steps.length - 1]!); // emit health check step
   if (!healthOk) {
-    await rollbackIfEnabled(config, appDir, commitBefore, steps);
+    await rollbackIfEnabled(preCommandConfig, appDir, commitBefore, steps);
     const commitAfter = await getCurrentCommit(appDir);
     return result(false, commitBefore, commitAfter, steps, start);
   }
