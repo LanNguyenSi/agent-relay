@@ -1,15 +1,22 @@
 import { z } from "zod";
 import * as yaml from "js-yaml";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 // `compose_file` is interpolated into shell via single quotes in
 // src/deploy/engine.ts (`docker compose -f '${config.compose_file}' …`).
 // A literal `'` would terminate the quoted context and let the rest of
 // the value execute as shell. Restrict to a conservative filename charset
-// (letters, digits, dot, underscore, slash, hyphen) and forbid `..` so a
-// value can never break out of the quoting OR traverse out of the app
-// directory.
+// (letters, digits, dot, underscore, slash, hyphen) so a value can never
+// break out of the quoting.
+//
+// Path-traversal containment (`..`-escapes-outside-APPS_DIR) is enforced
+// separately in `loadRelayConfig`, where we have `appDir` and can
+// resolve against the filesystem. That lets legitimate sibling-app
+// patterns (`compose_file: ../other-app/docker-compose.yml`) validate
+// when the resolved path stays under APPS_DIR, while deeper escapes
+// (`../../etc/passwd`) still fail. Doing this at parse time would have
+// forced a lexical ban on all `..` which is too strict.
 //
 // `command`, `pre_update`, and `post_update` remain deliberately
 // permissive — they are documented as arbitrary shell, and the trust
@@ -32,10 +39,6 @@ export const relayConfigSchema = z.object({
     .refine(
       (v) => !v.startsWith("/"),
       "compose_file must be a path relative to the app directory, not absolute",
-    )
-    .refine(
-      (v) => !v.split("/").includes(".."),
-      "compose_file must not contain '..' path segments",
     )
     .default("docker-compose.yml"),
   command: z.string().optional(),
@@ -67,6 +70,38 @@ export function parseRelayConfig(content: string): RelayConfig {
   return result.data;
 }
 
+/**
+ * Reject a compose_file whose resolved filesystem location escapes the
+ * apps-root directory (the parent of `appDir`). This is the "what the
+ * lexical `..`-ban used to try to prevent" check — except it accepts
+ * the legitimate sibling-app case (`../other-app/docker-compose.yml`
+ * resolves to `APPS_DIR/other-app/docker-compose.yml`, which stays
+ * within APPS_DIR) while still rejecting deeper traversals like
+ * `../../etc/passwd`.
+ *
+ * APPS_DIR is derived as `resolve(appDir, "..")` — agent-relay treats
+ * every `appDir` as a direct child of the apps root, which is how
+ * both the dev mount (`./apps/<name>`) and the production bind mount
+ * (`/root/git/<name>` → `/apps/<name>` inside the container) are
+ * structured. Deploys never address apps via other layouts.
+ */
+export function assertComposeFileContained(
+  appDir: string,
+  composeFile: string,
+): void {
+  const resolved = resolve(appDir, composeFile);
+  const appsDir = resolve(appDir, "..");
+  // `startsWith(appsDir + sep)` (not just `appsDir`) prevents a
+  // sibling-name prefix false-positive: without the trailing separator,
+  // `appsDir = /apps` would accept `/appsteak/...` as "contained".
+  if (!resolved.startsWith(appsDir + sep) && resolved !== appsDir) {
+    throw new RelayConfigError(
+      `compose_file resolves outside the apps directory ` +
+        `(${resolved} is not under ${appsDir})`,
+    );
+  }
+}
+
 export async function loadRelayConfig(appDir: string): Promise<RelayConfig> {
   const configPath = join(appDir, ".relay.yml");
 
@@ -84,7 +119,9 @@ export async function loadRelayConfig(appDir: string): Promise<RelayConfig> {
     );
   }
 
-  return parseRelayConfig(content);
+  const config = parseRelayConfig(content);
+  assertComposeFileContained(appDir, config.compose_file);
+  return config;
 }
 
 export class RelayConfigError extends Error {
