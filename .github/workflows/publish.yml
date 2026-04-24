@@ -55,9 +55,13 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=main-,enable={{is_default_branch}}
             # tag push → semver tags, e.g. v0.2.0 → `:0.2.0`, `:0.2`, `:latest`
+            # `pattern=latest` would be a literal Go-template string, not
+            # the "latest" shortcut — we use a raw entry guarded on the
+            # tag ref instead. Set-dedupes with the is_default_branch
+            # entry above when both conditions happen to match.
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern=latest
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=agent-relay
             org.opencontainers.image.description=VPS deployment relay for AI agents
