@@ -7,17 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-24
+
 ### Changed
 
 - **Pre-flight now runs AFTER `git pull` + `.relay.yml` reload.** Default-flow deploys previously invoked pre-flight in `services/apps.ts` before the engine had a chance to pull. That meant a commit that *fixed* a broken `.relay.yml` (wrong `compose_file`, missing `command:` field, etc.) would keep failing on every first-deploy-after-merge because pre-flight saw the stale pre-pull copy — operators had to SSH in and run `git pull` by hand before the fix applied. Pre-flight is now a step inside `defaultFlowDeploy` that runs against the post-pull config, with a corresponding `preflight` entry in the SSE step stream. Command-mode deploys keep pre-flight pre-command (the command is opaque). Failure returns a new `DeployBlockedResult` shape; the API contract (`{ success: false, blocked: true, preflight }`) is preserved.
+- **`compose_file` containment moved from lexical `..`-ban to filesystem-aware check.** The lexical ban blocked legitimate sibling-app patterns like `compose_file: ../project-forge/docker-compose.yml` (used by agent-planforge to route its panel deploy through project-forge's compose stack). `assertComposeFileContained` now resolves the value against `appDir` at load time and verifies the result stays under `resolve(appDir, "..")` — accepts sibling apps while still rejecting `../../etc/passwd` and embedded traversals. `startsWith(appsDir + sep)` guard prevents a sibling-name-prefix false positive (`apps` vs `appsteak`). Regex + absolute-path bans remain at parse time.
+- `customCommandDeploy` re-reads `.relay.yml` after the command step so post-command config changes apply on the same run, matching the default-flow behaviour.
 
 ### Added
 
 - `DeployOptions.force` (boolean). Propagates the HTTP API's existing `?force=true` query-param into pre-flight so non-critical checks can be skipped — identical semantics to what `services/apps.ts` did before the move.
+- `compose_file` zod schema gains a shell-char regex + absolute-path rejection at parse time.
+
+### Fixed
+
+- vitest `include` now restricts to `src/` so compiled tests under `dist/` aren't picked up after `npm run build`, avoiding a double-run under CI.
 
 ### Notes
 
 - `checkGitClean` and `checkGitRemoteReachable` become tautologies in default-flow pre-flight (a successful pull proves both). They stay meaningful for command-mode deploys and for the standalone `GET /api/apps/:name/preflight` endpoint. A clean pre-/post-pull split is filed as a follow-up.
+- Symlink containment in `compose_file` uses lexical `path.resolve`, not `realpath`. Matches the threat model (push access to `.relay.yml` already grants RCE via `command:`/`pre_update`/`post_update`), but filed as defense-in-depth follow-up (`9421be77`).
 
 ## [0.1.0] - 2026-04-18
 
