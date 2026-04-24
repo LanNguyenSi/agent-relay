@@ -52,8 +52,8 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 log()  { echo -e "${GREEN}[✓]${NC} $1"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-err()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
+warn() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
+err()  { echo -e "${RED}[✗]${NC} $1" >&2; exit 1; }
 info() { echo -e "${CYAN}[i]${NC} $1"; }
 
 # ── Pre-checks ─────────────────────────────────────────────────────────────
@@ -67,6 +67,23 @@ case "$RELAY_MODE" in
   auto|greenfield|existing-traefik|port-only) ;;
   *) err "Invalid RELAY_MODE='$RELAY_MODE'. Expected: auto | greenfield | existing-traefik | port-only" ;;
 esac
+
+# Validate values that get interpolated into compose files / Traefik labels /
+# heredocs later. A newline in RELAY_DOMAIN would break compose YAML; a shell
+# metachar in TRAEFIK_NETWORK would break the labels. Reject early with a
+# clear error instead of failing deep inside docker compose.
+validate_value() {
+  local name="$1" value="$2" pattern="$3"
+  [ -z "$value" ] && return 0
+  [[ "$value" =~ ^${pattern}$ ]] || err "${name}='${value}' has invalid characters (expected: ${pattern})."
+}
+
+validate_value RELAY_DOMAIN        "$RELAY_DOMAIN"        '[A-Za-z0-9.-]+'
+validate_value TRAEFIK_NETWORK     "$TRAEFIK_NETWORK"     '[A-Za-z0-9._-]+'
+validate_value TRAEFIK_CERTRESOLVER "$TRAEFIK_CERTRESOLVER" '[A-Za-z0-9_-]+'
+validate_value RELAY_BIND          "$RELAY_BIND"          '[0-9a-fA-F:.]+'
+validate_value TRAEFIK_EMAIL       "$TRAEFIK_EMAIL"       '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+'
+validate_value RELAY_PORT          "$RELAY_PORT"          '[0-9]+'
 
 # ── Step 1: Docker ─────────────────────────────────────────────────────────
 if command -v docker &>/dev/null; then
@@ -90,16 +107,35 @@ detect_port80_container() {
     | awk -F'\t' '$2 ~ /:80->/ { print $1; exit }'
 }
 
-# Returns "traefik" if the given container's image looks like Traefik, else empty.
-# Matches `traefik:*`, `*/traefik:*`, and the bare `traefik` tag.
+# Matches `traefik`, `traefik:*`, `*/traefik`, `*/traefik:*`.
+is_traefik_image() {
+  case "$1" in
+    traefik|traefik:*|*/traefik|*/traefik:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_traefik_container() {
   local name="$1"
   local image
   image=$(docker inspect --format '{{.Config.Image}}' "$name" 2>/dev/null || true)
-  case "$image" in
-    traefik|traefik:*|*/traefik|*/traefik:*) return 0 ;;
-    *) return 1 ;;
-  esac
+  is_traefik_image "$image"
+}
+
+# Returns the name of the first Traefik container attached to the given
+# network, or empty if none are. Guards existing-traefik mode against a
+# dangling network where Traefik was torn down.
+traefik_container_on_network() {
+  local net="$1" name image
+  docker ps --filter "network=${net}" --format '{{.Names}}' 2>/dev/null \
+    | while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        image=$(docker inspect --format '{{.Config.Image}}' "$name" 2>/dev/null || true)
+        if is_traefik_image "$image"; then
+          echo "$name"
+          return 0
+        fi
+      done
 }
 
 # First non-default network of a container (skips bridge/host/none).
@@ -142,12 +178,11 @@ port80_owner() {
   fi
   # Not a docker container — check with ss for any other listener.
   if ! command -v ss &>/dev/null; then
-    # iproute2 missing (very unusual on Ubuntu/Debian); can't tell.
-    if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ':80$'; then
-      echo "unknown"
-    else
-      echo "free"
-    fi
+    # iproute2 missing (very unusual on Ubuntu/Debian). Can't tell if :80 is
+    # free without docker evidence; be conservative and report unknown so
+    # auto-mode falls back through the non-traefik branch instead of
+    # silently greenfielding on top of whatever is there.
+    echo "unknown"
     return
   fi
   local listener
@@ -177,15 +212,24 @@ if [ "$RELAY_MODE" = "auto" ]; then
       info "Detection: port 80 free → mode=greenfield"
       ;;
     traefik)
-      RELAY_MODE="existing-traefik"
-      info "Detection: existing Traefik container '${OWNER_NAME}' on :80 → mode=existing-traefik"
+      # If the Traefik we're seeing is the one we provisioned on an earlier
+      # greenfield run (container named 'traefik' with our /opt/traefik
+      # compose on disk), stay in greenfield so the compose shape doesn't
+      # silently flip between runs (ports → expose, etc.).
+      if [ "$OWNER_NAME" = "traefik" ] && [ -f "/opt/traefik/docker-compose.yml" ]; then
+        RELAY_MODE="greenfield"
+        info "Detection: own Traefik from prior greenfield install on :80 → mode=greenfield (rerun-stable)"
+      else
+        RELAY_MODE="existing-traefik"
+        info "Detection: existing Traefik container '${OWNER_NAME}' on :80 → mode=existing-traefik"
+      fi
       ;;
     docker|proc|unknown)
-      local_owner="${OWNER_NAME:-<unknown>}"
+      owner_label="${OWNER_NAME:-<unknown>}"
       if [ -n "$RELAY_DOMAIN" ]; then
         echo ""
         err "$(cat <<BANNER
-Port 80 is owned by: ${local_owner}
+Port 80 is owned by: ${owner_label}
 
 RELAY_MODE=auto refuses to continue because RELAY_DOMAIN='${RELAY_DOMAIN}' is set
 and we cannot route it through an unknown reverse proxy without your input.
@@ -194,14 +238,14 @@ Options:
   (a) Free the port (stop the process/container on :80) and re-run.
   (b) Run with RELAY_MODE=port-only for no-TLS access on RELAY_BIND:${RELAY_PORT}.
   (c) Run with RELAY_MODE=existing-traefik (plus TRAEFIK_NETWORK / TRAEFIK_CERTRESOLVER
-      overrides if needed) if '${local_owner}' is actually your reverse proxy.
+      overrides if needed) if '${owner_label}' is actually your reverse proxy.
 
 No changes have been written yet.
 BANNER
 )"
       else
         RELAY_MODE="port-only"
-        info "Detection: port 80 owned by '${local_owner}' and RELAY_DOMAIN unset → mode=port-only"
+        info "Detection: port 80 owned by '${owner_label}' and RELAY_DOMAIN unset → mode=port-only"
       fi
       ;;
   esac
@@ -231,11 +275,15 @@ case "$RELAY_MODE" in
     if ! docker network inspect "$TRAEFIK_NETWORK" &>/dev/null; then
       err "TRAEFIK_NETWORK='${TRAEFIK_NETWORK}' does not exist. Override with TRAEFIK_NETWORK=<name of existing Traefik's network>."
     fi
+    traefik_on_net=$(traefik_container_on_network "$TRAEFIK_NETWORK" || true)
+    if [ -z "$traefik_on_net" ]; then
+      err "TRAEFIK_NETWORK='${TRAEFIK_NETWORK}' exists but no Traefik container is attached. RELAY_MODE=existing-traefik needs a running Traefik on that network to route '${RELAY_DOMAIN}'. Bring up your Traefik first, or use RELAY_MODE=greenfield / port-only."
+    fi
     # Best-effort resolver detection — informational only, user override wins.
-    if [ "$OWNER_KIND" = "traefik" ] && [ -n "$OWNER_NAME" ]; then
-      detected_resolver=$(detect_cert_resolver "$OWNER_NAME" || true)
+    if [ -n "$traefik_on_net" ]; then
+      detected_resolver=$(detect_cert_resolver "$traefik_on_net" || true)
       if [ -n "$detected_resolver" ] && [ "$detected_resolver" != "$TRAEFIK_CERTRESOLVER" ]; then
-        info "Detected cert resolver '${detected_resolver}' on '${OWNER_NAME}' (configured: '${TRAEFIK_CERTRESOLVER}'). Set TRAEFIK_CERTRESOLVER='${detected_resolver}' if labels don't match."
+        info "Detected cert resolver '${detected_resolver}' on '${traefik_on_net}' (configured: '${TRAEFIK_CERTRESOLVER}'). Set TRAEFIK_CERTRESOLVER='${detected_resolver}' if labels don't match."
       fi
     fi
     ;;
@@ -417,6 +465,7 @@ log "agent-relay started (mode=${RELAY_MODE})"
 
 # ── Step 7: Print connection info ──────────────────────────────────────────
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+HOST_IP="${HOST_IP:-<set-host-ip>}"
 
 case "$RELAY_MODE" in
   greenfield|existing-traefik)
@@ -428,14 +477,12 @@ case "$RELAY_MODE" in
     fi
     ;;
   port-only)
-    # In port-only, the URL operators should use is the publicly-reachable one.
-    # If RELAY_BIND=127.0.0.1, the URL is only useful on the VPS itself; we still
-    # print the host IP so wizard / operator gets a stable URL to test from the box.
-    if [ "$RELAY_BIND" = "127.0.0.1" ]; then
-      RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
-    else
-      RELAY_URL="http://${HOST_IP}:${RELAY_PORT}"
-    fi
+    # Always advertise the host IP so consumers (deploy-panel, operators on
+    # another machine) have a routable URL. If RELAY_BIND=127.0.0.1 the URL
+    # is NOT reachable from outside — the caller is expected to either re-run
+    # with RELAY_BIND=0.0.0.0 or to front the loopback bind with a separate
+    # reverse proxy. The loopback-bind warning block below makes this loud.
+    RELAY_URL="http://${HOST_IP}:${RELAY_PORT}"
     ;;
 esac
 
@@ -450,8 +497,15 @@ echo -e "  Token: ${YELLOW}${AUTH_TOKEN}${NC}"
 echo ""
 if [ "$RELAY_MODE" = "port-only" ]; then
   echo -e "  ${YELLOW}Port-only mode: no TLS.${NC}"
-  echo -e "  Bind: ${RELAY_BIND}:${RELAY_PORT}. If this host is reachable from the"
-  echo -e "  internet, ensure a firewall or reverse proxy handles TLS termination."
+  echo -e "  Bind: ${RELAY_BIND}:${RELAY_PORT}."
+  if [ "$RELAY_BIND" = "127.0.0.1" ]; then
+    echo -e "  ${YELLOW}Loopback bind:${NC} the URL above is NOT reachable from outside this host."
+    echo -e "  Front it with a local reverse proxy, or re-run with RELAY_BIND=0.0.0.0"
+    echo -e "  if deploy-panel should reach it directly."
+  else
+    echo -e "  If this host is reachable from the internet, ensure a firewall or"
+    echo -e "  reverse proxy handles TLS termination for :${RELAY_PORT}."
+  fi
   echo ""
 fi
 echo -e "  Health:    curl -s \$URL/health"
