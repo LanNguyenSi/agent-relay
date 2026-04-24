@@ -459,7 +459,16 @@ COMPOSE_EOF
     ;;
 esac
 
-docker compose -f "$RELAY_DIR/docker-compose.yml" pull 2>/dev/null || warn "Could not pull image — will build locally if available"
+# Pull the published image. The generated compose file has no `build:`
+# field, so a failed pull is terminal — we surface the docker error and
+# bail rather than pretending it can "build locally". The publish
+# workflow in .github/workflows/publish.yml keeps ghcr.io/lannguyensi/
+# agent-relay:latest current on every merge to main; if the pull is
+# still denied, the package visibility is likely still set to Private
+# — see CHANGELOG entry 2026-04-24 for the one-time flip.
+if ! docker compose -f "$RELAY_DIR/docker-compose.yml" pull; then
+  err "Failed to pull ghcr.io/lannguyensi/agent-relay. If this says 'denied', the package is private — set its visibility to Public at https://github.com/users/LanNguyenSi/packages/container/agent-relay/settings (one-time, after first publish)."
+fi
 docker compose -f "$RELAY_DIR/docker-compose.yml" up -d
 log "agent-relay started (mode=${RELAY_MODE})"
 
