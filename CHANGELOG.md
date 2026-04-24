@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `install.sh` v0.2.0 — adaptive install modes. New `RELAY_MODE` env var with four values:
+  - `auto` (default) detects what's on :80 and picks one of the concrete modes.
+  - `greenfield` — prior behaviour (creates Traefik + `traefik-public` + LE).
+  - `existing-traefik` — joins an existing Traefik via `TRAEFIK_NETWORK` (default `traefik-public`) and `TRAEFIK_CERTRESOLVER` (default `letsencrypt`); does not create Traefik or networks.
+  - `port-only` — no Traefik, no TLS; relay binds `RELAY_BIND:RELAY_PORT` directly (default `127.0.0.1`).
+  - When auto-detection finds a non-Traefik listener on :80 **and** `RELAY_DOMAIN` is set, the installer refuses with an actionable banner (free the port, pick `port-only`, or pick `existing-traefik` with overrides) rather than silently producing a broken install. Motivation was a wizard install against a VPS where `memory-weaver-nginx` owned :80 — the old greenfield-only install died on `Bind for 0.0.0.0:80 failed`.
+- Connection-info block now prints a `Mode:` line above `URL:` / `Token:` so operators see which path was taken. `URL:` / `Token:` label shapes are unchanged so deploy-panel's `parseInstallOutput` keeps working across all modes.
+- `SKIP_TRAEFIK=1` is aliased to `RELAY_MODE=port-only` as a back-compat shim for anyone scripting against the old env surface.
+
 ## [0.1.1] - 2026-04-24
 
 ### Changed
