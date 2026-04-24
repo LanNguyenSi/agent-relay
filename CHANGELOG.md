@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-24
+
+**Headline: adaptive installer + GHCR publishing.** This release makes
+`install.sh` adapt to whatever the VPS already runs instead of
+assuming a greenfield host, ships the Docker image to GHCR on every
+merge so fresh installs can actually `docker pull`, and adds three
+hardening steps catching broken installs before they hit production.
+
 ### Added
 
 - `install.sh` v0.3.0 (partial) — second-wave hardening, three of the five sub-features land here. Non-root install and alternative TLS providers are tracked as separate follow-up tasks.
