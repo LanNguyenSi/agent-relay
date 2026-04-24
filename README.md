@@ -319,10 +319,22 @@ curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install
 
 The installer:
 1. Installs Docker and Docker Compose (if missing)
-2. Creates `traefik-public` network and starts Traefik (if not running)
-3. Pulls and starts the agent-relay container
-4. Generates an auth token (if not already set)
-5. Prints connection info
+2. Detects what's on port 80 and picks an install mode (see below)
+3. In `greenfield` mode: creates `traefik-public` network + starts Traefik
+4. Pulls and starts the agent-relay container (with mode-appropriate network + labels)
+5. Generates an auth token (if not already set)
+6. Prints connection info (including the resolved mode)
+
+### Install modes
+
+`RELAY_MODE` (default `auto`) selects how the relay exposes itself:
+
+| Mode | What it does | When to use |
+|------|--------------|-------------|
+| `greenfield` | Creates `traefik-public` network + a Traefik container with Let's Encrypt, relays routes to `RELAY_DOMAIN`. | Fresh VPS, nothing on :80/:443. |
+| `existing-traefik` | Skips Traefik creation. Joins the relay to `TRAEFIK_NETWORK` with labels routing `RELAY_DOMAIN` via `TRAEFIK_CERTRESOLVER`. | VPS already has a Traefik you want to route through. |
+| `port-only` | No Traefik, no TLS. Relay binds `RELAY_BIND:RELAY_PORT` directly on the host. | Non-Traefik reverse proxy (nginx/Caddy) handles TLS, or you only need loopback access. |
+| `auto` (default) | Detects :80. Free → `greenfield`. Owned by a Traefik container → `existing-traefik`. Owned by anything else + `RELAY_DOMAIN` unset → `port-only`. Owned by anything else + `RELAY_DOMAIN` set → **refuse** with actionable guidance. | Let the installer pick. |
 
 ### Installer environment variables
 
@@ -330,18 +342,40 @@ Set these before running the script to customize the install:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RELAY_DOMAIN` | -- | Domain for Traefik TLS (e.g. `relay.example.com`). Omit for port-only mode. |
-| `TRAEFIK_EMAIL` | -- | Email for Let's Encrypt. Required if `RELAY_DOMAIN` is set. |
-| `APPS_DIR` | `/home/deploy/apps` | Host directory containing app directories |
-| `RELAY_DIR` | `/opt/agent-relay` | Directory for relay config and compose file |
-| `RELAY_PORT` | `8222` | Port for the relay HTTP server |
+| `RELAY_MODE` | `auto` | `auto` / `greenfield` / `existing-traefik` / `port-only`. |
+| `RELAY_DOMAIN` | -- | FQDN the relay should serve. Required for `greenfield` (TLS) and `existing-traefik`. |
+| `TRAEFIK_EMAIL` | -- | Email for Let's Encrypt. Required in `greenfield` when `RELAY_DOMAIN` is set. |
+| `TRAEFIK_NETWORK` | `traefik-public` | Docker network of the existing Traefik (used in `existing-traefik` mode). |
+| `TRAEFIK_CERTRESOLVER` | `letsencrypt` | ACME resolver name configured on the existing Traefik. |
+| `RELAY_BIND` | `127.0.0.1` | Host bind IP for `port-only` mode. Use `0.0.0.0` to expose publicly. |
+| `APPS_DIR` | `/home/deploy/apps` | Host directory containing app directories. |
+| `RELAY_DIR` | `/opt/agent-relay` | Directory for relay config and compose file. |
+| `RELAY_PORT` | `8222` | Port for the relay HTTP server. |
+| `SKIP_TRAEFIK` | -- | `1` = back-compat alias for `RELAY_MODE=port-only` (only applied when `RELAY_MODE` is left at `auto`). |
 
-Example with all options:
+Example — greenfield (fresh VPS):
 
 ```bash
 RELAY_DOMAIN=relay.example.com \
 TRAEFIK_EMAIL=you@example.com \
 APPS_DIR=/home/deploy/apps \
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
+```
+
+Example — existing Traefik on a different network:
+
+```bash
+RELAY_MODE=existing-traefik \
+RELAY_DOMAIN=relay.example.com \
+TRAEFIK_NETWORK=proxy \
+TRAEFIK_CERTRESOLVER=myresolver \
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
+```
+
+Example — port-only (nginx handles TLS, relay on loopback):
+
+```bash
+RELAY_MODE=port-only \
 curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
 ```
 

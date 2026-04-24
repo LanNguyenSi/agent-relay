@@ -46,3 +46,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t agent-relay .
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck on install.sh
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 install.sh
