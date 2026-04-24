@@ -317,6 +317,8 @@ One-command install on Ubuntu/Debian:
 curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
 ```
 
+The installer pulls the published Docker image from `ghcr.io/lannguyensi/agent-relay:latest`, which is built and pushed by `.github/workflows/publish.yml` on every merge to `main` and every `v*` tag. The image must be **public** for the unauthenticated pull to work — after the first workflow run on a fresh repository, a maintainer must flip the package visibility once at `https://github.com/users/LanNguyenSi/packages/container/agent-relay/settings` (GitHub defaults new packages to Private). If you see `denied` from the pull step, this is almost always the cause.
+
 The installer:
 1. Installs Docker and Docker Compose (if missing)
 2. Detects what's on port 80 and picks an install mode (see below)

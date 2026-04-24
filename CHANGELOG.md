@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `.github/workflows/publish.yml` — builds and pushes `ghcr.io/lannguyensi/agent-relay` on every merge to `main` (tags `:latest` + `:main-<sha>`) and on `v*` tag pushes (tags `:<version>`, `:<major.minor>`, `:latest`). Closes the gap that made `install.sh` fail with "denied" on every fresh VPS — the image had been referenced from day one but never actually published. Single-arch `linux/amd64` for now; arm64 is a follow-up.
+  - **One-time operator action required after the first workflow run:** flip the package visibility from Private (GitHub default) to Public at `https://github.com/users/LanNguyenSi/packages/container/agent-relay/settings`. Without this, `install.sh` still errors with "denied" even though the image exists. Only needed once — subsequent pushes keep the existing visibility.
+- `install.sh` — the docker-pull step is now loud instead of silently swallowing stderr. A failed pull surfaces an actionable error that names the likely cause (visibility not set to Public) and links to the settings page, instead of the misleading "will build locally if available" warning (the generated compose file has no `build:` field).
 - `install.sh` v0.2.0 — adaptive install modes. New `RELAY_MODE` env var with four values:
   - `auto` (default) detects what's on :80 and picks one of the concrete modes.
   - `greenfield` — prior behaviour (creates Traefik + `traefik-public` + LE).

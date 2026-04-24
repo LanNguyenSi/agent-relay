@@ -1,0 +1,91 @@
+name: Publish
+
+# Publishes the agent-relay Docker image to GHCR so `install.sh`'s
+# pinned `image: ghcr.io/lannguyensi/agent-relay:latest` reference
+# actually resolves. Triggered on every merge to `main` and on tag
+# pushes.
+#
+# One-time operator step after the first run: flip the package
+# visibility to Public in GitHub UI → Your Profile → Packages →
+# agent-relay → Package settings → Change visibility → Public.
+# Otherwise `install.sh` still fails with "denied" even though the
+# image exists. See CHANGELOG entry for 2026-04-24.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  # Serialize runs per ref so a rapid sequence of merges doesn't race
+  # on the `:latest` tag.
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # ghcr.io's namespace is lowercase-only; this repo owner is
+          # `LanNguyenSi`. `docker/metadata-action` handles the
+          # lowercasing automatically via github.repository.
+          images: ghcr.io/${{ github.repository_owner }}/agent-relay
+          tags: |
+            # push:branch → `main` gets `:latest` + `:main-<sha>`
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=main-,enable={{is_default_branch}}
+            # tag push → semver tags, e.g. v0.2.0 → `:0.2.0`, `:0.2`, `:latest`
+            # `pattern=latest` would be a literal Go-template string, not
+            # the "latest" shortcut — we use a raw entry guarded on the
+            # tag ref instead. Set-dedupes with the is_default_branch
+            # entry above when both conditions happen to match.
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=agent-relay
+            org.opencontainers.image.description=VPS deployment relay for AI agents
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Single-arch amd64 for now; multi-arch (arm64) tracked as a
+          # follow-up in the task referencing this workflow.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Log published tags
+        # Surface what we published in the action summary so operators
+        # can see at a glance which tags are live without opening
+        # packages UI.
+        run: |
+          echo "## Published tags" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
