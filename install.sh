@@ -459,6 +459,23 @@ COMPOSE_EOF
     ;;
 esac
 
+# Broken-existing-relay cleanup (v0.3.0). Idempotency today is fragile:
+# a half-running relay container from a prior failed install can block
+# the new one on port conflict. If the operator sets
+# RELAY_FORCE_RECREATE=1 we forcibly remove the existing container
+# before bringing the new compose up. Without the flag we detect the
+# state and suggest it.
+if docker ps -a --format '{{.Names}} {{.Status}}' | grep -q '^agent-relay '; then
+  existing_status=$(docker ps -a --format '{{.Names}} {{.Status}}' | awk '$1 == "agent-relay" { $1=""; sub(/^ /, ""); print; exit }')
+  if [ "${RELAY_FORCE_RECREATE:-}" = "1" ]; then
+    info "RELAY_FORCE_RECREATE=1 — removing existing agent-relay container (was: ${existing_status})"
+    docker rm -f agent-relay >/dev/null 2>&1 || true
+  elif ! echo "$existing_status" | grep -qE '^Up '; then
+    warn "Existing 'agent-relay' container is not healthy: ${existing_status}"
+    warn "If docker compose up fails below, re-run with RELAY_FORCE_RECREATE=1 to wipe it clean."
+  fi
+fi
+
 # Pull the published image. The generated compose file has no `build:`
 # field, so a failed pull is terminal — we surface the docker error and
 # bail rather than pretending it can "build locally". The publish
@@ -471,6 +488,31 @@ if ! docker compose -f "$RELAY_DIR/docker-compose.yml" pull; then
 fi
 docker compose -f "$RELAY_DIR/docker-compose.yml" up -d
 log "agent-relay started (mode=${RELAY_MODE})"
+
+# Post-install health probe (v0.3.0). Previously install.sh ended at
+# "started, here's your URL" without verifying the relay actually
+# answered. A container that crashes on boot would be reported as
+# successful to deploy-panel's wizard. Probe the container's /health
+# endpoint via `docker exec` (works in all three modes — existing-
+# traefik exposes the port internally only, so host curl wouldn't
+# reach it). ~15s ceiling covers the typical cold-start window.
+info "Waiting for relay to answer /health…"
+health_ok=0
+for i in $(seq 1 15); do
+  if docker exec agent-relay wget -qO- "http://127.0.0.1:${RELAY_PORT}/health" >/dev/null 2>&1; then
+    health_ok=1
+    log "Health check passed (took ${i}s)"
+    break
+  fi
+  sleep 1
+done
+if [ "$health_ok" != "1" ]; then
+  warn "Relay did not answer /health within 15s. Diagnostics:"
+  docker ps --filter "name=agent-relay" --format '  {{.Names}}: {{.Status}}' >&2 || true
+  echo "  --- last 20 log lines ---" >&2
+  docker logs --tail 20 agent-relay 2>&1 | sed 's/^/    /' >&2 || true
+  err "Install finished but health check failed. See logs above."
+fi
 
 # ── Step 7: Print connection info ──────────────────────────────────────────
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -530,3 +572,50 @@ echo -e "    Host:       ${HOST_IP}"
 echo -e "    Relay URL:  ${RELAY_URL}"
 echo -e "    Relay Token: ${AUTH_TOKEN}"
 echo ""
+
+# Firewall preflight (v0.3.0). Many fresh VPS images ship with UFW
+# enabled + default-deny. install.sh succeeds, but the relay is
+# unreachable from outside because port 80/443/RELAY_PORT aren't
+# allowed. Detect the common case (active ufw) and print the exact
+# allow command the operator needs. Never auto-run — a root installer
+# mutating firewall policy without explicit consent is too aggressive.
+#
+# firewalld / iptables detection is out of scope here; those will hit
+# different failure shapes and the warning would drift from the
+# actual fix. File as follow-up if needed.
+if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
+  # Build the list of ports the relay needs based on mode.
+  ports_needed=""
+  case "$RELAY_MODE" in
+    greenfield|existing-traefik)
+      ports_needed="80/tcp 443/tcp"
+      ;;
+    port-only)
+      if [ "$RELAY_BIND" != "127.0.0.1" ]; then
+        ports_needed="${RELAY_PORT}/tcp"
+      fi
+      ;;
+  esac
+
+  if [ -n "$ports_needed" ]; then
+    missing=""
+    for port_spec in $ports_needed; do
+      # Match both v4 (`80/tcp   ALLOW`) and v6 (`80/tcp (v6)   ALLOW`)
+      # ufw output shapes. An operator with a v6-only rule would trip
+      # a spurious warning otherwise.
+      if ! ufw status 2>/dev/null | grep -qE "^${port_spec%/*}(/${port_spec#*/})?( \(v6\))?\s+ALLOW"; then
+        missing="${missing}${port_spec} "
+      fi
+    done
+    if [ -n "$missing" ]; then
+      warn "UFW is active and the following port(s) are not allowed: ${missing% }"
+      warn "Run this to open them:"
+      allow_cmd=""
+      for port_spec in $missing; do
+        allow_cmd="${allow_cmd}sudo ufw allow ${port_spec}; "
+      done
+      echo -e "    ${YELLOW}${allow_cmd% ; }${NC}" >&2
+      echo "" >&2
+    fi
+  fi
+fi
