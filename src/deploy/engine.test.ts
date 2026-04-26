@@ -82,9 +82,10 @@ describe("deploy — default flow", () => {
     expect(result.success).toBe(true);
     expect(result.commitBefore).toBe("abc123");
     expect(result.steps.map((s) => s.name)).toEqual([
+      "preflight (pre-pull)",
       "git pull",
       "reload .relay.yml",
-      "preflight",
+      "preflight (post-pull)",
       "compose build",
       "compose up",
       "health check",
@@ -105,10 +106,11 @@ describe("deploy — default flow", () => {
 
     expect(result.success).toBe(true);
     expect(result.steps.map((s) => s.name)).toEqual([
+      "preflight (pre-pull)",
       "pre_update: make db-generate",
       "git pull",
       "reload .relay.yml",
-      "preflight",
+      "preflight (post-pull)",
       "compose build",
       "compose up",
       "post_update: npx prisma migrate deploy",
@@ -382,15 +384,18 @@ describe("deploy — default flow", () => {
 // against the stale pre-pull config on disk. Preflight now runs inside
 // deploy() after pull+reload, so the merged fix wins on the first deploy.
 describe("deploy — preflight gate", () => {
-  it("runs preflight AFTER git pull + reload (default flow)", async () => {
+  it("runs post-pull preflight AFTER git pull + reload (default flow)", async () => {
     const onStep = vi.fn();
     const result = await deploy({ appDir: "/app", config: baseConfig, onStep });
     expect(result.success).toBe(true);
     const names = result.steps.map((s) => s.name);
-    // Ordering invariant: pull → reload → preflight → build …
-    expect(names.indexOf("preflight")).toBeGreaterThan(names.indexOf("git pull"));
-    expect(names.indexOf("preflight")).toBeGreaterThan(names.indexOf("reload .relay.yml"));
-    expect(names.indexOf("preflight")).toBeLessThan(names.indexOf("compose build"));
+    // Ordering invariant: pre-pull → pull → reload → post-pull → build.
+    expect(names.indexOf("preflight (pre-pull)")).toBeLessThan(names.indexOf("git pull"));
+    expect(names.indexOf("preflight (post-pull)")).toBeGreaterThan(names.indexOf("git pull"));
+    expect(names.indexOf("preflight (post-pull)")).toBeGreaterThan(
+      names.indexOf("reload .relay.yml"),
+    );
+    expect(names.indexOf("preflight (post-pull)")).toBeLessThan(names.indexOf("compose build"));
   });
 
   it("regression: preflight against a broken pre-pull config but fixed post-pull config SUCCEEDS", async () => {
@@ -400,8 +405,9 @@ describe("deploy — preflight gate", () => {
     // deploy repeats the same failure forever. Operator workaround was SSH
     // + manual `git pull`.
     //
-    // Post-PR: preflight runs AFTER pull+reload, so it sees the fixed
-    // post-pull config. Deploy proceeds.
+    // Post-PR: post-pull preflight sees the fixed config. The pre-pull
+    // preflight only runs git checks (clean tree + reachable remote), so
+    // a busted compose_file in the pre-pull config doesn't block here.
     const prePullBusted: RelayConfig = {
       ...baseConfig,
       // Points at a non-compose file — mimics the agent-planforge #63 bug.
@@ -412,10 +418,12 @@ describe("deploy — preflight gate", () => {
       compose_file: "docker-compose.yml",
     };
     mockLoadRelayConfig.mockResolvedValue(postPullFixed);
-    // Preflight only sees what `deploy()` passes in (= post-pull config).
-    // The mock just asserts "was invoked with compose_file=docker-compose.yml"
-    // by returning pass only in that case.
+    // Phase-aware mock: pre-pull is git-only (always passes here),
+    // post-pull validates compose_file (passes only on the fixed config).
     mockRunPreflightChecks.mockImplementation(async (opts) => {
+      if (opts.phase === "pre-pull") {
+        return { passed: true, checks: [] };
+      }
       if (opts.config.compose_file === "docker-compose.yml") {
         return { passed: true, checks: [] };
       }
@@ -430,18 +438,32 @@ describe("deploy — preflight gate", () => {
     const result = await deploy({ appDir: "/app", config: prePullBusted });
     expect(result.success).toBe(true);
     expect("blocked" in result && result.blocked).toBeFalsy();
-    // Verify preflight actually got the post-pull config.
-    const callArgs = mockRunPreflightChecks.mock.calls[0][0];
-    expect(callArgs.config.compose_file).toBe("docker-compose.yml");
+    // Two preflight invocations now: pre-pull (busted config, git phase)
+    // then post-pull (fixed config, config phase). The post-pull call is
+    // what actually validates compose_file_exists.
+    const calls = mockRunPreflightChecks.mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0].phase).toBe("pre-pull");
+    expect(calls[1][0].phase).toBe("post-pull");
+    expect(calls[1][0].config.compose_file).toBe("docker-compose.yml");
   });
 
-  it("blocks the deploy with a DeployBlockedResult when preflight fails", async () => {
-    mockRunPreflightChecks.mockResolvedValue({
-      passed: false,
-      checks: [
-        { name: "compose_file_exists", passed: false, message: "not found", critical: true },
-        { name: "health_defined", passed: true, message: "/health", critical: true },
-      ],
+  it("blocks the deploy with a DeployBlockedResult when post-pull preflight fails", async () => {
+    // Pre-pull passes (default mock), post-pull fails. The blocked
+    // result must carry the post-pull report and the step list must
+    // include the post-pull preflight as a failure but stop before
+    // compose build / up.
+    mockRunPreflightChecks.mockImplementation(async (opts) => {
+      if (opts.phase === "pre-pull") {
+        return { passed: true, checks: [] };
+      }
+      return {
+        passed: false,
+        checks: [
+          { name: "compose_file_exists", passed: false, message: "not found", critical: true },
+          { name: "health_defined", passed: true, message: "/health", critical: true },
+        ],
+      };
     });
 
     const result = await deploy({ appDir: "/app", config: baseConfig });
@@ -450,10 +472,50 @@ describe("deploy — preflight gate", () => {
     if ("blocked" in result) {
       expect(result.preflight.passed).toBe(false);
       expect(result.preflight.checks).toHaveLength(2);
-      // Preflight step is emitted to the stream as a failure
-      const preflightStep = result.steps.find((s) => s.name === "preflight");
-      expect(preflightStep?.status).toBe("failure");
+      const postPullStep = result.steps.find((s) => s.name === "preflight (post-pull)");
+      expect(postPullStep?.status).toBe("failure");
       // No compose build / up ran — we aborted before them
+      expect(result.steps.find((s) => s.name === "compose build")).toBeUndefined();
+    }
+  });
+
+  it("blocks the deploy BEFORE git pull when pre-pull preflight fails (dirty tree)", async () => {
+    // The whole point of having a pre-pull phase: catch a dirty working
+    // tree before `git pull` clobbers it. Asserting that `git pull`
+    // never ran is half the contract; the other half is that the
+    // blocked result carries the pre-pull report, not a stale
+    // "everything passed" one.
+    mockRunPreflightChecks.mockImplementation(async (opts) => {
+      if (opts.phase === "pre-pull") {
+        return {
+          passed: false,
+          checks: [
+            { name: "git_clean", passed: false, message: "Uncommitted changes", critical: false },
+          ],
+        };
+      }
+      return { passed: true, checks: [] };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+    expect(result.success).toBe(false);
+    expect("blocked" in result && result.blocked).toBe(true);
+    // git pull MUST NOT have been invoked.
+    const gitPullCall = mockShell.mock.calls.find(
+      ([cmd]) => typeof cmd === "string" && cmd.startsWith("git pull"),
+    );
+    expect(gitPullCall).toBeUndefined();
+    // post-pull preflight must NOT have been called either — we
+    // short-circuited at the pre-pull gate.
+    const postPullCall = mockRunPreflightChecks.mock.calls.find(
+      (c) => c[0].phase === "post-pull",
+    );
+    expect(postPullCall).toBeUndefined();
+    // Step list stops at preflight (pre-pull) as a failure.
+    if ("blocked" in result) {
+      const prePullStep = result.steps.find((s) => s.name === "preflight (pre-pull)");
+      expect(prePullStep?.status).toBe("failure");
+      expect(result.steps.find((s) => s.name === "git pull")).toBeUndefined();
       expect(result.steps.find((s) => s.name === "compose build")).toBeUndefined();
     }
   });

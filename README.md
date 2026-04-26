@@ -40,7 +40,7 @@ VPS
 | Config | `src/config/relay.ts` | `.relay.yml` schema and parser (Zod) |
 | Env | `src/config/env.ts` | Environment variable validation |
 | Deploy Engine | `src/deploy/engine.ts` | Full deploy flow with step tracking |
-| Pre-flight | `src/deploy/preflight.ts` | 6 validation checks run inside the engine after `git pull` + config reload (default flow), or pre-command (command mode) |
+| Pre-flight | `src/deploy/preflight.ts` | 6 validation checks split across two phases in the default flow: pre-pull (`git_clean`, `git_remote_reachable` — gate dirty trees before `git pull` clobbers WIP) and post-pull (`compose_file_exists`, `containers_running`, `traefik_labels`, `health_defined`). Command mode and the standalone `GET /api/apps/:name/preflight` endpoint run all six in one pass. |
 | Health | `src/deploy/health.ts` | HTTP health check with retries |
 | MCP Server | `src/mcp/server.ts` | 5 MCP tools for AI agents |
 | HTTP API | `src/api/routes.ts` | REST API for deploy-panel |
