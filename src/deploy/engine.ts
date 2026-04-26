@@ -83,6 +83,48 @@ async function defaultFlowDeploy(
     onStep?.(step);
   }
 
+  // Pre-pull preflight: dirty-tree + reachable-remote checks. These
+  // only have signal BEFORE git pull (a successful pull renders them
+  // tautological), so they run here. If they trip the deploy is blocked
+  // before any working-tree mutation happens — `git pull` doesn't run,
+  // pre_update doesn't fire, the operator's WIP stays intact.
+  //
+  // Force semantics: both pre-pull checks are non-critical, and
+  // runPreflightChecks gates only on critical checks when force=true.
+  // So `--force` bypasses the pre-pull gate entirely — by design:
+  // "I know what I'm doing, clobber my WIP" is exactly when an operator
+  // reaches for force.
+  const prePullPreflightStart = Date.now();
+  const prePullPreflight = await runPreflightChecks({
+    appDir,
+    config: prePullConfig,
+    force: options.force,
+    phase: "pre-pull",
+  });
+  const prePullPreflightStep: DeployStep = {
+    name: "preflight (pre-pull)",
+    status: prePullPreflight.passed ? "success" : "failure",
+    output: prePullPreflight.checks
+      .map((c) => `${c.passed ? "✓" : "✗"} ${c.name}: ${c.message}`)
+      .join("\n"),
+    durationMs: Date.now() - prePullPreflightStart,
+  };
+  emit(prePullPreflightStep);
+  if (!prePullPreflight.passed) {
+    // Tree was not pulled, so commitAfter == commitBefore by definition.
+    // The post-pull blocked branch below re-fetches the commit because
+    // the tree DOES move there before we abort.
+    return {
+      success: false,
+      blocked: true,
+      preflight: prePullPreflight,
+      durationMs: Date.now() - start,
+      commitBefore,
+      commitAfter: commitBefore,
+      steps,
+    };
+  }
+
   // Pre-update commands run against the PRE-pull working tree, so the
   // pre-pull config is the right source of truth for them.
   for (const cmd of prePullConfig.pre_update) {
@@ -127,18 +169,25 @@ async function defaultFlowDeploy(
   // Safe: reload step above already validated.
   const config = await loadRelayConfig(appDir);
 
-  // Preflight against the POST-pull config. Pre-PR #64 this ran in
-  // `services/apps.ts` before pull, so a commit that *fixed* a broken
-  // `.relay.yml` would fail preflight against the still-broken pre-pull
-  // copy on disk — the merged fix never got a chance to apply. Post-pull
-  // preflight means "is the new state safe to deploy?" — which is what
-  // operators actually want. No rollback on failure: the tree is at the
-  // new commit but nothing else has changed; the running containers are
-  // still on the old image.
+  // Post-pull preflight against the new on-disk state + new config.
+  // Pre-PR #64 this ran in `services/apps.ts` before pull, so a commit
+  // that *fixed* a broken `.relay.yml` would fail preflight against the
+  // still-broken pre-pull copy on disk — the merged fix never got a
+  // chance to apply. Post-pull preflight means "is the new state safe to
+  // deploy?" — which is what operators actually want. No rollback on
+  // failure: the tree is at the new commit but nothing else has changed;
+  // the running containers are still on the old image. Phase is
+  // "post-pull" because the git checks already ran (and passed) above —
+  // re-running them here would just duplicate signal.
   const preflightStart = Date.now();
-  const preflight = await runPreflightChecks({ appDir, config, force: options.force });
+  const preflight = await runPreflightChecks({
+    appDir,
+    config,
+    force: options.force,
+    phase: "post-pull",
+  });
   const preflightStep: DeployStep = {
-    name: "preflight",
+    name: "preflight (post-pull)",
     status: preflight.passed ? "success" : "failure",
     output: preflight.checks
       .map((c) => `${c.passed ? "✓" : "✗"} ${c.name}: ${c.message}`)

@@ -15,33 +15,46 @@ export interface PreflightReport {
   checks: PreflightCheck[];
 }
 
+/**
+ * Which slice of the preflight battery to run.
+ *
+ * - "pre-pull" — checks that only carry signal BEFORE `git pull`:
+ *   working tree cleanliness (so `git pull` doesn't clobber WIP) and
+ *   remote reachability (so we don't bother trying). Both are tautologies
+ *   AFTER a successful pull, so the engine runs them in this slice
+ *   exclusively.
+ * - "post-pull" — checks against the freshly-pulled tree: compose file
+ *   present, traefik labels in the compose, health endpoint configured,
+ *   containers actually running. Engine runs these after `reload .relay.yml`
+ *   so the new commit's config is the one being validated.
+ * - "all" — both slices. The standalone `GET /api/apps/:name/preflight`
+ *   endpoint and command-mode deploys (where there's no natural pre/post
+ *   pull split) use this.
+ */
+export type PreflightPhase = "pre-pull" | "post-pull" | "all";
+
 export interface PreflightOptions {
   appDir: string;
   config: RelayConfig;
   force?: boolean;
+  phase?: PreflightPhase;
 }
 
 export async function runPreflightChecks(options: PreflightOptions): Promise<PreflightReport> {
-  const { appDir, config, force = false } = options;
+  const { appDir, config, force = false, phase = "all" } = options;
 
-  // Note: after PR #21 preflight runs post-pull in `defaultFlowDeploy`.
-  // `checkGitClean` and `checkGitRemoteReachable` are then effectively
-  // tautologies (a successful pull already proved clean-tree + reachable
-  // remote). Kept for:
-  //   1. The standalone `GET /api/apps/:name/preflight` endpoint, which
-  //      NEVER pulls — they still carry real signal there.
-  //   2. Command-mode deploys, where preflight runs pre-command against
-  //      whatever is on disk.
-  // A proper split (pre-pull git checks, post-pull config checks) is
-  // tracked as a follow-up task.
-  const checks = await Promise.all([
-    checkComposeFileExists(appDir, config.compose_file),
-    checkContainersRunning(appDir, config.compose_file),
-    checkTraefikLabels(appDir, config.compose_file),
-    checkHealthDefined(config),
-    checkGitClean(appDir),
-    checkGitRemoteReachable(appDir),
-  ]);
+  const tasks: Array<Promise<PreflightCheck>> = [];
+  if (phase === "pre-pull" || phase === "all") {
+    tasks.push(checkGitClean(appDir));
+    tasks.push(checkGitRemoteReachable(appDir));
+  }
+  if (phase === "post-pull" || phase === "all") {
+    tasks.push(checkComposeFileExists(appDir, config.compose_file));
+    tasks.push(checkContainersRunning(appDir, config.compose_file));
+    tasks.push(checkTraefikLabels(appDir, config.compose_file));
+    tasks.push(checkHealthDefined(config));
+  }
+  const checks = await Promise.all(tasks);
 
   const passed = force
     ? checks.filter((c) => c.critical).every((c) => c.passed)

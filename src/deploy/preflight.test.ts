@@ -178,4 +178,119 @@ describe("runPreflightChecks", () => {
     expect(names).toContain("git_clean");
     expect(names).toContain("git_remote_reachable");
   });
+
+  describe("phase parameter", () => {
+    it('phase: "pre-pull" runs only the git checks', async () => {
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "pre-pull",
+      });
+
+      const names = report.checks.map((c) => c.name);
+      // pre-pull is git-only: clean tree + reachable remote. Anything
+      // that depends on the post-pull state (compose file, traefik
+      // labels, containers, health endpoint defined in NEW config) must
+      // not run here — they would either be tautological or read from
+      // the wrong commit.
+      expect(names).toEqual(
+        expect.arrayContaining(["git_clean", "git_remote_reachable"]),
+      );
+      expect(names).not.toContain("compose_file_exists");
+      expect(names).not.toContain("containers_running");
+      expect(names).not.toContain("traefik_labels");
+      expect(names).not.toContain("health_defined");
+      expect(report.checks).toHaveLength(2);
+    });
+
+    it('phase: "post-pull" runs only the config/compose checks', async () => {
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "post-pull",
+      });
+
+      const names = report.checks.map((c) => c.name);
+      // post-pull runs against the freshly-pulled tree + reloaded
+      // config; the git checks are tautological after a successful pull
+      // so they're skipped here.
+      expect(names).toEqual(
+        expect.arrayContaining([
+          "compose_file_exists",
+          "containers_running",
+          "traefik_labels",
+          "health_defined",
+        ]),
+      );
+      expect(names).not.toContain("git_clean");
+      expect(names).not.toContain("git_remote_reachable");
+      expect(report.checks).toHaveLength(4);
+    });
+
+    it('phase: "all" (or omitted) runs every check, preserving back-compat for the standalone preflight endpoint', async () => {
+      // The standalone GET /api/apps/:name/preflight and command-mode
+      // deploys both rely on the "all" behavior — there's no natural
+      // pre/post-pull split for them.
+      const reportAll = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "all",
+      });
+      const reportDefault = await runPreflightChecks({ appDir: "/app", config: baseConfig });
+
+      expect(reportAll.checks).toHaveLength(6);
+      expect(reportDefault.checks).toHaveLength(6);
+      expect(reportAll.checks.map((c) => c.name).sort()).toEqual(
+        reportDefault.checks.map((c) => c.name).sort(),
+      );
+    });
+
+    it('phase: "pre-pull" + dirty tree → passed=false (pre-pull gates on its own checks)', async () => {
+      mockShell.mockImplementation(async (cmd) => {
+        if (cmd.includes("git status")) return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
+        if (cmd.includes("git ls-remote")) return { stdout: "ref", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "pre-pull",
+      });
+
+      expect(report.passed).toBe(false);
+      const dirty = report.checks.find((c) => c.name === "git_clean");
+      expect(dirty?.passed).toBe(false);
+      // Tighten: only the dirty check tripped — the reachable check
+      // still passed. Without this assertion the test could silently
+      // accept a regression that breaks both checks at once.
+      const remote = report.checks.find((c) => c.name === "git_remote_reachable");
+      expect(remote?.passed).toBe(true);
+    });
+
+    it('phase: "pre-pull" + force=true bypasses the gate even on a dirty tree', async () => {
+      // Both pre-pull checks are non-critical. With force=true the
+      // critical-only filter is empty, so passed === true regardless.
+      // This is the documented escape hatch operators reach for when
+      // they want to clobber WIP intentionally.
+      mockShell.mockImplementation(async (cmd) => {
+        if (cmd.includes("git status")) return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
+        if (cmd.includes("git ls-remote")) return { stdout: "", stderr: "fatal", exitCode: 128 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "pre-pull",
+        force: true,
+      });
+
+      expect(report.passed).toBe(true);
+      // Individual checks still report their real state — the report's
+      // `passed` flag is the gate, not a re-write of check results.
+      const dirty = report.checks.find((c) => c.name === "git_clean");
+      expect(dirty?.passed).toBe(false);
+    });
+  });
 });
