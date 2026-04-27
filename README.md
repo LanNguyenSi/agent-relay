@@ -19,9 +19,9 @@ The deploy daemon for AI-driven VPS deployments. Claude Code (or any MCP client)
 `ssh root@vps && docker compose up -d` works on day one. It stops working when:
 
 - An AI agent needs to do it. `ssh` requires a private key and a TTY; an MCP-driven agent has neither.
-- You want pre-flight checks before clobbering a working deploy. The relay validates `compose_file` exists, containers are running, Traefik labels are present, the health endpoint is defined, the working tree is clean, and the git remote is reachable, all before pulling.
+- You want pre-flight checks before clobbering a working deploy. The relay validates the working tree and remote *before* pulling (`git_clean`, `git_remote_reachable`), then validates `compose_file` exists, containers are running, Traefik labels are present, and the health endpoint is defined *after* pulling against the new on-disk config.
 - A health check fails after `compose up`. The relay auto-rolls back to the previous commit; bare SSH leaves you with a broken deploy.
-- You want a deploy history. The relay keeps the last 100 deploys per app with commit before/after, status, duration, and trigger source.
+- You want a deploy history. The relay keeps the last 100 deploys (across all apps) with commit before/after, status, duration, and trigger source.
 - You're managing more than one VPS. Centralised state in deploy-panel, identical API on each box.
 
 The relay is a daemon, not a CLI: one auth token, one HTTP/MCP surface, no SSH key sprawl.
