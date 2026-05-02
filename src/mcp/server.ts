@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as apps from "../services/apps.js";
 import { recordDeploy } from "../services/history.js";
+import { RELAY_VERSION } from "../config/version.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: true };
 
@@ -19,7 +20,7 @@ const SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
 export function createMcpServer(): McpServer {
   const server = new McpServer({
     name: "agent-relay",
-    version: "0.1.0",
+    version: RELAY_VERSION,
   });
 
   // ── relay_deploy ──────────────────────────────────────────
