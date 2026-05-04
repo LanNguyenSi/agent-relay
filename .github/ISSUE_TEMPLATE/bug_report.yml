@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a defect in agent-relay
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - HTTP API
+        - MCP
+        - GitHub Action
+        - Docker / compose
+        - install.sh
+        - other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Expected vs. actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal commands or config that trigger the bug.
+      render: bash
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: agent-relay version
+      placeholder: "0.x.y or commit SHA"
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "VPS distro, Docker version, Node version, etc."
