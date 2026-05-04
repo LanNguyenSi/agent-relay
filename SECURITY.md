@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Active development is on `main`. Only the latest published release on npm and the `:latest` Docker image are supported.
+Active development is on `main`. The supported distribution is the `ghcr.io/lannguyensi/agent-relay:latest` Docker image (published from `main` and on `v*` tags). Older tags and SHAs are not patched.
 
 agent-relay sits on the network path between deployer and VPS targets, so vulnerabilities are treated as serious by default.
 

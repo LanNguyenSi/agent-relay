@@ -25,7 +25,7 @@ Thanks for your interest. agent-relay is a VPS deployment relay for AI agents, r
 ## Dev Setup
 
 ```bash
-git clone https://github.com/LanNguyenSi/agent-relay
+git clone https://github.com/LanNguyenSi/agent-relay.git
 cd agent-relay
 npm install
 npm run build

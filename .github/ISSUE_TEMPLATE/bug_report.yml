@@ -9,7 +9,6 @@ body:
       options:
         - HTTP API
         - MCP
-        - GitHub Action
         - Docker / compose
         - install.sh
         - other / unsure

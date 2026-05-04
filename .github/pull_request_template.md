@@ -10,7 +10,7 @@
 
 - [ ] `npm run build`
 - [ ] `npm test`
-- [ ] For deployment-path changes: dogfood against a real or example compose file
+- [ ] For deployment-path changes: dogfood against `docker-compose.prod.example.yml` or a real VPS target
 - [ ] Manual smoke check: <!-- command or scenario -->
 
 ## Notes for reviewer
