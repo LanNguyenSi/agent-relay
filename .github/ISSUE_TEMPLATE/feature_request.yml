@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a new capability or relay surface
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - HTTP API
+        - MCP
+        - Docker / compose
+        - install.sh
+        - new surface
+        - other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: What problem does this solve? Who feels the pain today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
