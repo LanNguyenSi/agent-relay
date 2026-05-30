@@ -22,6 +22,7 @@ export { RelayConfigError };
 const APP_NAME = /^[a-zA-Z0-9_-]+$/;
 const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
 const SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
+const BRANCH_NAME = /^[a-zA-Z0-9._/-]+$/;
 const MAX_LOG_LINES = 1000;
 
 export async function safeAppDir(name: string): Promise<string> {
@@ -43,6 +44,11 @@ export function validateCommitRef(ref: string): string {
 export function validateServiceName(name: string): string {
   if (!SERVICE_NAME.test(name)) throw new Error("Invalid service name");
   return name;
+}
+
+export function validateBranch(branch: string): string {
+  if (!BRANCH_NAME.test(branch)) throw new Error("Invalid branch name");
+  return branch;
 }
 
 export function clampLogLines(lines?: number): number {
@@ -100,7 +106,8 @@ export async function getAppDetail(name: string) {
 export async function deployApp(name: string, options?: { branch?: string; force?: boolean }) {
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
-  return deploy({ appDir: dir, config, branch: options?.branch, force: options?.force });
+  const branch = options?.branch ? validateBranch(options.branch) : undefined;
+  return deploy({ appDir: dir, config, branch, force: options?.force });
 }
 
 export async function deployAppStreaming(
@@ -112,10 +119,11 @@ export async function deployAppStreaming(
   // Pre-pull config: the engine re-loads .relay.yml after `git pull`
   // so build/up/post_update/health/preflight see the post-pull config.
   const config = await loadRelayConfig(dir);
+  const branch = options?.branch ? validateBranch(options.branch) : undefined;
   return deploy({
     appDir: dir,
     config,
-    branch: options?.branch,
+    branch,
     force: options?.force,
     onStep,
   });
