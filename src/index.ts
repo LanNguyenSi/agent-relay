@@ -3,6 +3,7 @@ import { getRequestListener } from "@hono/node-server";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { env } from "./config/env.js";
+import { isAuthorized } from "./config/auth.js";
 import { RELAY_VERSION } from "./config/version.js";
 import { api } from "./api/routes.js";
 import { createMcpServer } from "./mcp/server.js";
@@ -28,7 +29,7 @@ const server = createServer(async (req, res) => {
   if (req.url?.startsWith("/mcp")) {
     // Auth check for MCP
     const auth = req.headers.authorization;
-    if (!auth?.startsWith("Bearer ") || auth.slice(7) !== env.AUTH_TOKEN) {
+    if (!isAuthorized(auth)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;

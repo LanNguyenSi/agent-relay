@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { env } from "../config/env.js";
+import { isAuthorized } from "../config/auth.js";
 import { RELAY_VERSION } from "../config/version.js";
 import { RelayConfigError } from "../config/relay.js";
 import * as apps from "../services/apps.js";
@@ -11,7 +11,7 @@ export const api = new Hono();
 // ── Auth middleware ─────────────────────────────────────────────────────────
 api.use("*", async (c, next) => {
   const auth = c.req.header("Authorization");
-  if (!auth?.startsWith("Bearer ") || auth.slice(7) !== env.AUTH_TOKEN) {
+  if (!isAuthorized(auth)) {
     return c.json({ error: "unauthorized" }, 401);
   }
   return next();
