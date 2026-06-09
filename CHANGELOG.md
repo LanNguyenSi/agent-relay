@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-09
+
+Security release closing the 2026-05-30 audit findings and a multi-CVE dependency sweep, plus a deploy-preflight phase split. The headline security fix is a HIGH command injection in the deploy path. The relay is deployed as a GHCR container; this tag publishes the image and a GitHub Release.
+
+### Added
+
+- **Deploy preflight runs in two phases, `pre-pull` and `post-pull`** (commit 76858d5). Moving preflight entirely post-pull (PR #21) had turned `git_clean` and `git_remote_reachable` into tautologies in the default flow (a successful `git pull` already proves both) and meant a dirty working tree could no longer block a deploy before `git pull` clobbered the operator's WIP. `runPreflightChecks` gains a `phase: "pre-pull" | "post-pull" | "all"` argument; the default deploy flow now runs `git_clean` + `git_remote_reachable` before `git pull` (blocking a dirty-tree deploy before any working-tree mutation) and the remaining checks after reloading `.relay.yml`, before the compose build.
+
+### Security
+
+- **HIGH: command injection in the deploy branch parameter** (PR #39). The `branch` parameter from HTTP and MCP deploy callers flowed unvalidated into a shell-interpolated `git pull origin '<branch>'`, so a crafted value could break out of the single-quote wrapping and execute arbitrary commands on the host. A new `BRANCH_NAME` regex and exported `validateBranch()` helper (mirroring the existing `validateCommitRef` / `validateServiceName` guards) now validate the branch at both deploy entrypoints (`deployApp` and `deployAppStreaming`) before it reaches `deploy()`.
+- **MEDIUM: constant-time bearer-token comparison** (PR #41, finding #16). Both auth sites (HTTP API and MCP) now compare the bearer token with a shared `node:crypto` `timingSafeEqual` helper, fulfilling the constant-time guarantee documented in `docs/security.md`.
+- **protobufjs pinned to `^7.5.8` via `overrides`** to patch 8 transitive CVEs (PR #37).
+- **CVE sweep** (lockfile resolutions and `overrides`, not direct-range bumps): `fast-uri`, `ip-address`, and `express-rate-limit` advanced and `hono` resolved to `4.12.23` in the lockfile for 4 MEDIUM CVEs (PRs #36 and #40; hono's direct range stays `^4.7.9`), `qs` resolved to `6.15.2` (CVE-2026-8723, PR #38), and `postcss` + `uuid` pinned via `overrides` to clear GHSA advisories (PR #32).
+
+### Fixed
+
+- **The relay reports its version from `package.json` at runtime** (PR #34), instead of a hardcoded string that could drift.
+
+### Documentation
+
+- **Open source surface added** (Code of Conduct, contributing, security policy, templates; PR #35) and the README restructured into `docs/` with a 60-second hook (PR #33).
+
 ## [0.2.0] - 2026-04-24
 
 **Headline: adaptive installer + GHCR publishing.** This release makes
