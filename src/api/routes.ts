@@ -113,7 +113,10 @@ api.post("/apps/:name/deploy", async (c) => {
   try {
     const result = await apps.deployApp(name, { branch: body.branch, force: body.force });
     if ("blocked" in result && result.blocked) {
-      return c.json(result);
+      // Wrap the blocked result under `result` so the non-streaming response
+      // shape matches the happy path ({ deploy, result }). Clients can branch
+      // on `body.result.blocked` instead of two divergent top-level shapes.
+      return c.json({ result });
     }
     const record = await recordDeploy(name, result, "api");
     return c.json({ deploy: record, result });
