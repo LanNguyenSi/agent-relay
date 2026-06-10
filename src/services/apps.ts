@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { readdir, stat, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
@@ -27,12 +27,22 @@ const MAX_LOG_LINES = 1000;
 
 export async function safeAppDir(name: string): Promise<string> {
   if (!APP_NAME.test(name)) throw new RelayConfigError("Invalid app name");
-  const dir = resolve(env.APPS_DIR, name);
-  if (!dir.startsWith(resolve(env.APPS_DIR))) throw new RelayConfigError("Invalid app path");
-  // Resolve symlinks and verify the real path is still inside APPS_DIR
+  const appsRoot = resolve(env.APPS_DIR);
+  const dir = resolve(appsRoot, name);
+  // `startsWith(appsRoot + sep)` (not just `appsRoot`) prevents a sibling-name
+  // prefix false-positive: without the trailing separator `appsRoot = /apps`
+  // would accept `/appsteak/...` as contained. Mirrors assertComposeFileContained.
+  if (dir !== appsRoot && !dir.startsWith(appsRoot + sep)) {
+    throw new RelayConfigError("Invalid app path");
+  }
+  // Resolve symlinks and verify the real path is still inside APPS_DIR. The same
+  // trailing-separator guard applies after realpath, so a symlink to a
+  // sibling-prefixed directory (e.g. /apps/x -> /appsteak) cannot escape.
   const real = await realpath(dir).catch(() => dir);
-  const appsReal = await realpath(env.APPS_DIR).catch(() => resolve(env.APPS_DIR));
-  if (!real.startsWith(appsReal)) throw new RelayConfigError("App path escapes APPS_DIR");
+  const appsReal = await realpath(appsRoot).catch(() => appsRoot);
+  if (real !== appsReal && !real.startsWith(appsReal + sep)) {
+    throw new RelayConfigError("App path escapes APPS_DIR");
+  }
   return real;
 }
 
