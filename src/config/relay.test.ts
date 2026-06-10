@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -211,55 +211,59 @@ describe("assertComposeFileContained", () => {
   const APPS_DIR = "/apps";
   const appDir = "/apps/my-app";
 
-  it("accepts a compose file inside the app directory", () => {
-    expect(() =>
+  // These cases use abstract /apps paths that do not exist on disk, so the
+  // realpath (symlink) pass short-circuits on ENOENT and only the lexical
+  // check runs. The on-disk symlink behaviour is covered by the
+  // "symlink containment" describe below.
+  it("accepts a compose file inside the app directory", async () => {
+    await expect(
       assertComposeFileContained(appDir, "docker-compose.yml"),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
   });
 
-  it("accepts a compose file in a nested directory of the app", () => {
-    expect(() =>
+  it("accepts a compose file in a nested directory of the app", async () => {
+    await expect(
       assertComposeFileContained(appDir, "deploy/compose.yml"),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
   });
 
-  it("accepts a compose file in a sibling app directory", () => {
+  it("accepts a compose file in a sibling app directory", async () => {
     // The motivating case — agent-planforge at
     // /apps/agent-planforge/.relay.yml points at project-forge's
     // compose at /apps/project-forge/docker-compose.yml.
-    expect(() =>
+    await expect(
       assertComposeFileContained(appDir, "../other-app/docker-compose.yml"),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
   });
 
-  it("rejects a compose file that escapes the apps root", () => {
-    expect(() =>
+  it("rejects a compose file that escapes the apps root", async () => {
+    await expect(
       assertComposeFileContained(appDir, "../../etc/passwd"),
-    ).toThrow(/resolves outside the apps directory/);
+    ).rejects.toThrow(/resolves outside the apps directory/);
   });
 
-  it("rejects a compose file that escapes via an embedded `..` segment", () => {
+  it("rejects a compose file that escapes via an embedded `..` segment", async () => {
     // `/apps/my-app/deploy/../../../etc/passwd` → `/etc/passwd`.
-    expect(() =>
+    await expect(
       assertComposeFileContained(appDir, "deploy/../../../etc/passwd"),
-    ).toThrow(/resolves outside the apps directory/);
+    ).rejects.toThrow(/resolves outside the apps directory/);
   });
 
-  it("rejects a sibling-prefix false-positive (apps vs appsteak)", () => {
+  it("rejects a sibling-prefix false-positive (apps vs appsteak)", async () => {
     // Without the trailing `sep` in the startsWith check, a sibling
     // directory sharing APPS_DIR's name prefix (e.g. /appsteak/...) would
     // pass containment — this test pins the tightened check.
-    expect(() =>
+    await expect(
       assertComposeFileContained(
         "/appsteak/my-app",
         "../../apps/my-app/compose.yml",
       ),
-    ).toThrow(/resolves outside the apps directory/);
+    ).rejects.toThrow(/resolves outside the apps directory/);
   });
 
-  it("error message names both the resolved path and the apps directory", () => {
+  it("error message names both the resolved path and the apps directory", async () => {
     try {
-      assertComposeFileContained(appDir, "../../etc/passwd");
+      await assertComposeFileContained(appDir, "../../etc/passwd");
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(RelayConfigError);
@@ -267,6 +271,55 @@ describe("assertComposeFileContained", () => {
       expect(msg).toContain("/etc/passwd");
       expect(msg).toContain(APPS_DIR);
     }
+  });
+});
+
+describe("assertComposeFileContained — symlink containment", () => {
+  let tmpRoot: string;
+
+  beforeEach(async () => {
+    tmpRoot = await mkdtemp(resolve(tmpdir(), "agent-relay-compose-symlink-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("rejects a compose_file that escapes APPS_DIR through a symlink", async () => {
+    // Layout: <tmpRoot>/apps/my-app with a symlink my-app/link -> <tmpRoot>/escaped
+    // (escaped is OUTSIDE the apps root). `link/docker-compose.yml` is lexically
+    // contained (link looks like a subdir) but realpath resolves outside APPS_DIR.
+    const appDir = resolve(tmpRoot, "apps", "my-app");
+    const escaped = resolve(tmpRoot, "escaped");
+    await mkdir(appDir, { recursive: true });
+    await mkdir(escaped, { recursive: true });
+    await writeFile(resolve(escaped, "docker-compose.yml"), "services: {}\n");
+    await symlink(escaped, resolve(appDir, "link"));
+
+    await expect(
+      assertComposeFileContained(appDir, "link/docker-compose.yml"),
+    ).rejects.toThrow(/symlink/);
+  });
+
+  it("accepts a real (non-symlinked) sibling app on disk", async () => {
+    const appDir = resolve(tmpRoot, "apps", "my-app");
+    const sibling = resolve(tmpRoot, "apps", "other-app");
+    await mkdir(appDir, { recursive: true });
+    await mkdir(sibling, { recursive: true });
+    await writeFile(resolve(sibling, "docker-compose.yml"), "services: {}\n");
+
+    await expect(
+      assertComposeFileContained(appDir, "../other-app/docker-compose.yml"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("tolerates a not-yet-present compose file (ENOENT) without rejecting", async () => {
+    const appDir = resolve(tmpRoot, "apps", "my-app");
+    await mkdir(appDir, { recursive: true });
+
+    await expect(
+      assertComposeFileContained(appDir, "docker-compose.yml"),
+    ).resolves.toBeUndefined();
   });
 });
 

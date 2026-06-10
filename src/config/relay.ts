@@ -1,6 +1,6 @@
 import { z } from "zod";
 import * as yaml from "js-yaml";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 // `compose_file` is interpolated into shell via single quotes in
@@ -85,19 +85,40 @@ export function parseRelayConfig(content: string): RelayConfig {
  * (`/root/git/<name>` → `/apps/<name>` inside the container) are
  * structured. Deploys never address apps via other layouts.
  */
-export function assertComposeFileContained(
+export async function assertComposeFileContained(
   appDir: string,
   composeFile: string,
-): void {
+): Promise<void> {
   const resolved = resolve(appDir, composeFile);
   const appsDir = resolve(appDir, "..");
-  // `startsWith(appsDir + sep)` (not just `appsDir`) prevents a
-  // sibling-name prefix false-positive: without the trailing separator,
-  // `appsDir = /apps` would accept `/appsteak/...` as "contained".
+  // Lexical containment first: catches `..` escapes and works before the
+  // compose file exists on disk. `startsWith(appsDir + sep)` (not just
+  // `appsDir`) prevents a sibling-name prefix false-positive — without the
+  // trailing separator, `appsDir = /apps` would accept `/appsteak/...`.
   if (!resolved.startsWith(appsDir + sep) && resolved !== appsDir) {
     throw new RelayConfigError(
       `compose_file resolves outside the apps directory ` +
         `(${resolved} is not under ${appsDir})`,
+    );
+  }
+  // Symlink containment: a symlink inside the app directory can stay lexically
+  // contained while pointing outside APPS_DIR. Resolve symlinks and re-check
+  // against the real apps root. ENOENT means the compose file is not on disk
+  // yet (e.g. a fresh checkout) — presence is enforced separately by the
+  // deploy preflight (checkComposeFileExists), so skip the symlink check here
+  // rather than reject a not-yet-present file.
+  let realResolved: string;
+  try {
+    realResolved = await realpath(resolved);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  const realAppsDir = await realpath(appsDir);
+  if (!realResolved.startsWith(realAppsDir + sep) && realResolved !== realAppsDir) {
+    throw new RelayConfigError(
+      `compose_file resolves through a symlink to outside the apps directory ` +
+        `(${realResolved} is not under ${realAppsDir})`,
     );
   }
 }
@@ -120,7 +141,7 @@ export async function loadRelayConfig(appDir: string): Promise<RelayConfig> {
   }
 
   const config = parseRelayConfig(content);
-  assertComposeFileContained(appDir, config.compose_file);
+  await assertComposeFileContained(appDir, config.compose_file);
   return config;
 }
 
