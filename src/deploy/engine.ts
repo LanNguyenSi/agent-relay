@@ -369,6 +369,7 @@ async function runHealthCheck(
       for (const service of serviceList) {
         const ports = config.health_port ? [config.health_port] : [3000, 3001, 4000, 5000, 8000, 8080];
         for (const port of ports) {
+          // Trust boundary: healthPath (config.health) is operator-controlled and interpolated here — pre-existing residual, not a regression introduced by the runExec migration.
           const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))`;
           const check = await runExec(
             "docker",

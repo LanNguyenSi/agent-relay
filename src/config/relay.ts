@@ -3,12 +3,13 @@ import * as yaml from "js-yaml";
 import { readFile, realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
-// `compose_file` is interpolated into shell via single quotes in
-// src/deploy/engine.ts (`docker compose -f '${config.compose_file}' …`).
-// A literal `'` would terminate the quoted context and let the rest of
-// the value execute as shell. Restrict to a conservative filename charset
-// (letters, digits, dot, underscore, slash, hyphen) so a value can never
-// break out of the quoting.
+// `compose_file` is passed as a literal runExec arg-array element in
+// src/deploy/engine.ts and src/services/apps.ts — never shell-interpolated.
+// Shell injection via `compose_file` is therefore not possible regardless
+// of the charset. COMPOSE_FILE_PATTERN still serves as defence-in-depth
+// and path-charset hygiene: it prevents control characters, whitespace, and
+// other non-printable bytes from slipping in and potentially confusing
+// docker or a downstream audit tool.
 //
 // Path-traversal containment (`..`-escapes-outside-APPS_DIR) is enforced
 // separately in `loadRelayConfig`, where we have `appDir` and can

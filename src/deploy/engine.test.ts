@@ -731,5 +731,15 @@ describe("injection guard — compose_file metacharacters are never shell-interp
       expect(dashFIdx).toBeGreaterThanOrEqual(0);
       expect(args[dashFIdx + 1]).toBe(injected);
     }
+
+    // Mutation guard: runShell must NEVER be called with the injected
+    // compose_file value. If any docker call site were partially reverted to
+    // shell-string interpolation (routing it to runShell instead of runExec),
+    // the metacharacter value would reach /bin/sh. This assertion catches that
+    // partial-revert scenario — the test stays GREEN via runExec alone, so
+    // this is the only assertion that can detect it.
+    expect(
+      mockRunShell.mock.calls.every(([s]) => !s.includes(injected)),
+    ).toBe(true);
   });
 });
