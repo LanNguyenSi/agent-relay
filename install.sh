@@ -10,13 +10,20 @@
 #
 # Env-var surface:
 #   RELAY_DOMAIN           FQDN for TLS routing (required in greenfield / existing-traefik)
-#   TRAEFIK_EMAIL          LE contact address (required in greenfield when RELAY_DOMAIN is set)
+#   TRAEFIK_EMAIL          LE contact address (required in greenfield when RELAY_DOMAIN is set
+#                            and TRAEFIK_CA is not self-signed)
 #   APPS_DIR               Host dir bind-mounted into the relay container as /apps (default /home/deploy/apps as root, $HOME/.local/share/agent-relay/apps non-root)
 #   RELAY_DIR              Where install.sh writes compose + .env (default /opt/agent-relay as root, $HOME/.local/share/agent-relay non-root)
 #   RELAY_PORT             Container port (default 8222)
 #   RELAY_MODE             auto | greenfield | existing-traefik | port-only  (default auto)
 #   TRAEFIK_NETWORK        Docker network to attach to in existing-traefik mode (default traefik-public)
 #   TRAEFIK_CERTRESOLVER   ACME resolver name on the existing Traefik (default letsencrypt)
+#   TRAEFIK_CA             TLS provider for greenfield Traefik (default letsencrypt):
+#                            letsencrypt  Let's Encrypt production CA (default)
+#                            staging      Let's Encrypt staging CA (for testing; untrusted cert)
+#                            pebble       Custom Pebble CA server at PEBBLE_URL (for local testing)
+#                            self-signed  Traefik built-in self-signed cert; no ACME at all
+#   PEBBLE_URL             Pebble CA server URL; required when TRAEFIK_CA=pebble
 #   RELAY_BIND             Host bind IP for port-only mode (default 127.0.0.1; use 0.0.0.0 to expose)
 #   SKIP_TRAEFIK=1         Back-compat alias for RELAY_MODE=port-only
 
@@ -37,6 +44,8 @@ else
 fi
 TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-traefik-public}"
 TRAEFIK_CERTRESOLVER="${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+TRAEFIK_CA="${TRAEFIK_CA:-letsencrypt}"
+PEBBLE_URL="${PEBBLE_URL:-}"
 RELAY_BIND="${RELAY_BIND:-127.0.0.1}"
 
 # Back-compat: SKIP_TRAEFIK=1 → port-only (only when mode wasn't explicitly set)
@@ -85,6 +94,181 @@ agent_relay_check_greenfield_compat() {
   err "RELAY_MODE=greenfield requires root (Traefik bootstrap writes to /opt/traefik and binds :80/:443). Re-run with sudo, or use RELAY_MODE=existing-traefik or RELAY_MODE=port-only."
 }
 
+# ── Input validation ─────────────────────────────────────────────────────────
+# Defined before the INSTALL_SH_SOURCE_ONLY guard so tests can source this
+# file and call validate_value directly without running the full installer.
+#
+# Validates values that get interpolated into compose files / Traefik labels /
+# heredocs. A newline in RELAY_DOMAIN breaks compose YAML; a shell metachar in
+# TRAEFIK_NETWORK breaks labels. Reject early with a clear error rather than
+# failing deep inside docker compose.
+validate_value() {
+  local name="$1" value="$2" pattern="$3"
+  [ -z "$value" ] && return 0
+  [[ "$value" =~ ^${pattern}$ ]] || err "${name}='${value}' has invalid characters (expected: ${pattern})."
+}
+
+# ── Greenfield compose writers ───────────────────────────────────────────────
+# Extracted as named functions so tests can source this file with
+# INSTALL_SH_SOURCE_ONLY=1 and exercise compose generation with controlled env.
+
+# Write Traefik docker-compose.yml to <traefik_dir>/docker-compose.yml.
+# Uses globals: TRAEFIK_EMAIL, TRAEFIK_CA, PEBBLE_URL.
+agent_relay_write_traefik_compose() {
+  local traefik_dir="$1"
+  cat > "${traefik_dir}/docker-compose.yml" <<TRAEFIK_EOF
+services:
+  traefik:
+    image: traefik:v3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik-public"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+$(if [ -n "$TRAEFIK_EMAIL" ] && [ "$TRAEFIK_CA" != "self-signed" ]; then
+cat <<ACME
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/acme.json"
+ACME
+case "$TRAEFIK_CA" in
+  staging) echo '      - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"' ;;
+  pebble)  echo "      - \"--certificatesresolvers.letsencrypt.acme.caserver=${PEBBLE_URL}\"" ;;
+esac
+fi)
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+$([ "$TRAEFIK_CA" != "self-signed" ] && echo "      - ${traefik_dir}/acme.json:/acme.json")
+    networks:
+      - traefik-public
+
+networks:
+  traefik-public:
+    external: true
+TRAEFIK_EOF
+}
+
+# Write relay docker-compose.yml to <relay_dir>/docker-compose.yml.
+# Uses globals: RELAY_MODE, RELAY_PORT, APPS_DIR, RELAY_DOMAIN, TRAEFIK_EMAIL,
+#               TRAEFIK_CA, TRAEFIK_NETWORK, TRAEFIK_CERTRESOLVER, RELAY_BIND.
+agent_relay_write_relay_compose() {
+  local relay_dir="$1"
+  local relay_network_name relay_cert_resolver relay_labels
+  case "$RELAY_MODE" in
+    greenfield)
+      relay_network_name="traefik-public"
+      if [ "$TRAEFIK_CA" = "self-signed" ]; then
+        relay_cert_resolver=""
+      else
+        relay_cert_resolver="letsencrypt"
+      fi
+      # Labels are needed when RELAY_DOMAIN is set AND (TRAEFIK_EMAIL is set OR using self-signed).
+      if [ -n "$RELAY_DOMAIN" ] && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }; then
+        if [ -n "$relay_cert_resolver" ]; then
+          relay_labels="    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${relay_network_name}
+      - traefik.http.routers.relay.rule=Host(\`${RELAY_DOMAIN}\`)
+      - traefik.http.routers.relay.entrypoints=websecure
+      - traefik.http.routers.relay.tls.certresolver=${relay_cert_resolver}
+      - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
+        else
+          # self-signed: no certresolver, but tls=true makes the router TLS-terminated
+          # so Traefik serves its built-in default self-signed cert (without it the
+          # websecure router is plaintext on :443 and the TLS handshake fails).
+          relay_labels="    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${relay_network_name}
+      - traefik.http.routers.relay.rule=Host(\`${RELAY_DOMAIN}\`)
+      - traefik.http.routers.relay.entrypoints=websecure
+      - traefik.http.routers.relay.tls=true
+      - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
+        fi
+      else
+        relay_labels=""
+      fi
+      cat > "${relay_dir}/docker-compose.yml" <<COMPOSE_EOF
+services:
+  relay:
+    image: ghcr.io/lannguyensi/agent-relay:latest
+    container_name: agent-relay
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${RELAY_PORT}:${RELAY_PORT}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPS_DIR}:/apps
+${relay_labels}
+    networks:
+      - ${relay_network_name}
+      - default
+
+networks:
+  ${relay_network_name}:
+    external: true
+COMPOSE_EOF
+      ;;
+
+    existing-traefik)
+      relay_labels="    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.relay.rule=Host(\`${RELAY_DOMAIN}\`)
+      - traefik.http.routers.relay.entrypoints=websecure
+      - traefik.http.routers.relay.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
+      cat > "${relay_dir}/docker-compose.yml" <<COMPOSE_EOF
+services:
+  relay:
+    image: ghcr.io/lannguyensi/agent-relay:latest
+    container_name: agent-relay
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "${RELAY_PORT}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPS_DIR}:/apps
+${relay_labels}
+    networks:
+      - ${TRAEFIK_NETWORK}
+      - default
+
+networks:
+  ${TRAEFIK_NETWORK}:
+    external: true
+COMPOSE_EOF
+      ;;
+
+    port-only)
+      cat > "${relay_dir}/docker-compose.yml" <<COMPOSE_EOF
+services:
+  relay:
+    image: ghcr.io/lannguyensi/agent-relay:latest
+    container_name: agent-relay
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPS_DIR}:/apps
+    networks:
+      - default
+COMPOSE_EOF
+      ;;
+  esac
+}
+
 # ── Source-only guard ────────────────────────────────────────────────────────
 # Sourcing with INSTALL_SH_SOURCE_ONLY=1 stops here so tests can inject
 # id/docker shims and call the above functions directly without side effects.
@@ -105,22 +289,18 @@ case "$RELAY_MODE" in
   *) err "Invalid RELAY_MODE='$RELAY_MODE'. Expected: auto | greenfield | existing-traefik | port-only" ;;
 esac
 
-# Validate values that get interpolated into compose files / Traefik labels /
-# heredocs later. A newline in RELAY_DOMAIN would break compose YAML; a shell
-# metachar in TRAEFIK_NETWORK would break the labels. Reject early with a
-# clear error instead of failing deep inside docker compose.
-validate_value() {
-  local name="$1" value="$2" pattern="$3"
-  [ -z "$value" ] && return 0
-  [[ "$value" =~ ^${pattern}$ ]] || err "${name}='${value}' has invalid characters (expected: ${pattern})."
-}
-
 validate_value RELAY_DOMAIN        "$RELAY_DOMAIN"        '[A-Za-z0-9.-]+'
 validate_value TRAEFIK_NETWORK     "$TRAEFIK_NETWORK"     '[A-Za-z0-9._-]+'
 validate_value TRAEFIK_CERTRESOLVER "$TRAEFIK_CERTRESOLVER" '[A-Za-z0-9_-]+'
 validate_value RELAY_BIND          "$RELAY_BIND"          '[0-9a-fA-F:.]+'
 validate_value TRAEFIK_EMAIL       "$TRAEFIK_EMAIL"       '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+'
 validate_value RELAY_PORT          "$RELAY_PORT"          '[0-9]+'
+validate_value PEBBLE_URL          "$PEBBLE_URL"          '[A-Za-z0-9._:/~?=&%-]+'
+
+case "$TRAEFIK_CA" in
+  letsencrypt|staging|pebble|self-signed) ;;
+  *) err "Invalid TRAEFIK_CA='$TRAEFIK_CA'. Expected: letsencrypt | staging | pebble | self-signed" ;;
+esac
 
 # ── Step 1: Docker ─────────────────────────────────────────────────────────
 if command -v docker &>/dev/null; then
@@ -292,11 +472,19 @@ BANNER
 fi
 
 # ── Step 4: Mode-specific validation ───────────────────────────────────────
+# Warn when TRAEFIK_CA or PEBBLE_URL is set but the resolved mode is not
+# greenfield — these env vars are silently ignored outside greenfield.
+if [ "$RELAY_MODE" != "greenfield" ] && { [ "$TRAEFIK_CA" != "letsencrypt" ] || [ -n "$PEBBLE_URL" ]; }; then
+  warn "TRAEFIK_CA and PEBBLE_URL only affect greenfield mode (resolved mode: ${RELAY_MODE}). They are ignored in this install."
+fi
 case "$RELAY_MODE" in
   greenfield)
-    if [ -n "$RELAY_DOMAIN" ] && [ -z "$TRAEFIK_EMAIL" ]; then
+    if [ -n "$RELAY_DOMAIN" ] && [ -z "$TRAEFIK_EMAIL" ] && [ "$TRAEFIK_CA" != "self-signed" ]; then
       warn "RELAY_DOMAIN='${RELAY_DOMAIN}' but TRAEFIK_EMAIL is empty — Let's Encrypt will not issue a certificate."
       warn "Set TRAEFIK_EMAIL=you@example.com and re-run, or leave RELAY_DOMAIN unset for port-only mode."
+    fi
+    if [ "$TRAEFIK_CA" = "pebble" ] && [ -z "$PEBBLE_URL" ]; then
+      err "TRAEFIK_CA=pebble requires PEBBLE_URL (the URL of your Pebble CA server, e.g. https://pebble:14000/dir)."
     fi
     ;;
   existing-traefik)
@@ -350,43 +538,12 @@ if [ "$RELAY_MODE" = "greenfield" ]; then
   else
     info "Starting Traefik..."
     mkdir -p "$TRAEFIK_DIR"
-    touch "$TRAEFIK_DIR/acme.json"
-    chmod 600 "$TRAEFIK_DIR/acme.json"
+    if [ "$TRAEFIK_CA" != "self-signed" ]; then
+      touch "$TRAEFIK_DIR/acme.json"
+      chmod 600 "$TRAEFIK_DIR/acme.json"
+    fi
 
-    cat > "$TRAEFIK_DIR/docker-compose.yml" <<TRAEFIK_EOF
-services:
-  traefik:
-    image: traefik:v3
-    container_name: traefik
-    restart: unless-stopped
-    command:
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=traefik-public"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-$(if [ -n "$TRAEFIK_EMAIL" ]; then
-cat <<ACME
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/acme.json"
-ACME
-fi)
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${TRAEFIK_DIR}/acme.json:/acme.json
-    networks:
-      - traefik-public
-
-networks:
-  traefik-public:
-    external: true
-TRAEFIK_EOF
+    agent_relay_write_traefik_compose "$TRAEFIK_DIR"
 
     docker compose -f "$TRAEFIK_DIR/docker-compose.yml" up -d
     log "Traefik started"
@@ -412,93 +569,7 @@ PORT=${RELAY_PORT}
 ENV_EOF
 
 # Build compose file. Three shapes, driven by RELAY_MODE.
-case "$RELAY_MODE" in
-  greenfield)
-    RELAY_NETWORK_NAME="traefik-public"
-    RELAY_CERT_RESOLVER="letsencrypt"
-    if [ -n "$RELAY_DOMAIN" ] && [ -n "$TRAEFIK_EMAIL" ]; then
-      RELAY_LABELS="    labels:
-      - traefik.enable=true
-      - traefik.docker.network=${RELAY_NETWORK_NAME}
-      - traefik.http.routers.relay.rule=Host(\`${RELAY_DOMAIN}\`)
-      - traefik.http.routers.relay.entrypoints=websecure
-      - traefik.http.routers.relay.tls.certresolver=${RELAY_CERT_RESOLVER}
-      - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
-    else
-      RELAY_LABELS=""
-    fi
-    cat > "$RELAY_DIR/docker-compose.yml" <<COMPOSE_EOF
-services:
-  relay:
-    image: ghcr.io/lannguyensi/agent-relay:latest
-    container_name: agent-relay
-    restart: unless-stopped
-    env_file: .env
-    ports:
-      - "${RELAY_PORT}:${RELAY_PORT}"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${APPS_DIR}:/apps
-${RELAY_LABELS}
-    networks:
-      - ${RELAY_NETWORK_NAME}
-      - default
-
-networks:
-  ${RELAY_NETWORK_NAME}:
-    external: true
-COMPOSE_EOF
-    ;;
-
-  existing-traefik)
-    RELAY_LABELS="    labels:
-      - traefik.enable=true
-      - traefik.docker.network=${TRAEFIK_NETWORK}
-      - traefik.http.routers.relay.rule=Host(\`${RELAY_DOMAIN}\`)
-      - traefik.http.routers.relay.entrypoints=websecure
-      - traefik.http.routers.relay.tls.certresolver=${TRAEFIK_CERTRESOLVER}
-      - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
-    cat > "$RELAY_DIR/docker-compose.yml" <<COMPOSE_EOF
-services:
-  relay:
-    image: ghcr.io/lannguyensi/agent-relay:latest
-    container_name: agent-relay
-    restart: unless-stopped
-    env_file: .env
-    expose:
-      - "${RELAY_PORT}"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${APPS_DIR}:/apps
-${RELAY_LABELS}
-    networks:
-      - ${TRAEFIK_NETWORK}
-      - default
-
-networks:
-  ${TRAEFIK_NETWORK}:
-    external: true
-COMPOSE_EOF
-    ;;
-
-  port-only)
-    cat > "$RELAY_DIR/docker-compose.yml" <<COMPOSE_EOF
-services:
-  relay:
-    image: ghcr.io/lannguyensi/agent-relay:latest
-    container_name: agent-relay
-    restart: unless-stopped
-    env_file: .env
-    ports:
-      - "${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT}"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${APPS_DIR}:/apps
-    networks:
-      - default
-COMPOSE_EOF
-    ;;
-esac
+agent_relay_write_relay_compose "$RELAY_DIR"
 
 # Broken-existing-relay cleanup (v0.3.0). Idempotency today is fragile:
 # a half-running relay container from a prior failed install can block
@@ -587,6 +658,12 @@ echo -e "  Mode:  ${CYAN}${RELAY_MODE}${NC}"
 echo -e "  URL:   ${CYAN}${RELAY_URL}${NC}"
 echo -e "  Token: ${YELLOW}${AUTH_TOKEN}${NC}"
 echo ""
+if [ "$RELAY_MODE" = "greenfield" ] && [ "$TRAEFIK_CA" = "self-signed" ]; then
+  echo -e "  ${YELLOW}Self-signed TLS:${NC} Traefik uses its built-in self-signed certificate."
+  echo -e "  Your browser and curl will warn about an untrusted certificate."
+  echo -e "  Accept the security exception manually, or pass -k / --insecure to curl."
+  echo ""
+fi
 if [ "$RELAY_MODE" = "port-only" ]; then
   echo -e "  ${YELLOW}Port-only mode: no TLS.${NC}"
   echo -e "  Bind: ${RELAY_BIND}:${RELAY_PORT}."
