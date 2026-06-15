@@ -49,10 +49,11 @@ curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install
 If you are in the `docker` group you can run the installer without `sudo`. The installer detects that `docker info` succeeds without root and switches to non-root mode automatically:
 
 ```bash
-RELAY_MODE=existing-traefik \
-RELAY_DOMAIN=relay.example.com \
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh \
+  | RELAY_MODE=existing-traefik RELAY_DOMAIN=relay.example.com bash
 ```
+
+The env vars go to the right of the pipe so they reach the `bash` that runs the script, not the `curl` process.
 
 Requirements for non-root mode:
 

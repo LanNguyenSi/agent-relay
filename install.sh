@@ -11,8 +11,8 @@
 # Env-var surface:
 #   RELAY_DOMAIN           FQDN for TLS routing (required in greenfield / existing-traefik)
 #   TRAEFIK_EMAIL          LE contact address (required in greenfield when RELAY_DOMAIN is set)
-#   APPS_DIR               Host dir bind-mounted into the relay container as /apps
-#   RELAY_DIR              Where install.sh writes compose + .env (default /opt/agent-relay)
+#   APPS_DIR               Host dir bind-mounted into the relay container as /apps (default /home/deploy/apps as root, $HOME/.local/share/agent-relay/apps non-root)
+#   RELAY_DIR              Where install.sh writes compose + .env (default /opt/agent-relay as root, $HOME/.local/share/agent-relay non-root)
 #   RELAY_PORT             Container port (default 8222)
 #   RELAY_MODE             auto | greenfield | existing-traefik | port-only  (default auto)
 #   TRAEFIK_NETWORK        Docker network to attach to in existing-traefik mode (default traefik-public)

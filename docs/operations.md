@@ -92,18 +92,18 @@ Requirements:
 Example (join an existing Traefik):
 
 ```bash
-RELAY_MODE=existing-traefik \
-RELAY_DOMAIN=relay.example.com \
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh \
+  | RELAY_MODE=existing-traefik RELAY_DOMAIN=relay.example.com bash
 ```
 
 Example (port-only, no TLS):
 
 ```bash
-RELAY_MODE=port-only \
-RELAY_BIND=0.0.0.0 \
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh \
+  | RELAY_MODE=port-only RELAY_BIND=0.0.0.0 bash
 ```
+
+(Env vars go to the right of the pipe so they reach the `bash` running the script.)
 
 ## Running locally
 
