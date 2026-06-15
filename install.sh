@@ -94,6 +94,20 @@ agent_relay_check_greenfield_compat() {
   err "RELAY_MODE=greenfield requires root (Traefik bootstrap writes to /opt/traefik and binds :80/:443). Re-run with sudo, or use RELAY_MODE=existing-traefik or RELAY_MODE=port-only."
 }
 
+# ── Input validation ─────────────────────────────────────────────────────────
+# Defined before the INSTALL_SH_SOURCE_ONLY guard so tests can source this
+# file and call validate_value directly without running the full installer.
+#
+# Validates values that get interpolated into compose files / Traefik labels /
+# heredocs. A newline in RELAY_DOMAIN breaks compose YAML; a shell metachar in
+# TRAEFIK_NETWORK breaks labels. Reject early with a clear error rather than
+# failing deep inside docker compose.
+validate_value() {
+  local name="$1" value="$2" pattern="$3"
+  [ -z "$value" ] && return 0
+  [[ "$value" =~ ^${pattern}$ ]] || err "${name}='${value}' has invalid characters (expected: ${pattern})."
+}
+
 # ── Greenfield compose writers ───────────────────────────────────────────────
 # Extracted as named functions so tests can source this file with
 # INSTALL_SH_SOURCE_ONLY=1 and exercise compose generation with controlled env.
@@ -271,16 +285,6 @@ case "$RELAY_MODE" in
   auto|greenfield|existing-traefik|port-only) ;;
   *) err "Invalid RELAY_MODE='$RELAY_MODE'. Expected: auto | greenfield | existing-traefik | port-only" ;;
 esac
-
-# Validate values that get interpolated into compose files / Traefik labels /
-# heredocs later. A newline in RELAY_DOMAIN would break compose YAML; a shell
-# metachar in TRAEFIK_NETWORK would break the labels. Reject early with a
-# clear error instead of failing deep inside docker compose.
-validate_value() {
-  local name="$1" value="$2" pattern="$3"
-  [ -z "$value" ] && return 0
-  [[ "$value" =~ ^${pattern}$ ]] || err "${name}='${value}' has invalid characters (expected: ${pattern})."
-}
 
 validate_value RELAY_DOMAIN        "$RELAY_DOMAIN"        '[A-Za-z0-9.-]+'
 validate_value TRAEFIK_NETWORK     "$TRAEFIK_NETWORK"     '[A-Za-z0-9._-]+'
