@@ -44,6 +44,22 @@ If you don't yet have a domain, drop `RELAY_DOMAIN` and the installer falls back
 curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
 ```
 
+### Non-root install
+
+If you are in the `docker` group you can run the installer without `sudo`. The installer detects that `docker info` succeeds without root and switches to non-root mode automatically:
+
+```bash
+RELAY_MODE=existing-traefik \
+RELAY_DOMAIN=relay.example.com \
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | bash
+```
+
+Requirements for non-root mode:
+
+- **docker group membership** -- your user must be in the `docker` group (`sudo usermod -aG docker $USER`, then log out and back in) so that `docker info` succeeds without `sudo`.
+- **HOME-writable directory** -- config and compose files are written to `$HOME/.local/share/agent-relay` (override with `RELAY_DIR=...`). The default `/opt/agent-relay` is never created in non-root mode.
+- **Existing reverse proxy for TLS** -- `RELAY_MODE=greenfield` (which provisions Traefik and binds :80/:443) requires root and is rejected with a clear error in non-root mode. Use `RELAY_MODE=existing-traefik` (join an existing Traefik) or `RELAY_MODE=port-only` (no TLS, let your own proxy handle it) instead.
+
 ## Deploy lifecycle
 
 Each app on the VPS is a git repo with a `docker-compose.yml` and a `.relay.yml`. The default flow:

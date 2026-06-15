@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-RELAY_DIR="${RELAY_DIR:-/opt/agent-relay}"
+RELAY_DIR="${RELAY_DIR:-}"  # actual default set after root detection below
 APPS_DIR="${APPS_DIR:-/home/deploy/apps}"
 RELAY_PORT="${RELAY_PORT:-8222}"
 TRAEFIK_EMAIL="${TRAEFIK_EMAIL:-}"
@@ -57,7 +57,18 @@ err()  { echo -e "${RED}[✗]${NC} $1" >&2; exit 1; }
 info() { echo -e "${CYAN}[i]${NC} $1"; }
 
 # ── Pre-checks ─────────────────────────────────────────────────────────────
-[ "$(id -u)" -eq 0 ] || err "Run as root: sudo bash install.sh"
+NONROOT=0
+if [ "$(id -u)" -ne 0 ]; then
+  if docker info &>/dev/null; then
+    NONROOT=1
+    RELAY_DIR="${RELAY_DIR:-${HOME}/.local/share/agent-relay}"
+    info "Non-root mode: Docker accessible without sudo. Install writes to ${RELAY_DIR}"
+  else
+    err "Run as root: sudo bash install.sh (or add yourself to the docker group for non-root install)"
+  fi
+fi
+# Apply root-mode RELAY_DIR default (no-op when already set above or by env).
+: "${RELAY_DIR:=/opt/agent-relay}"
 
 if ! grep -qiE 'ubuntu|debian' /etc/os-release 2>/dev/null; then
   warn "This script is tested on Ubuntu 22.04+ and Debian 12+. Proceed with caution."
@@ -88,6 +99,10 @@ validate_value RELAY_PORT          "$RELAY_PORT"          '[0-9]+'
 # ── Step 1: Docker ─────────────────────────────────────────────────────────
 if command -v docker &>/dev/null; then
   log "Docker already installed ($(docker --version | awk '{print $3}'))"
+elif [ "$NONROOT" = "1" ]; then
+  # Unreachable in practice (docker info succeeded above), but guards the
+  # root-level curl|bash installer from ever running as a non-root user.
+  err "Docker is not installed. Non-root install requires Docker to be pre-installed and your user to be in the docker group."
 else
   info "Installing Docker..."
   curl -fsSL https://get.docker.com | bash
@@ -296,6 +311,9 @@ esac
 
 # ── Step 5: Traefik bootstrap (greenfield only) ────────────────────────────
 if [ "$RELAY_MODE" = "greenfield" ]; then
+  if [ "$NONROOT" = "1" ]; then
+    err "RELAY_MODE=greenfield requires root (Traefik bootstrap writes to /opt/traefik and binds :80/:443). Re-run with sudo, or use RELAY_MODE=existing-traefik or RELAY_MODE=port-only."
+  fi
   if ! docker network inspect traefik-public &>/dev/null; then
     docker network create traefik-public >/dev/null
     log "Created traefik-public network"
