@@ -88,6 +88,9 @@ agent_relay_check_greenfield_compat() {
 # ── Source-only guard ────────────────────────────────────────────────────────
 # Sourcing with INSTALL_SH_SOURCE_ONLY=1 stops here so tests can inject
 # id/docker shims and call the above functions directly without side effects.
+# `return` exits the sourced script; the `exit 0` fallback covers a direct run
+# where `return` is invalid. shellcheck can't see that indirect path (SC2317).
+# shellcheck disable=SC2317
 if [ "${INSTALL_SH_SOURCE_ONLY:-}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
 
 # ── Pre-checks ─────────────────────────────────────────────────────────────
