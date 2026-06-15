@@ -136,6 +136,8 @@ DOCKER_SHIM
   [ "$status" -eq 0 ]
   [[ "$output" =~ "certresolver=letsencrypt" ]]
   [[ "$output" =~ "traefik.enable=true" ]]
+  # cert-resolver branch relies on tls.certresolver; it must NOT emit a bare tls=true
+  ! [[ "$output" =~ "routers.relay.tls=true" ]]
 }
 
 @test "staging: relay compose labels include certresolver (resolver name unchanged)" {
@@ -176,6 +178,9 @@ DOCKER_SHIM
   ! [[ "$output" =~ "certresolver" ]]
   [[ "$output" =~ "traefik.enable=true" ]]
   [[ "$output" =~ "relay.example.com" ]]
+  # self-signed must still TLS-terminate the router (tls=true) so Traefik serves
+  # its default self-signed cert; without it the websecure router is plaintext.
+  [[ "$output" =~ "routers.relay.tls=true" ]]
 }
 
 # ─── validate_value PEBBLE_URL injection guard ───────────────────────────────

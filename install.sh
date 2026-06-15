@@ -181,12 +181,15 @@ agent_relay_write_relay_compose() {
       - traefik.http.routers.relay.tls.certresolver=${relay_cert_resolver}
       - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
         else
-          # self-signed: omit certresolver label; Traefik uses its built-in default cert
+          # self-signed: no certresolver, but tls=true makes the router TLS-terminated
+          # so Traefik serves its built-in default self-signed cert (without it the
+          # websecure router is plaintext on :443 and the TLS handshake fails).
           relay_labels="    labels:
       - traefik.enable=true
       - traefik.docker.network=${relay_network_name}
       - traefik.http.routers.relay.rule=Host(\`${RELAY_DOMAIN}\`)
       - traefik.http.routers.relay.entrypoints=websecure
+      - traefik.http.routers.relay.tls=true
       - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
         fi
       else
