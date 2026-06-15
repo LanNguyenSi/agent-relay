@@ -1,154 +1,155 @@
 #!/usr/bin/env bats
-# Minimal smoke tests for the non-root guard logic in install.sh.
-# These source only the isolated sections via a shim rather than running
-# the full installer (which requires Docker, VPS tools, etc.).
+# Tests for the non-root install path in install.sh.
+#
+# All tests exercise the REAL install.sh via INSTALL_SH_SOURCE_ONLY=1:
+# the source guard exposes agent_relay_detect_dirs() and
+# agent_relay_check_greenfield_compat() without running the full installer
+# (which requires Docker, VPS tools, etc.).  Mutations to install.sh will
+# therefore be caught — inline re-implementations would not be.
 
-# ─── helpers ────────────────────────────────────────────────────────────────
+INSTALL_SH="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/install.sh"
 
-# Source just enough of install.sh to test the NONROOT logic without
-# executing the full script. We extract the relevant guard functions and
-# variables into a small shim.
+# ─── helpers ─────────────────────────────────────────────────────────────────
 
 setup() {
-  # Capture err/warn/info/log to variables so we can assert on them.
-  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
-  CYAN='\033[0;36m'; NC='\033[0m'
-  ERR_MSG=""
-  INFO_MSG=""
-  log()  { :; }
-  warn() { :; }
-  info() { INFO_MSG="$1"; }
-  err()  { ERR_MSG="$1"; exit 1; }
+  SHIM_DIR="$(mktemp -d)"
+  FAKE_HOME="$(mktemp -d)"
 }
 
-# Run the pre-check block in a subshell with a mock id/docker.
-run_precheck() {
-  local is_root="$1"   # "0" for root, "1" for non-root
-  local docker_ok="$2" # "yes" = docker info succeeds
+teardown() {
+  rm -rf "$SHIM_DIR" "$FAKE_HOME"
+}
 
-  (
-    source /dev/stdin <<'SHIM'
-RED=''; GREEN=''; YELLOW=''; CYAN=''; NC=''
-ERR_MSG=""
-INFO_MSG=""
-log()  { :; }
-warn() { :; }
-info() { INFO_MSG="$1"; echo "$1"; }
-err()  { echo "ERR: $1" >&2; exit 1; }
-SHIM
+# Write minimal PATH shims for `id` and `docker`.
+#   uid_val     numeric uid returned by `id -u`
+#   docker_info "ok" = docker info exits 0; "fail" = exits 1
+_make_shims() {
+  local uid_val="$1" docker_info="$2"
 
-    # Inject the NONROOT block under test
-    eval "
-NONROOT=0
-if [ '${is_root}' != '0' ]; then
-  if ${docker_ok}; then
-    NONROOT=1
-    RELAY_DIR=\"\${RELAY_DIR:-\${HOME}/.local/share/agent-relay}\"
-    info \"Non-root mode: Docker accessible without sudo. Install writes to \${RELAY_DIR}\"
+  printf '#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo %s && exit 0\nexec id "$@"\n' \
+    "$uid_val" > "${SHIM_DIR}/id"
+
+  if [ "$docker_info" = "ok" ]; then
+    printf '#!/usr/bin/env bash\n[ "$1" = "info" ] && exit 0\ntrue\n' > "${SHIM_DIR}/docker"
   else
-    err \"Run as root: sudo bash install.sh (or add yourself to the docker group for non-root install)\"
+    printf '#!/usr/bin/env bash\n[ "$1" = "info" ] && exit 1\ntrue\n' > "${SHIM_DIR}/docker"
   fi
-fi
-: \"\${RELAY_DIR:=/opt/agent-relay}\"
-echo \"NONROOT=\$NONROOT\"
-echo \"RELAY_DIR=\$RELAY_DIR\"
-"
-  )
+
+  chmod +x "${SHIM_DIR}/id" "${SHIM_DIR}/docker"
 }
 
-# ─── tests ──────────────────────────────────────────────────────────────────
-
-@test "root mode: NONROOT=0, RELAY_DIR=/opt/agent-relay" {
-  result=$(run_precheck 0 "true")
-  echo "$result" | grep -q "NONROOT=0"
-  echo "$result" | grep -q "RELAY_DIR=/opt/agent-relay"
+# Run a bash fragment in a subprocess with shims on PATH and a controlled HOME.
+# The real install.sh is sourced under INSTALL_SH_SOURCE_ONLY=1 first, making
+# agent_relay_detect_dirs() and agent_relay_check_greenfield_compat() available.
+# stdout and stderr are merged so bats captures them in $output.
+_run_with_shims() {
+  local uid_val="$1" docker_info="$2" fragment="$3"
+  _make_shims "$uid_val" "$docker_info"
+  run bash -c "
+    export PATH='${SHIM_DIR}:${PATH}'
+    export HOME='${FAKE_HOME}'
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    ${fragment}
+  " 2>&1
 }
 
-@test "non-root + docker accessible: NONROOT=1, RELAY_DIR under HOME" {
-  result=$(run_precheck 1 "true")
-  echo "$result" | grep -q "NONROOT=1"
-  echo "$result" | grep -qE "RELAY_DIR=.+/.local/share/agent-relay"
-}
+# ─── agent_relay_detect_dirs tests ───────────────────────────────────────────
 
-@test "non-root + docker inaccessible: exits non-zero with error" {
-  run bash -c "$(cat <<'EOF'
-RED=''; GREEN=''; YELLOW=''; CYAN=''; NC=''
-log()  { :; }; warn() { :; }; info() { echo "$1"; }
-err()  { echo "ERR: $1" >&2; exit 1; }
-NONROOT=0
-if [ 1 -ne 0 ]; then
-  if false; then
-    NONROOT=1
-    RELAY_DIR="${RELAY_DIR:-${HOME}/.local/share/agent-relay}"
-    info "Non-root mode"
-  else
-    err "Run as root: sudo bash install.sh (or add yourself to the docker group for non-root install)"
-  fi
-fi
-EOF
-)"
-  [ "$status" -ne 0 ]
-  echo "$output" | grep -q "docker group"
-}
-
-@test "env RELAY_DIR is honoured in non-root mode (no override)" {
-  result=$(RELAY_DIR=/custom/path run_precheck 1 "true")
-  echo "$result" | grep -q "RELAY_DIR=/custom/path"
-}
-
-@test "greenfield mode + NONROOT=1: exits non-zero with clear message" {
-  run bash -c "$(cat <<'EOF'
-RED=''; GREEN=''; YELLOW=''; CYAN=''; NC=''
-log()  { :; }; warn() { :; }; info() { echo "$1"; }
-err()  { echo "ERR: $1" >&2; exit 1; }
-NONROOT=1
-RELAY_MODE=greenfield
-if [ "$RELAY_MODE" = "greenfield" ]; then
-  if [ "$NONROOT" = "1" ]; then
-    err "RELAY_MODE=greenfield requires root (Traefik bootstrap writes to /opt/traefik and binds :80/:443). Re-run with sudo, or use RELAY_MODE=existing-traefik or RELAY_MODE=port-only."
-  fi
-fi
-echo "should not reach here"
-EOF
-)"
-  [ "$status" -ne 0 ]
-  echo "$output" | grep -q "requires root"
-}
-
-@test "existing-traefik mode + NONROOT=1: does NOT exit early at greenfield gate" {
-  run bash -c "$(cat <<'EOF'
-RED=''; GREEN=''; YELLOW=''; CYAN=''; NC=''
-log()  { :; }; warn() { :; }; info() { echo "$1"; }
-err()  { echo "ERR: $1" >&2; exit 1; }
-NONROOT=1
-RELAY_MODE=existing-traefik
-if [ "$RELAY_MODE" = "greenfield" ]; then
-  if [ "$NONROOT" = "1" ]; then
-    err "RELAY_MODE=greenfield requires root"
-  fi
-fi
-echo "passed greenfield gate"
-EOF
-)"
+@test "root mode: NONROOT=0, RELAY_DIR=/opt/agent-relay, APPS_DIR=/home/deploy/apps" {
+  _run_with_shims 0 "ok" "
+    unset RELAY_DIR APPS_DIR
+    agent_relay_detect_dirs
+    echo \"NONROOT=\${NONROOT}\"
+    echo \"RELAY_DIR=\${RELAY_DIR}\"
+    echo \"APPS_DIR=\${APPS_DIR}\"
+  "
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "passed greenfield gate"
+  [[ "$output" =~ "NONROOT=0" ]]
+  [[ "$output" =~ "RELAY_DIR=/opt/agent-relay" ]]
+  [[ "$output" =~ "APPS_DIR=/home/deploy/apps" ]]
 }
 
-@test "port-only mode + NONROOT=1: does NOT exit early at greenfield gate" {
-  run bash -c "$(cat <<'EOF'
-RED=''; GREEN=''; YELLOW=''; CYAN=''; NC=''
-log()  { :; }; warn() { :; }; info() { echo "$1"; }
-err()  { echo "ERR: $1" >&2; exit 1; }
-NONROOT=1
-RELAY_MODE=port-only
-if [ "$RELAY_MODE" = "greenfield" ]; then
-  if [ "$NONROOT" = "1" ]; then
-    err "RELAY_MODE=greenfield requires root"
-  fi
-fi
-echo "passed greenfield gate"
-EOF
-)"
+@test "non-root + docker accessible: NONROOT=1, RELAY_DIR and APPS_DIR under HOME" {
+  _run_with_shims 1000 "ok" "
+    unset RELAY_DIR APPS_DIR
+    agent_relay_detect_dirs
+    echo \"NONROOT=\${NONROOT}\"
+    echo \"RELAY_DIR=\${RELAY_DIR}\"
+    echo \"APPS_DIR=\${APPS_DIR}\"
+  "
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "passed greenfield gate"
+  [[ "$output" =~ "NONROOT=1" ]]
+  [[ "$output" =~ "RELAY_DIR=${FAKE_HOME}/.local/share/agent-relay" ]]
+  [[ "$output" =~ "APPS_DIR=${FAKE_HOME}/.local/share/agent-relay/apps" ]]
+}
+
+@test "non-root + docker inaccessible: exits non-zero with error about docker group" {
+  _run_with_shims 1000 "fail" "
+    unset RELAY_DIR APPS_DIR
+    agent_relay_detect_dirs
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "docker group" ]]
+}
+
+@test "env RELAY_DIR honoured in non-root mode (not overridden)" {
+  _run_with_shims 1000 "ok" "
+    RELAY_DIR=/custom/relay
+    unset APPS_DIR
+    agent_relay_detect_dirs
+    echo \"RELAY_DIR=\${RELAY_DIR}\"
+    echo \"APPS_DIR=\${APPS_DIR}\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "RELAY_DIR=/custom/relay" ]]
+  [[ "$output" =~ "APPS_DIR=${FAKE_HOME}/.local/share/agent-relay/apps" ]]
+}
+
+@test "env APPS_DIR honoured in non-root mode (not overridden)" {
+  _run_with_shims 1000 "ok" "
+    unset RELAY_DIR
+    APPS_DIR=/custom/apps
+    agent_relay_detect_dirs
+    echo \"APPS_DIR=\${APPS_DIR}\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "APPS_DIR=/custom/apps" ]]
+}
+
+# ─── agent_relay_check_greenfield_compat tests ───────────────────────────────
+
+@test "greenfield mode + NONROOT=1: exits non-zero with clear requires-root message" {
+  _run_with_shims 1000 "ok" "
+    unset RELAY_DIR APPS_DIR
+    agent_relay_detect_dirs
+    RELAY_MODE=greenfield
+    agent_relay_check_greenfield_compat
+    echo 'should not reach here'
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "requires root" ]]
+}
+
+@test "existing-traefik mode + NONROOT=1: passes greenfield compat check" {
+  _run_with_shims 1000 "ok" "
+    unset RELAY_DIR APPS_DIR
+    agent_relay_detect_dirs
+    RELAY_MODE=existing-traefik
+    agent_relay_check_greenfield_compat
+    echo 'passed greenfield gate'
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "passed greenfield gate" ]]
+}
+
+@test "port-only mode + NONROOT=1: passes greenfield compat check" {
+  _run_with_shims 1000 "ok" "
+    unset RELAY_DIR APPS_DIR
+    agent_relay_detect_dirs
+    RELAY_MODE=port-only
+    agent_relay_check_greenfield_compat
+    echo 'passed greenfield gate'
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "passed greenfield gate" ]]
 }

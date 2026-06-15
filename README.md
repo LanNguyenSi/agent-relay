@@ -57,7 +57,9 @@ curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install
 Requirements for non-root mode:
 
 - **docker group membership** -- your user must be in the `docker` group (`sudo usermod -aG docker $USER`, then log out and back in) so that `docker info` succeeds without `sudo`.
-- **HOME-writable directory** -- config and compose files are written to `$HOME/.local/share/agent-relay` (override with `RELAY_DIR=...`). The default `/opt/agent-relay` is never created in non-root mode.
+- **HOME-writable directories** -- config, compose files, and apps are written to HOME-relative paths. Defaults and overrides:
+  - `RELAY_DIR` defaults to `$HOME/.local/share/agent-relay` (override with `RELAY_DIR=...`). The default `/opt/agent-relay` is never created in non-root mode.
+  - `APPS_DIR` defaults to `$HOME/.local/share/agent-relay/apps` (override with `APPS_DIR=...`). The default `/home/deploy/apps` is never created in non-root mode.
 - **Existing reverse proxy for TLS** -- `RELAY_MODE=greenfield` (which provisions Traefik and binds :80/:443) requires root and is rejected with a clear error in non-root mode. Use `RELAY_MODE=existing-traefik` (join an existing Traefik) or `RELAY_MODE=port-only` (no TLS, let your own proxy handle it) instead.
 
 ## Deploy lifecycle
