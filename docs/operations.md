@@ -40,9 +40,11 @@ Set these before running the script to customise the install:
 |----------|---------|-------------|
 | `RELAY_MODE` | `auto` | `auto` / `greenfield` / `existing-traefik` / `port-only` |
 | `RELAY_DOMAIN` | -- | FQDN the relay should serve. Required for `greenfield` (TLS) and `existing-traefik` |
-| `TRAEFIK_EMAIL` | -- | Email for Let's Encrypt. Required in `greenfield` when `RELAY_DOMAIN` is set |
+| `TRAEFIK_EMAIL` | -- | Email for Let's Encrypt. Required in `greenfield` when `RELAY_DOMAIN` is set. Not required when `TRAEFIK_CA=self-signed`. |
 | `TRAEFIK_NETWORK` | `traefik-public` | Docker network of the existing Traefik (used in `existing-traefik` mode) |
 | `TRAEFIK_CERTRESOLVER` | `letsencrypt` | ACME resolver name configured on the existing Traefik |
+| `TRAEFIK_CA` | `letsencrypt` | TLS provider for greenfield Traefik. Values: `letsencrypt` (default, production LE), `staging` (LE staging CA, untrusted cert), `pebble` (custom Pebble CA at `PEBBLE_URL`), `self-signed` (Traefik built-in cert, no ACME). Only affects `greenfield` mode. |
+| `PEBBLE_URL` | -- | Pebble CA server URL (e.g. `https://pebble:14000/dir`). Required when `TRAEFIK_CA=pebble` |
 | `RELAY_BIND` | `127.0.0.1` | Host bind IP for `port-only` mode. Use `0.0.0.0` to expose publicly |
 | `APPS_DIR` | `/home/deploy/apps` (root) or `$HOME/.local/share/agent-relay/apps` (non-root) | Host directory containing app directories |
 | `RELAY_DIR` | `/opt/agent-relay` (root) or `$HOME/.local/share/agent-relay` (non-root) | Directory for relay config and compose file |
