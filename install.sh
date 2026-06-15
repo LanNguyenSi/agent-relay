@@ -11,8 +11,8 @@
 # Env-var surface:
 #   RELAY_DOMAIN           FQDN for TLS routing (required in greenfield / existing-traefik)
 #   TRAEFIK_EMAIL          LE contact address (required in greenfield when RELAY_DOMAIN is set)
-#   APPS_DIR               Host dir bind-mounted into the relay container as /apps
-#   RELAY_DIR              Where install.sh writes compose + .env (default /opt/agent-relay)
+#   APPS_DIR               Host dir bind-mounted into the relay container as /apps (default /home/deploy/apps as root, $HOME/.local/share/agent-relay/apps non-root)
+#   RELAY_DIR              Where install.sh writes compose + .env (default /opt/agent-relay as root, $HOME/.local/share/agent-relay non-root)
 #   RELAY_PORT             Container port (default 8222)
 #   RELAY_MODE             auto | greenfield | existing-traefik | port-only  (default auto)
 #   TRAEFIK_NETWORK        Docker network to attach to in existing-traefik mode (default traefik-public)
@@ -22,8 +22,8 @@
 
 set -euo pipefail
 
-RELAY_DIR="${RELAY_DIR:-/opt/agent-relay}"
-APPS_DIR="${APPS_DIR:-/home/deploy/apps}"
+RELAY_DIR="${RELAY_DIR:-}"  # actual default set after root detection below
+APPS_DIR="${APPS_DIR:-}"    # actual default set after root detection below
 RELAY_PORT="${RELAY_PORT:-8222}"
 TRAEFIK_EMAIL="${TRAEFIK_EMAIL:-}"
 RELAY_DOMAIN="${RELAY_DOMAIN:-}"
@@ -56,8 +56,42 @@ warn() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
 err()  { echo -e "${RED}[✗]${NC} $1" >&2; exit 1; }
 info() { echo -e "${CYAN}[i]${NC} $1"; }
 
+# ── Directory resolution ─────────────────────────────────────────────────────
+# Extracted as a named function so tests can source this file with
+# INSTALL_SH_SOURCE_ONLY=1 and exercise the real logic via controlled shims.
+agent_relay_detect_dirs() {
+  NONROOT=0
+  if [ "$(id -u)" -ne 0 ]; then
+    if docker info &>/dev/null; then
+      NONROOT=1
+      RELAY_DIR="${RELAY_DIR:-${HOME}/.local/share/agent-relay}"
+      APPS_DIR="${APPS_DIR:-${HOME}/.local/share/agent-relay/apps}"
+      info "Non-root mode: Docker accessible without sudo. Install writes to ${RELAY_DIR}"
+    else
+      err "Run as root: sudo bash install.sh (or add yourself to the docker group for non-root install)"
+    fi
+  fi
+  # Apply root-mode defaults (no-op when already set above or by env).
+  : "${RELAY_DIR:=/opt/agent-relay}"
+  : "${APPS_DIR:=/home/deploy/apps}"
+}
+
+# ── Greenfield compatibility check ───────────────────────────────────────────
+# Isolated as a named function so tests can assert on it directly.
+# Guards both the mode AND non-root so it is safe to call unconditionally.
+agent_relay_check_greenfield_compat() {
+  [ "$RELAY_MODE" = "greenfield" ] || return 0
+  [ "$NONROOT" != "1" ] && return 0
+  err "RELAY_MODE=greenfield requires root (Traefik bootstrap writes to /opt/traefik and binds :80/:443). Re-run with sudo, or use RELAY_MODE=existing-traefik or RELAY_MODE=port-only."
+}
+
+# ── Source-only guard ────────────────────────────────────────────────────────
+# Sourcing with INSTALL_SH_SOURCE_ONLY=1 stops here so tests can inject
+# id/docker shims and call the above functions directly without side effects.
+if [ "${INSTALL_SH_SOURCE_ONLY:-}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
+
 # ── Pre-checks ─────────────────────────────────────────────────────────────
-[ "$(id -u)" -eq 0 ] || err "Run as root: sudo bash install.sh"
+agent_relay_detect_dirs
 
 if ! grep -qiE 'ubuntu|debian' /etc/os-release 2>/dev/null; then
   warn "This script is tested on Ubuntu 22.04+ and Debian 12+. Proceed with caution."
@@ -88,6 +122,9 @@ validate_value RELAY_PORT          "$RELAY_PORT"          '[0-9]+'
 # ── Step 1: Docker ─────────────────────────────────────────────────────────
 if command -v docker &>/dev/null; then
   log "Docker already installed ($(docker --version | awk '{print $3}'))"
+  # Note: NONROOT=1 is only set when docker info succeeded in
+  # agent_relay_detect_dirs, which implies docker is on PATH.
+  # So non-root always reaches this branch — no separate elif needed.
 else
   info "Installing Docker..."
   curl -fsSL https://get.docker.com | bash
@@ -296,6 +333,7 @@ esac
 
 # ── Step 5: Traefik bootstrap (greenfield only) ────────────────────────────
 if [ "$RELAY_MODE" = "greenfield" ]; then
+  agent_relay_check_greenfield_compat
   if ! docker network inspect traefik-public &>/dev/null; then
     docker network create traefik-public >/dev/null
     log "Created traefik-public network"

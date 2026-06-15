@@ -44,8 +44,8 @@ Set these before running the script to customise the install:
 | `TRAEFIK_NETWORK` | `traefik-public` | Docker network of the existing Traefik (used in `existing-traefik` mode) |
 | `TRAEFIK_CERTRESOLVER` | `letsencrypt` | ACME resolver name configured on the existing Traefik |
 | `RELAY_BIND` | `127.0.0.1` | Host bind IP for `port-only` mode. Use `0.0.0.0` to expose publicly |
-| `APPS_DIR` | `/home/deploy/apps` | Host directory containing app directories |
-| `RELAY_DIR` | `/opt/agent-relay` | Directory for relay config and compose file |
+| `APPS_DIR` | `/home/deploy/apps` (root) or `$HOME/.local/share/agent-relay/apps` (non-root) | Host directory containing app directories |
+| `RELAY_DIR` | `/opt/agent-relay` (root) or `$HOME/.local/share/agent-relay` (non-root) | Directory for relay config and compose file |
 | `RELAY_PORT` | `8222` | Port for the relay HTTP server |
 | `SKIP_TRAEFIK` | -- | `1` = back-compat alias for `RELAY_MODE=port-only` (only applied when `RELAY_MODE` is left at `auto`) |
 
@@ -76,6 +76,34 @@ Port-only (nginx handles TLS, relay on loopback):
 RELAY_MODE=port-only \
 curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
 ```
+
+### Non-root install
+
+The installer can run without `sudo` if your user is in the `docker` group. It detects this automatically via `docker info` and enters non-root mode.
+
+Requirements:
+
+- **docker group**: `sudo usermod -aG docker $USER` then log out/in so `docker info` succeeds without `sudo`.
+- **HOME-writable paths**: all files go to HOME-relative directories. Defaults and overrides:
+  - `RELAY_DIR` defaults to `$HOME/.local/share/agent-relay` (override with `RELAY_DIR=...`). `/opt/agent-relay` is never created in non-root mode.
+  - `APPS_DIR` defaults to `$HOME/.local/share/agent-relay/apps` (override with `APPS_DIR=...`). `/home/deploy/apps` is never created in non-root mode.
+- **Existing reverse proxy**: `RELAY_MODE=greenfield` is rejected in non-root mode with a clear error because Traefik bootstrap writes to `/opt/traefik` and binds :80/:443. Use `existing-traefik` (join an existing Traefik) or `port-only` instead.
+
+Example (join an existing Traefik):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh \
+  | RELAY_MODE=existing-traefik RELAY_DOMAIN=relay.example.com bash
+```
+
+Example (port-only, no TLS):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh \
+  | RELAY_MODE=port-only RELAY_BIND=0.0.0.0 bash
+```
+
+(Env vars go to the right of the pipe so they reach the `bash` running the script.)
 
 ## Running locally
 
