@@ -1,6 +1,6 @@
 import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
 import { runPreflightChecks, type PreflightReport } from "./preflight.js";
-import { shell } from "./exec.js";
+import { runExec, runShell } from "./exec.js";
 
 export interface DeployStep {
   name: string;
@@ -54,7 +54,7 @@ export async function deploy(
   // Detect current branch if not specified
   let branch = options.branch;
   if (!branch) {
-    const branchResult = await shell("git rev-parse --abbrev-ref HEAD", appDir);
+    const branchResult = await runExec("git", ["rev-parse", "--abbrev-ref", "HEAD"], appDir);
     branch = branchResult.stdout.trim() || "main";
   }
   const steps: DeployStep[] = [];
@@ -127,8 +127,10 @@ async function defaultFlowDeploy(
 
   // Pre-update commands run against the PRE-pull working tree, so the
   // pre-pull config is the right source of truth for them.
+  // runShell: pre_update values are operator-supplied shell commands in .relay.yml
+  // (trust boundary — see runShell JSDoc in exec.ts).
   for (const cmd of prePullConfig.pre_update) {
-    const step = await runStep(`pre_update: ${cmd}`, () => shell(cmd, appDir));
+    const step = await runStep(`pre_update: ${cmd}`, () => runShell(cmd, appDir));
     emit(step);
     if (step.status === "failure") {
       return result(false, commitBefore, commitBefore, steps, start);
@@ -137,7 +139,7 @@ async function defaultFlowDeploy(
 
   // Git pull
   const pullStep = await runStep("git pull", () =>
-    shell(`git pull origin '${branch}'`, appDir),
+    runExec("git", ["pull", "origin", branch], appDir),
   );
   emit(pullStep);
   if (pullStep.status === "failure") {
@@ -210,7 +212,7 @@ async function defaultFlowDeploy(
 
   // Docker compose build
   const buildStep = await runStep("compose build", () =>
-    shell(`docker compose -f '${config.compose_file}' build`, appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir),
   );
   emit(buildStep);
   if (buildStep.status === "failure") {
@@ -220,7 +222,7 @@ async function defaultFlowDeploy(
 
   // Docker compose up
   const upStep = await runStep("compose up", () =>
-    shell(`docker compose -f '${config.compose_file}' up -d`, appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir),
   );
   emit(upStep);
   if (upStep.status === "failure") {
@@ -229,8 +231,10 @@ async function defaultFlowDeploy(
   }
 
   // Post-update commands
+  // runShell: post_update values are operator-supplied shell commands in .relay.yml
+  // (trust boundary — see runShell JSDoc in exec.ts).
   for (const cmd of config.post_update) {
-    const step = await runStep(`post_update: ${cmd}`, () => shell(cmd, appDir));
+    const step = await runStep(`post_update: ${cmd}`, () => runShell(cmd, appDir));
     emit(step);
     if (step.status === "failure") {
       await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
@@ -291,8 +295,10 @@ async function customCommandDeploy(
     };
   }
 
+  // runShell: command is an operator-supplied shell command in .relay.yml
+  // (trust boundary — see runShell JSDoc in exec.ts).
   const cmdStep = await runStep(`command: ${preCommandConfig.command}`, () =>
-    shell(preCommandConfig.command!, appDir),
+    runShell(preCommandConfig.command!, appDir),
   );
   steps.push(cmdStep);
   onStep?.(cmdStep);
@@ -353,15 +359,20 @@ async function runHealthCheck(
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
 
-      const services = await shell(`docker compose -f '${config.compose_file}' ps --services --status running`, appDir);
+      const services = await runExec(
+        "docker",
+        ["compose", "-f", config.compose_file, "ps", "--services", "--status", "running"],
+        appDir,
+      );
       const serviceList = services.stdout.trim().split("\n").filter(Boolean);
 
       for (const service of serviceList) {
         const ports = config.health_port ? [config.health_port] : [3000, 3001, 4000, 5000, 8000, 8080];
         for (const port of ports) {
-          const check = await shell(
-            `docker compose -f '${config.compose_file}' exec -T ${service} ` +
-            `node -e "fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))"`,
+          const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))`;
+          const check = await runExec(
+            "docker",
+            ["compose", "-f", config.compose_file, "exec", "-T", service, "node", "-e", jsSnippet],
             appDir,
           );
           if (check.exitCode === 0) {
@@ -390,19 +401,19 @@ async function rollbackIfEnabled(
   }
 
   const checkoutStep = await runStep("rollback: git reset", () =>
-    shell(`git reset --hard '${commitSha}'`, appDir),
+    runExec("git", ["reset", "--hard", commitSha], appDir),
   );
   steps.push(checkoutStep);
   if (checkoutStep.status === "failure") return;
 
   const rebuildStep = await runStep("rollback: compose build", () =>
-    shell(`docker compose -f '${config.compose_file}' build`, appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir),
   );
   steps.push(rebuildStep);
   if (rebuildStep.status === "failure") return;
 
   const restartStep = await runStep("rollback: compose up", () =>
-    shell(`docker compose -f '${config.compose_file}' up -d`, appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir),
   );
   steps.push(restartStep);
 }
@@ -431,7 +442,7 @@ async function runStep(
 }
 
 async function getCurrentCommit(appDir: string): Promise<string> {
-  const r = await shell("git rev-parse HEAD", appDir);
+  const r = await runExec("git", ["rev-parse", "HEAD"], appDir);
   return r.stdout.trim() || "unknown";
 }
 

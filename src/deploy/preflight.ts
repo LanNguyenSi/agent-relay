@@ -1,7 +1,7 @@
 import { readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import type { RelayConfig } from "../config/relay.js";
-import { exec, shell } from "./exec.js";
+import { runExec } from "./exec.js";
 
 export interface PreflightCheck {
   name: string;
@@ -74,7 +74,7 @@ async function checkComposeFileExists(appDir: string, composeFile: string): Prom
 }
 
 async function checkContainersRunning(appDir: string, composeFile: string): Promise<PreflightCheck> {
-  const result = await exec("docker", ["compose", "-f", composeFile, "ps", "--format", "json", "-q"], appDir);
+  const result = await runExec("docker", ["compose", "-f", composeFile, "ps", "--format", "json", "-q"], appDir);
   if (result.exitCode !== 0) {
     return { name: "containers_running", passed: false, message: "Failed to check containers: " + result.stderr, critical: false };
   }
@@ -114,7 +114,7 @@ async function checkHealthDefined(config: RelayConfig): Promise<PreflightCheck> 
 }
 
 async function checkGitClean(appDir: string): Promise<PreflightCheck> {
-  const result = await shell("git status --porcelain", appDir);
+  const result = await runExec("git", ["status", "--porcelain"], appDir);
   if (result.exitCode !== 0) {
     return { name: "git_clean", passed: false, message: "Failed to check git status: " + result.stderr, critical: false };
   }
@@ -128,7 +128,7 @@ async function checkGitClean(appDir: string): Promise<PreflightCheck> {
 }
 
 async function checkGitRemoteReachable(appDir: string): Promise<PreflightCheck> {
-  const result = await shell("git ls-remote --exit-code origin HEAD", appDir);
+  const result = await runExec("git", ["ls-remote", "--exit-code", "origin", "HEAD"], appDir);
   const reachable = result.exitCode === 0;
   return {
     name: "git_remote_reachable",

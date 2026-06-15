@@ -3,8 +3,8 @@ import { RelayConfigError, type RelayConfig } from "../config/relay.js";
 
 // Mock exec module
 vi.mock("./exec.js", () => ({
-  shell: vi.fn(),
-  exec: vi.fn(),
+  runShell: vi.fn(),
+  runExec: vi.fn(),
 }));
 
 // Mock preflight — the engine now runs it after git pull + reload. Most
@@ -33,11 +33,12 @@ vi.mock("../config/relay.js", async () => {
 });
 
 import { deploy } from "./engine.js";
-import { shell } from "./exec.js";
+import { runShell, runExec } from "./exec.js";
 import { loadRelayConfig } from "../config/relay.js";
 import { runPreflightChecks } from "./preflight.js";
 
-const mockShell = vi.mocked(shell);
+const mockRunShell = vi.mocked(runShell);
+const mockRunExec = vi.mocked(runExec);
 const mockLoadRelayConfig = vi.mocked(loadRelayConfig);
 const mockRunPreflightChecks = vi.mocked(runPreflightChecks);
 
@@ -53,13 +54,16 @@ const baseConfig: RelayConfig = {
 beforeEach(() => {
   vi.resetAllMocks();
 
-  // Default: all shell commands succeed, return a commit SHA
-  mockShell.mockImplementation(async (cmd) => {
-    if (cmd.startsWith("git rev-parse")) {
+  // Default: all runExec calls succeed; git rev-parse returns a commit SHA.
+  mockRunExec.mockImplementation(async (command, args) => {
+    if (command === "git" && args.includes("rev-parse")) {
       return { stdout: "abc123\n", stderr: "", exitCode: 0 };
     }
     return { stdout: "ok", stderr: "", exitCode: 0 };
   });
+
+  // Default: runShell calls (pre_update / post_update / command) succeed.
+  mockRunShell.mockResolvedValue({ stdout: "ok", stderr: "", exitCode: 0 });
 
   // Default: post-pull reload returns the same config as the caller passed.
   // Tests that care about the pre/post-pull divergence override this.
@@ -127,18 +131,18 @@ describe("deploy — default flow", () => {
 
     await deploy({ appDir: "/app", config });
 
-    const buildCall = mockShell.mock.calls.find(([cmd]) =>
-      cmd.includes("compose") && cmd.includes("build"),
+    const buildCall = mockRunExec.mock.calls.find(
+      ([cmd, args]) => cmd === "docker" && args.includes("compose") && args.includes("build"),
     );
-    expect(buildCall?.[0]).toContain("docker-compose.prod.yml");
+    expect(buildCall?.[1]).toContain("docker-compose.prod.yml");
   });
 
   it("stops on git pull failure", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("git rev-parse")) {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
         return { stdout: "abc123\n", stderr: "", exitCode: 0 };
       }
-      if (cmd.includes("git pull")) {
+      if (command === "git" && args[0] === "pull") {
         return { stdout: "", stderr: "merge conflict", exitCode: 1 };
       }
       return { stdout: "ok", stderr: "", exitCode: 0 };
@@ -154,11 +158,21 @@ describe("deploy — default flow", () => {
   });
 
   it("rolls back on health check failure", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-      if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 };
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      // docker ps --services --status running
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      // docker exec -T ... node -e (health check)
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "", stderr: "", exitCode: 1 };
+      }
       return { stdout: "ok", stderr: "", exitCode: 0 };
     });
 
@@ -175,11 +189,19 @@ describe("deploy — default flow", () => {
   });
 
   it("skips rollback when disabled", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-      if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 };
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "", stderr: "", exitCode: 1 };
+      }
       return { stdout: "ok", stderr: "", exitCode: 0 };
     });
     const config: RelayConfig = { ...baseConfig, rollback: false };
@@ -212,20 +234,24 @@ describe("deploy — default flow", () => {
       const result = await deploy({ appDir: "/app", config: prePull });
       expect(result.success).toBe(true);
 
-      const cmds = mockShell.mock.calls.map(([c]) => c);
+      // compose build/up must reference the NEW compose_file (as array element, no quotes)
+      const buildCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("compose") && args.includes("build"),
+      );
+      expect(buildCall?.[1]).toContain("docker-compose.prod.yml");
+      expect(buildCall?.[1]).not.toContain("docker-compose.yml");
 
-      // compose build/up must reference the NEW compose_file
-      const buildCmd = cmds.find((c) => c.includes("compose") && c.includes("build"));
-      expect(buildCmd).toContain("docker-compose.prod.yml");
-      expect(buildCmd).not.toContain("'docker-compose.yml'");
-
-      // post_update from the NEW config must run
-      expect(cmds).toContain("npx prisma db push --accept-data-loss");
+      // post_update from the NEW config must run via runShell
+      const shellCmds = mockRunShell.mock.calls.map(([c]) => c);
+      expect(shellCmds).toContain("npx prisma db push --accept-data-loss");
 
       // health check must probe the NEW health_port
-      const healthProbe = cmds.find((c) => c.includes("node -e"));
-      expect(healthProbe).toContain("localhost:4000");
-      expect(healthProbe).not.toContain("localhost:3000");
+      const healthExecCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("node") && args.includes("-e"),
+      );
+      const jsSnippet = healthExecCall?.[1].at(-1) ?? "";
+      expect(jsSnippet).toContain("localhost:4000");
+      expect(jsSnippet).not.toContain("localhost:3000");
     });
 
     it("uses pre-pull config for pre_update (runs before git pull)", async () => {
@@ -241,9 +267,9 @@ describe("deploy — default flow", () => {
 
       await deploy({ appDir: "/app", config: prePull });
 
-      const cmds = mockShell.mock.calls.map(([c]) => c);
-      expect(cmds).toContain("echo from-old-config");
-      expect(cmds).not.toContain("echo from-new-config");
+      const shellCmds = mockRunShell.mock.calls.map(([c]) => c);
+      expect(shellCmds).toContain("echo from-old-config");
+      expect(shellCmds).not.toContain("echo from-new-config");
     });
 
     it("rolls back using pre-pull compose_file when reload fails", async () => {
@@ -269,10 +295,10 @@ describe("deploy — default flow", () => {
         (s) => s.name === "rollback: compose build",
       );
       expect(rollbackBuild?.status).toBe("success");
-      const rollbackCmds = mockShell.mock.calls
-        .map(([c]) => c)
-        .filter((c) => c.includes("compose") && c.includes("build"));
-      expect(rollbackCmds.at(-1)).toContain("'docker-compose.yml'");
+      const rollbackBuildCalls = mockRunExec.mock.calls
+        .filter(([cmd, args]) => cmd === "docker" && args.includes("compose") && args.includes("build"));
+      // Last build call must use the pre-pull compose_file (as a plain array element)
+      expect(rollbackBuildCalls.at(-1)?.[1]).toContain("docker-compose.yml");
     });
 
     it("rollback boolean honors pre-pull config, not post-pull", async () => {
@@ -285,11 +311,19 @@ describe("deploy — default flow", () => {
       const prePull: RelayConfig = { ...baseConfig, rollback: true };
       const postPull: RelayConfig = { ...baseConfig, rollback: false };
       mockLoadRelayConfig.mockResolvedValue(postPull);
-      mockShell.mockImplementation(async (cmd) => {
-        if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-        if (cmd.startsWith("git rev-parse --abbrev-ref")) return { stdout: "main\n", stderr: "", exitCode: 0 };
-        if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
-        if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 }; // health fails
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "git" && args.includes("--abbrev-ref")) {
+          return { stdout: "main\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("--status")) {
+          return { stdout: "app\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("node") && args.includes("-e")) {
+          return { stdout: "", stderr: "", exitCode: 1 }; // health fails
+        }
         return { stdout: "ok", stderr: "", exitCode: 0 };
       });
 
@@ -333,11 +367,11 @@ describe("deploy — default flow", () => {
         compose_file: "missing/compose.yml",
       };
       mockLoadRelayConfig.mockResolvedValue(postPull);
-      mockShell.mockImplementation(async (cmd) => {
-        if (cmd.startsWith("git rev-parse")) {
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
           return { stdout: "abc123\n", stderr: "", exitCode: 0 };
         }
-        if (cmd.includes("'missing/compose.yml'") && cmd.includes("build")) {
+        if (command === "docker" && args.includes("missing/compose.yml") && args.includes("build")) {
           return { stdout: "", stderr: "no such file", exitCode: 1 };
         }
         return { stdout: "ok", stderr: "", exitCode: 0 };
@@ -350,20 +384,17 @@ describe("deploy — default flow", () => {
         (s) => s.name === "rollback: compose build",
       );
       expect(rollbackBuild).toBeDefined();
-      const lastBuildCmd = mockShell.mock.calls
-        .map(([c]) => c)
-        .filter((c) => c.includes("compose") && c.includes("build"))
-        .at(-1);
-      expect(lastBuildCmd).toContain("'docker-compose.yml'");
-      expect(lastBuildCmd).not.toContain("missing/compose.yml");
+      const buildCalls = mockRunExec.mock.calls
+        .filter(([cmd, args]) => cmd === "docker" && args.includes("compose") && args.includes("build"));
+      const lastBuildArgs = buildCalls.at(-1)?.[1];
+      // Last build must use the OLD compose_file as a plain array element (no shell quotes)
+      expect(lastBuildArgs).toContain("docker-compose.yml");
+      expect(lastBuildArgs).not.toContain("missing/compose.yml");
     });
   });
 
   it("stops on pre_update failure", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("git rev-parse")) {
-        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-      }
+    mockRunShell.mockImplementation(async (cmd) => {
       if (cmd === "make db-generate") {
         return { stdout: "", stderr: "error", exitCode: 1 };
       }
@@ -501,8 +532,8 @@ describe("deploy — preflight gate", () => {
     expect(result.success).toBe(false);
     expect("blocked" in result && result.blocked).toBe(true);
     // git pull MUST NOT have been invoked.
-    const gitPullCall = mockShell.mock.calls.find(
-      ([cmd]) => typeof cmd === "string" && cmd.startsWith("git pull"),
+    const gitPullCall = mockRunExec.mock.calls.find(
+      ([cmd, args]) => cmd === "git" && args[0] === "pull",
     );
     expect(gitPullCall).toBeUndefined();
     // post-pull preflight must NOT have been called either — we
@@ -569,10 +600,16 @@ describe("deploy — custom command flow", () => {
   });
 
   it("rolls back on health failure after custom command", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("node -e")) return { stdout: "", stderr: "", exitCode: 1 };
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "", stderr: "", exitCode: 1 };
+      }
       return { stdout: "ok", stderr: "", exitCode: 0 };
     });
     const config: RelayConfig = { ...baseConfig, command: "./deploy.sh" };
@@ -589,11 +626,16 @@ describe("deploy — custom command flow", () => {
     mockLoadRelayConfig.mockResolvedValue(postCommand);
 
     let probedPath = "";
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("git rev-parse HEAD")) return { stdout: "abc\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("--services --status")) return { stdout: "app\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("node -e")) {
-        const match = cmd.match(/fetch\('http:\/\/localhost:\d+(\/[^']+)'\)/);
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        const jsSnippet = args.at(-1) ?? "";
+        const match = jsSnippet.match(/fetch\('http:\/\/localhost:\d+(\/[^']+)'\)/);
         if (match) probedPath = match[1]!;
         return { stdout: "", stderr: "", exitCode: 0 };
       }
@@ -621,8 +663,8 @@ describe("deploy — custom command flow", () => {
     // Rollback uses pre-command compose_file.
     const rollbackBuild = result.steps.find((s) => s.name === "rollback: compose build");
     expect(rollbackBuild).toBeDefined();
-    const rollbackRebuild = mockShell.mock.calls.find(
-      (c) => typeof c[0] === "string" && c[0].includes("docker compose") && c[0].includes("pre.yml") && c[0].includes("build"),
+    const rollbackRebuild = mockRunExec.mock.calls.find(
+      ([cmd, args]) => cmd === "docker" && args.includes("compose") && args.includes("pre.yml") && args.includes("build"),
     );
     expect(rollbackRebuild).toBeDefined();
     // Health check must not have run — reload failed before it.
@@ -654,6 +696,40 @@ describe("deploy — result structure", () => {
       expect(step).toHaveProperty("status");
       expect(step).toHaveProperty("output");
       expect(step).toHaveProperty("durationMs");
+    }
+  });
+});
+
+// Regression: shell metacharacters in compose_file must never be shell-expanded.
+// If engine.ts used shell() with ${config.compose_file} interpolation, a
+// malicious compose_file value like "docker-compose.yml;rm -rf /" would be
+// executed by /bin/sh. With runExec the value is passed as a standalone array
+// element — inert to the shell.
+describe("injection guard — compose_file metacharacters are never shell-interpreted", () => {
+  it("passes compose_file with shell metacharacters as a literal array element to runExec", async () => {
+    const injected = "docker-compose.yml;rm -rf /";
+    const maliciousConfig: RelayConfig = {
+      ...baseConfig,
+      compose_file: injected,
+    };
+    // Also override loadRelayConfig so the post-pull reload returns the malicious config,
+    // ensuring the build/up/health steps all exercise the injection path.
+    mockLoadRelayConfig.mockResolvedValue(maliciousConfig);
+
+    await deploy({ appDir: "/app", config: maliciousConfig, branch: "main" });
+
+    // At least one docker compose call must carry the metacharacter value.
+    const composeCalls = mockRunExec.mock.calls.filter(
+      ([cmd, args]) => cmd === "docker" && Array.isArray(args) && args.includes(injected),
+    );
+    expect(composeCalls.length).toBeGreaterThan(0);
+
+    // In every such call the compose_file appears directly after the -f flag
+    // as a complete, unbroken array element — not split or shell-interpreted.
+    for (const [, args] of composeCalls) {
+      const dashFIdx = args.indexOf("-f");
+      expect(dashFIdx).toBeGreaterThanOrEqual(0);
+      expect(args[dashFIdx + 1]).toBe(injected);
     }
   });
 });
