@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { RelayConfig } from "../config/relay.js";
 
 vi.mock("./exec.js", () => ({
-  shell: vi.fn(),
-  exec: vi.fn(),
+  runShell: vi.fn(),
+  runExec: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -12,11 +12,10 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 import { runPreflightChecks } from "./preflight.js";
-import { shell, exec } from "./exec.js";
+import { runExec } from "./exec.js";
 import { access, readFile } from "node:fs/promises";
 
-const mockShell = vi.mocked(shell);
-const mockExec = vi.mocked(exec);
+const mockRunExec = vi.mocked(runExec);
 const mockAccess = vi.mocked(access);
 const mockReadFile = vi.mocked(readFile);
 
@@ -32,16 +31,21 @@ const baseConfig: RelayConfig = {
 beforeEach(() => {
   vi.resetAllMocks();
 
-  // Defaults: everything passes
+  // Defaults: everything passes.
+  // docker compose ps — non-empty stdout means containers are running.
+  // git status --porcelain — empty stdout means clean tree.
+  // git ls-remote — exit 0 means remote reachable.
   mockAccess.mockResolvedValue(undefined);
   mockReadFile.mockResolvedValue("services:\n  app:\n    labels:\n      - traefik.enable=true\n" as any);
-  mockExec.mockResolvedValue({ stdout: "abc123\n", stderr: "", exitCode: 0 });
-  mockShell.mockImplementation(async (cmd) => {
-    if (cmd.includes("git status")) {
-      return { stdout: "", stderr: "", exitCode: 0 };
+  mockRunExec.mockImplementation(async (command, args) => {
+    if (command === "docker") {
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 }; // containers present
     }
-    if (cmd.includes("git ls-remote")) {
-      return { stdout: "ref\n", stderr: "", exitCode: 0 };
+    if (command === "git" && args.includes("status")) {
+      return { stdout: "", stderr: "", exitCode: 0 }; // clean tree
+    }
+    if (command === "git" && args.includes("ls-remote")) {
+      return { stdout: "ref\n", stderr: "", exitCode: 0 }; // remote reachable
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   });
@@ -68,7 +72,18 @@ describe("runPreflightChecks", () => {
   });
 
   it("fails when no containers running", async () => {
-    mockExec.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "docker") {
+        return { stdout: "", stderr: "", exitCode: 0 }; // no containers
+      }
+      if (command === "git" && args.includes("status")) {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("ls-remote")) {
+        return { stdout: "ref\n", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
 
     const report = await runPreflightChecks({ appDir: "/app", config: baseConfig });
 
@@ -89,10 +104,16 @@ describe("runPreflightChecks", () => {
   });
 
   it("fails when git has uncommitted changes", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.includes("docker compose")) return { stdout: "abc\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("git status")) return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("git ls-remote")) return { stdout: "ref", stderr: "", exitCode: 0 };
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "docker") {
+        return { stdout: "abc\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("status")) {
+        return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("ls-remote")) {
+        return { stdout: "ref", stderr: "", exitCode: 0 };
+      }
       return { stdout: "", stderr: "", exitCode: 0 };
     });
 
@@ -104,10 +125,16 @@ describe("runPreflightChecks", () => {
   });
 
   it("fails when git remote unreachable", async () => {
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.includes("docker compose")) return { stdout: "abc\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("git status")) return { stdout: "", stderr: "", exitCode: 0 };
-      if (cmd.includes("git ls-remote")) return { stdout: "", stderr: "fatal", exitCode: 128 };
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "docker") {
+        return { stdout: "abc\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("status")) {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("ls-remote")) {
+        return { stdout: "", stderr: "fatal", exitCode: 128 };
+      }
       return { stdout: "", stderr: "", exitCode: 0 };
     });
 
@@ -122,10 +149,16 @@ describe("runPreflightChecks", () => {
   it("force flag ignores non-critical failures", async () => {
     // Traefik labels missing (non-critical) + git dirty (non-critical)
     mockReadFile.mockResolvedValue("services:\n  app:\n    image: node\n" as any);
-    mockShell.mockImplementation(async (cmd) => {
-      if (cmd.includes("docker compose")) return { stdout: "abc\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("git status")) return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
-      if (cmd.includes("git ls-remote")) return { stdout: "ref", stderr: "", exitCode: 0 };
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "docker") {
+        return { stdout: "abc\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("status")) {
+        return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("ls-remote")) {
+        return { stdout: "ref", stderr: "", exitCode: 0 };
+      }
       return { stdout: "", stderr: "", exitCode: 0 };
     });
 
@@ -246,9 +279,13 @@ describe("runPreflightChecks", () => {
     });
 
     it('phase: "pre-pull" + dirty tree → passed=false (pre-pull gates on its own checks)', async () => {
-      mockShell.mockImplementation(async (cmd) => {
-        if (cmd.includes("git status")) return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
-        if (cmd.includes("git ls-remote")) return { stdout: "ref", stderr: "", exitCode: 0 };
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("status")) {
+          return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "git" && args.includes("ls-remote")) {
+          return { stdout: "ref", stderr: "", exitCode: 0 };
+        }
         return { stdout: "", stderr: "", exitCode: 0 };
       });
 
@@ -273,9 +310,13 @@ describe("runPreflightChecks", () => {
       // critical-only filter is empty, so passed === true regardless.
       // This is the documented escape hatch operators reach for when
       // they want to clobber WIP intentionally.
-      mockShell.mockImplementation(async (cmd) => {
-        if (cmd.includes("git status")) return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
-        if (cmd.includes("git ls-remote")) return { stdout: "", stderr: "fatal", exitCode: 128 };
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("status")) {
+          return { stdout: " M file.txt\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "git" && args.includes("ls-remote")) {
+          return { stdout: "", stderr: "fatal", exitCode: 128 };
+        }
         return { stdout: "", stderr: "", exitCode: 0 };
       });
 

@@ -4,7 +4,7 @@ import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy } from "../deploy/engine.js";
 import { runPreflightChecks } from "../deploy/preflight.js";
-import { shell } from "../deploy/exec.js";
+import { runExec } from "../deploy/exec.js";
 
 // Preflight used to run here before git pull. That meant a commit that
 // *fixed* a broken .relay.yml (wrong compose_file, missing `command:`,
@@ -88,7 +88,7 @@ export async function listApps(): Promise<Array<{ name: string; configured: bool
       const dir = resolve(env.APPS_DIR, name);
       try {
         const config = await loadRelayConfig(dir);
-        const commit = await shell("git rev-parse --short HEAD", dir);
+        const commit = await runExec("git", ["rev-parse", "--short", "HEAD"], dir);
         return { name, configured: true, health: config.health, commit: commit.stdout.trim() || "unknown" };
       } catch {
         return { name, configured: false };
@@ -102,8 +102,8 @@ export async function listApps(): Promise<Array<{ name: string; configured: bool
 export async function getAppDetail(name: string) {
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
-  const commit = await shell("git rev-parse --short HEAD", dir);
-  const ps = await shell(`docker compose -f '${config.compose_file}' ps --format json`, dir);
+  const commit = await runExec("git", ["rev-parse", "--short", "HEAD"], dir);
+  const ps = await runExec("docker", ["compose", "-f", config.compose_file, "ps", "--format", "json"], dir);
 
   return {
     name,
@@ -144,18 +144,18 @@ export async function rollbackApp(name: string, toCommit?: string) {
   const config = await loadRelayConfig(dir);
   const target = toCommit ? validateCommitRef(toCommit) : "HEAD~1";
 
-  const commitBefore = (await shell("git rev-parse HEAD", dir)).stdout.trim();
+  const commitBefore = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
 
-  const checkout = await shell(`git reset --hard '${target}'`, dir);
+  const checkout = await runExec("git", ["reset", "--hard", target], dir);
   if (checkout.exitCode !== 0) throw new Error("Rollback failed: " + checkout.stderr);
 
-  const build = await shell(`docker compose -f '${config.compose_file}' build`, dir);
+  const build = await runExec("docker", ["compose", "-f", config.compose_file, "build"], dir);
   if (build.exitCode !== 0) throw new Error("Rebuild failed: " + build.stderr);
 
-  const up = await shell(`docker compose -f '${config.compose_file}' up -d`, dir);
+  const up = await runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], dir);
   if (up.exitCode !== 0) throw new Error("Restart failed: " + up.stderr);
 
-  const commitAfter = (await shell("git rev-parse HEAD", dir)).stdout.trim();
+  const commitAfter = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
   return { success: true, commitBefore, commitAfter };
 }
 
@@ -165,8 +165,9 @@ export async function fetchLogs(name: string, lines?: number, service?: string) 
   const n = clampLogLines(lines);
   const svc = service ? validateServiceName(service) : "";
 
-  const result = await shell(
-    `docker compose -f '${config.compose_file}' logs --tail=${n} --no-color ${svc}`.trim(),
+  const result = await runExec(
+    "docker",
+    ["compose", "-f", config.compose_file, "logs", `--tail=${n}`, "--no-color", ...(svc ? [svc] : [])],
     dir,
   );
 
