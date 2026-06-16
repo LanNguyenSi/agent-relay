@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-16
+
+**Minor release: two installer features plus a HIGH-severity security and hardening sweep.** New: a non-root install path and a `TRAEFIK_CA` override for alternative TLS providers. Security: @grpc/grpc-js 1.14.4 closes CVE-2026-48068/48069 (HIGH), esbuild 0.28.1 closes GHSA-gv7w-rqvm-qjhr (HIGH), plus symlink and prefix-escape hardening in the deploy engine.
+
+### Security
+
+- **HIGH: @grpc/grpc-js upgraded to 1.14.4, esbuild to 0.28.1** (PR #46). Closes CVE-2026-48068 and CVE-2026-48069 in grpc-js (HIGH) and GHSA-gv7w-rqvm-qjhr in esbuild (HIGH).
+- **Realpath-based symlink containment for `compose_file`** (PR #44). The previous approach resolved the path lexically and checked for `..` segments but did not follow symlinks. The check now calls `fs.realpath()` and verifies the resolved path stays inside the expected directory, closing a defense-in-depth gap noted in the v0.1.1 release notes.
+- **`safeAppDir` prefix check hardened against sibling-prefix escape** (PR #43). A `startsWith(appDir)` check without a trailing separator would accept `apps-evil` as a sub-path of `apps`. The separator is now appended before comparing.
+
+### Fixed
+
+- **Blocked deploy response now wrapped under `result`** (PR #45). `DeployBlockedResult` was previously returned at the top level while all other response types nest their payload under `result`, causing shape-based callers to misidentify blocked responses.
+- **SC2317 shellcheck warning silenced on the `install.sh` source-only guard** (PR #49). The warning was a false positive triggered by the guard pattern that prevents double-sourcing.
+
+### Changed
+
+- **`execFile`-style argument arrays replace shell-interpolated command strings for docker and git calls in the deploy engine** (PR #47). Passing discrete argument arrays to `execFile` removes a class of shell-injection surface from the deploy path.
+
+### Added
+
+- **Non-root install path via `HOME`-based `RELAY_DIR` and `APPS_DIR`** (PR #48). `install.sh` now supports installing without `sudo` by defaulting directories under the invoking user's home when root is not available or not wanted.
+- **`TRAEFIK_CA` env var for alternative TLS providers** (PR #50). Operators using staging, pebble, or self-signed CAs can override the default Let's Encrypt CA URL without patching `install.sh`.
+
 ## [0.3.0] - 2026-06-09
 
 Security release closing the 2026-05-30 audit findings and a multi-CVE dependency sweep, plus a deploy-preflight phase split. The headline security fix is a HIGH command injection in the deploy path. The relay is deployed as a GHCR container; this tag publishes the image and a GitHub Release.
