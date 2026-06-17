@@ -31,10 +31,13 @@ The relay is a daemon, not a CLI: one auth token, one HTTP/MCP surface, no SSH k
 On a fresh Ubuntu/Debian VPS:
 
 ```bash
-RELAY_DOMAIN=relay.example.com \
-TRAEFIK_EMAIL=you@example.com \
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
+sudo RELAY_DOMAIN=relay.example.com \
+     TRAEFIK_EMAIL=you@example.com \
+     bash /tmp/agent-relay-install.sh
 ```
+
+> **Note:** env vars must be set on the `sudo` line (not as a prefix to `curl` -- the pipe binds them to the download process, not the bash that runs the script). If your sudoers strips command-line variables, export them and use `sudo -E`, or run as root directly.
 
 The installer detects what's on port 80, picks an install mode (greenfield with Traefik / join an existing Traefik / port-only behind nginx), pulls `ghcr.io/lannguyensi/agent-relay:latest`, and prints a generated `AUTH_TOKEN`. See [docs/operations.md](docs/operations.md) for the full mode matrix and env vars.
 
