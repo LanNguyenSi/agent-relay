@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # agent-relay VPS bootstrap installer — v0.2.0 adaptive modes
-# Usage: curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | bash
+# Usage (non-root, no env vars):
+#   curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | bash
+#
+# Usage (root with env vars — download first so vars reach the elevated shell, not curl):
+#   curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
+#   sudo RELAY_DOMAIN=relay.example.com TRAEFIK_EMAIL=you@example.com bash /tmp/agent-relay-install.sh
+#   (NOTE: VAR=x curl ... | sudo bash is wrong — VAR binds to curl, not to the bash running the script,
+#    and sudo resets the environment by default.)
 #
 # Modes (RELAY_MODE):
 #   auto              Detect what's on :80 and pick greenfield / existing-traefik / port-only

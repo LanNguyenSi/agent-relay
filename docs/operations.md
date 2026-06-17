@@ -53,30 +53,34 @@ Set these before running the script to customise the install:
 
 ### Examples
 
+> **Note:** shell env-var prefixes bind to the command they precede. In `VAR=x curl ... | sudo bash`, `VAR` is set for `curl`, not for the `bash` that runs the downloaded script -- and `sudo` resets the environment by default. Download the script first, then pass env vars on the `sudo` line. If your sudoers strips command-line variables, export them and use `sudo -E`, or run as root directly.
+
 Greenfield (fresh VPS):
 
 ```bash
-RELAY_DOMAIN=relay.example.com \
-TRAEFIK_EMAIL=you@example.com \
-APPS_DIR=/home/deploy/apps \
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
+sudo RELAY_DOMAIN=relay.example.com \
+     TRAEFIK_EMAIL=you@example.com \
+     APPS_DIR=/home/deploy/apps \
+     bash /tmp/agent-relay-install.sh
 ```
 
 Existing Traefik on a different network:
 
 ```bash
-RELAY_MODE=existing-traefik \
-RELAY_DOMAIN=relay.example.com \
-TRAEFIK_NETWORK=proxy \
-TRAEFIK_CERTRESOLVER=myresolver \
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
+sudo RELAY_MODE=existing-traefik \
+     RELAY_DOMAIN=relay.example.com \
+     TRAEFIK_NETWORK=proxy \
+     TRAEFIK_CERTRESOLVER=myresolver \
+     bash /tmp/agent-relay-install.sh
 ```
 
 Port-only (nginx handles TLS, relay on loopback):
 
 ```bash
-RELAY_MODE=port-only \
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
+sudo RELAY_MODE=port-only bash /tmp/agent-relay-install.sh
 ```
 
 ### Non-root install
