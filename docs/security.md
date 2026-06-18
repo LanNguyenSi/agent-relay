@@ -18,7 +18,7 @@ Treat the deploy branch like a deploy key:
 - Require code review for `.relay.yml` changes.
 - Don't deploy from forks or unreviewed branches.
 
-`compose_file` is the one exception. It is path-restricted (`[A-Za-z0-9._/-]+`, no `..` segments) so a typo or hostile commit cannot escape the single-quoted shell context where the value is interpolated.
+`compose_file` is the one exception. It is never shell-interpolated: it is passed as a literal argument to `docker compose` via an `execFile` arg array, so the charset regex (`[A-Za-z0-9._/-]+`) is path hygiene, not a shell-escape guard. Path traversal is contained separately by resolving the path and rejecting anything that lands outside `APPS_DIR`; `..` segments are therefore allowed as long as they stay under `APPS_DIR` (the legitimate sibling-app case `../other-app/docker-compose.yml`), while deeper escapes like `../../etc/passwd` are rejected.
 
 ## Why `.relay.yml` is re-read after `git pull`
 
