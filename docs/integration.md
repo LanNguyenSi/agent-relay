@@ -25,7 +25,7 @@ rollback: true                      # auto-rollback on health check failure (def
 |-------|------|----------|---------|-------------|
 | `name` | `string` | Yes | -- | App identifier |
 | `health` | `string` | Yes | -- | Health check endpoint path (e.g. `/api/health`) |
-| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name. Must match `[A-Za-z0-9._/-]+` and not contain `..` segments; value is interpolated into shell. |
+| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name. Must match `[A-Za-z0-9._/-]+`. Passed as a literal `docker compose` argument (never shell-interpolated); rejected only if it resolves outside `APPS_DIR`, so sibling-app paths like `../other-app/docker-compose.yml` are allowed. |
 | `command` | `string` | No | -- | Custom deploy command (replaces default git+compose flow). **Arbitrary shell.** |
 | `pre_update` | `string[]` | No | `[]` | Commands to run before the deploy. **Arbitrary shell.** |
 | `post_update` | `string[]` | No | `[]` | Commands to run after compose up. **Arbitrary shell.** |
@@ -40,10 +40,10 @@ All `/api` endpoints require `Authorization: Bearer <AUTH_TOKEN>` unless noted o
 
 ### `GET /health`
 
-Public relay health check. **No authentication required.** Returns status and version but does not include uptime. Useful for external uptime monitors and load balancer probes.
+Public relay health check. **No authentication required.** Returns status and version but does not include uptime. Useful for external uptime monitors and load balancer probes. `version` is the running relay's `package.json` version, read dynamically at startup.
 
 ```json
-{ "status": "ok", "version": "0.1.0" }
+{ "status": "ok", "version": "<version>" }
 ```
 
 ### `GET /api/health`
@@ -51,18 +51,19 @@ Public relay health check. **No authentication required.** Returns status and ve
 Authenticated relay health check. Same as `/health` but includes server uptime.
 
 ```json
-{ "status": "ok", "version": "0.1.0", "uptime": 12345.67 }
+{ "status": "ok", "version": "<version>", "uptime": 12345.67 }
 ```
 
 ### `GET /api/system`
 
-Server resource metrics (CPU, memory, disk).
+Server resource metrics (CPU, memory, disk). `cpu.usage` and `memory.*Mb` are numbers; the `disk` fields are the raw `df -h` strings (size/used carry unit suffixes, `percent` includes the `%`).
 
 ```json
 {
-  "cpu": { "cores": 4, "usage": 23.5 },
-  "memory": { "totalMb": 8192, "usedMb": 4096, "usage": 50.0 },
-  "disk": { "totalGb": 100, "usedGb": 42, "usage": 42.0 }
+  "cpu": { "usage": 23.5 },
+  "memory": { "usedMb": 4096, "totalMb": 8192 },
+  "disk": { "used": "42G", "total": "100G", "percent": "42%" },
+  "uptime": 12345.67
 }
 ```
 
@@ -102,7 +103,7 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `stream` (query) | `boolean` | `false` | When `true`, returns an SSE (Server-Sent Events) stream of deploy steps instead of a single JSON response |
-| `branch` (body) | `string` | `main` | Git branch to pull |
+| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing |
 | `force` (body) | `boolean` | `false` | Skip non-critical preflight checks |
 
 Response: deploy result with step-by-step output, commit before/after, and duration. With `stream=true`, response is `text/event-stream` with one event per step.
@@ -172,6 +173,24 @@ List deploy history across all apps or filtered by app.
 }
 ```
 
+### `GET /api/apps/:name/env`
+
+Read an app's `.env` as a flat list of key/value entries. Returns an empty list if the app has no `.env`. Values are returned **raw and unmasked**: the relay is already behind the bearer token, and any caller with that token has full VPS access, so masking is left to the consuming UI (the consent boundary is the panel, not the relay).
+
+```json
+{ "entries": [ { "key": "AUTH_TOKEN", "value": "s3cr3t" } ] }
+```
+
+### `PUT /api/apps/:name/env`
+
+Replace an app's `.env` with the supplied entries (full overwrite, written atomically at mode `0600`). The body must be `{ "entries": [ { "key", "value" } ] }`; both `key` and `value` must be strings. Validation limits: at most 500 entries, key length 1..128, value length up to 32768 characters, and duplicate keys are rejected (`400` on any violation). Returns the written entries.
+
+Comments in the existing `.env` are **not** preserved across a read/write round-trip; keep canonical comments in `.env.example` instead.
+
+```json
+{ "entries": [ { "key": "AUTH_TOKEN", "value": "s3cr3t" } ] }
+```
+
 ## MCP tools
 
 The MCP server exposes 5 tools at `/mcp`. Same `AUTH_TOKEN` as the HTTP API.
@@ -183,7 +202,7 @@ Deploy an app: git pull, compose build, compose up, health check. Auto-rollback 
 | Input | Type | Required | Description |
 |-------|------|----------|-------------|
 | `app` | `string` | Yes | App directory name under `APPS_DIR` |
-| `branch` | `string` | No | Git branch to pull (default: main) |
+| `branch` | `string` | No | Git branch to pull. Defaults to the app's currently checked-out branch (falls back to `main`) |
 | `force` | `boolean` | No | Skip non-critical preflight checks |
 
 ### `relay_status`

@@ -130,7 +130,7 @@ npm run dev            # starts on port 8222 with hot reload (tsx watch)
 docker compose up --build
 ```
 
-The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management) and the apps directory.
+The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management), the apps directory, and `/root/.ssh` read-only (so `git pull` can authenticate to private remotes over SSH). Override the SSH source path with `SSH_DIR` in the dev `docker-compose.yml`; the production `docker-compose.prod.example.yml` mounts it the same way. If your apps only use public or HTTPS git remotes, the SSH mount is harmless but unused.
 
 ### Scripts
 
@@ -150,4 +150,4 @@ The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management
 |----------|----------|---------|-------------|
 | `AUTH_TOKEN` | Yes | -- | Bearer token for API and MCP authentication |
 | `PORT` | No | `8222` | HTTP server port |
-| `APPS_DIR` | No | `/home/deploy/apps` | Directory containing app directories |
+| `APPS_DIR` | No | `/apps` | Directory containing app directories, as seen by the relay process. The installer bind-mounts the host's `/home/deploy/apps` (root) onto `/apps` inside the container, so this rarely needs overriding |
