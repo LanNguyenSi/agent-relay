@@ -39,7 +39,15 @@ type ToolResult = { content: Array<{ type: string; text: string }>; isError?: tr
 
 function getTools(): Record<string, RegistryEntry> {
   const server = createMcpServer();
-  return (server as unknown as { _registeredTools: Record<string, RegistryEntry> })._registeredTools;
+  const tools = (server as unknown as { _registeredTools?: Record<string, RegistryEntry> })._registeredTools;
+  // Fail loudly if the MCP SDK renames/restructures this private field, instead
+  // of letting every test throw on an undefined deref with no clear cause.
+  if (!tools || typeof tools !== "object" || Object.keys(tools).length === 0) {
+    throw new Error(
+      "MCP SDK internal `_registeredTools` is missing or empty — the SDK shape changed; update getTools() in server.test.ts",
+    );
+  }
+  return tools;
 }
 
 function parseResult(raw: unknown): unknown {
