@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { isAuthorized } from "../config/auth.js";
 import { RELAY_VERSION } from "../config/version.js";
-import { RelayConfigError } from "../config/relay.js";
+import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import * as apps from "../services/apps.js";
 import * as appEnv from "../services/env.js";
 import { recordDeploy, getHistory } from "../services/history.js";
@@ -66,47 +66,59 @@ api.post("/apps/:name/deploy", async (c) => {
 
   // SSE streaming mode
   if (stream) {
+    // Resolve the app config BEFORE opening the SSE stream. Once the stream is
+    // open the response headers are already flushed at 200, so a RelayConfigError
+    // thrown inside ReadableStream's async `start()` callback can only ever
+    // reach the INNER catch below and surface as an SSE `error` event — the
+    // outer try/catch that used to wrap `new Response(...)` was unreachable
+    // dead code, since nothing in the synchronous part of stream construction
+    // throws. Doing the same config resolution `deployAppStreaming` does
+    // internally (safeAppDir + loadRelayConfig) up front lets an unknown app /
+    // invalid config return the same 404 the non-streaming path returns.
     try {
-      return new Response(
-        new ReadableStream({
-          async start(controller) {
-            const encoder = new TextEncoder();
-            function send(event: string, data: unknown) {
-              controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-            }
-
-            try {
-              const result = await apps.deployAppStreaming(
-                name,
-                { branch: body.branch, force: body.force },
-                (step) => send("step", step),
-              );
-
-              if ("blocked" in result && result.blocked) {
-                send("blocked", result.preflight);
-              } else {
-                await recordDeploy(name, result, "api");
-                send("done", result);
-              }
-            } catch (err: any) {
-              send("error", { message: err.message });
-            }
-
-            controller.close();
-          },
-        }),
-        {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-          },
-        },
-      );
+      const dir = await apps.safeAppDir(name);
+      await loadRelayConfig(dir);
     } catch (err) {
       if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
       throw err;
     }
+
+    return new Response(
+      new ReadableStream({
+        async start(controller) {
+          const encoder = new TextEncoder();
+          function send(event: string, data: unknown) {
+            controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+          }
+
+          try {
+            const result = await apps.deployAppStreaming(
+              name,
+              { branch: body.branch, force: body.force },
+              (step) => send("step", step),
+            );
+
+            if ("blocked" in result && result.blocked) {
+              send("blocked", result.preflight);
+            } else {
+              await recordDeploy(name, result, "api");
+              send("done", result);
+            }
+          } catch (err: any) {
+            send("error", { message: err.message });
+          }
+
+          controller.close();
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      },
+    );
   }
 
   // Regular mode (existing behavior)

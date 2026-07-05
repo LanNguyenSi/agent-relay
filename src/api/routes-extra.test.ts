@@ -12,6 +12,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { api } from "./routes.js";
 import { env } from "../config/env.js";
 import { RelayConfigError } from "../config/relay.js";
+import * as relayMod from "../config/relay.js";
 import * as apps from "../services/apps.js";
 import * as historyMod from "../services/history.js";
 
@@ -28,6 +29,17 @@ vi.mock("../services/apps.js", async () => {
     getAppDetail: vi.fn(),
     fetchLogs: vi.fn(),
     runPreflight: vi.fn(),
+  };
+});
+
+// loadRelayConfig defaults to resolving so the existing SSE tests (which never
+// configure it) keep exercising the real streaming-deploy mock path; the
+// dedicated pre-stream-validation test below overrides it with `...Once`.
+vi.mock("../config/relay.js", async () => {
+  const actual = await vi.importActual<typeof import("../config/relay.js")>("../config/relay.js");
+  return {
+    ...actual,
+    loadRelayConfig: vi.fn().mockResolvedValue({ compose_file: "docker-compose.yml" } as never),
   };
 });
 
@@ -48,6 +60,7 @@ const mockRollbackApp = vi.mocked(apps.rollbackApp);
 const mockRecordDeploy = vi.mocked(historyMod.recordDeploy);
 const mockGetHistory = vi.mocked(historyMod.getHistory);
 const mockExecSync = vi.mocked(execSync);
+const mockLoadRelayConfig = vi.mocked(relayMod.loadRelayConfig);
 
 const AUTH = `Bearer ${env.AUTH_TOKEN}`;
 
@@ -181,6 +194,25 @@ describe("POST /api/apps/:name/deploy?stream=true — SSE streaming", () => {
 
     expect(res.headers.get("Cache-Control")).toBe("no-cache");
     expect(res.headers.get("Connection")).toBe("keep-alive");
+  });
+
+  it("returns 404 (not a 200 SSE error event) when the app config is invalid", async () => {
+    mockLoadRelayConfig.mockRejectedValueOnce(new RelayConfigError("No .relay.yml found in /apps/ghost"));
+
+    const res = await request("/apps/ghost/deploy?stream=true", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Content-Type")).not.toContain("text/event-stream");
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("No .relay.yml");
+
+    // The stream must never have opened: no deploy attempt, no recorded history.
+    expect(mockDeployAppStreaming).not.toHaveBeenCalled();
+    expect(mockRecordDeploy).not.toHaveBeenCalled();
   });
 });
 
