@@ -176,6 +176,38 @@ describe("POST /api/apps/:name/deploy?stream=true — SSE streaming", () => {
     expect(mockRecordDeploy).not.toHaveBeenCalled();
   });
 
+  it("emits error event (HTTP 200) when deployAppStreaming rejects with RelayConfigError mid-stream", async () => {
+    // Contract boundary: a RelayConfigError from the pre-stream config check
+    // (see the 404 test below) is a real 404. A RelayConfigError thrown by
+    // deployAppStreaming itself once the stream is already open (e.g. the
+    // compose file escapes APPS_DIR, discovered mid-deploy) is just another
+    // in-stream failure: it stays an SSE `error` event over HTTP 200, same as
+    // any other rejection from deployAppStreaming.
+    mockDeployAppStreaming.mockRejectedValue(
+      new RelayConfigError("compose_file resolves outside the apps directory"),
+    );
+
+    const res = await request("/apps/demo/deploy?stream=true", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("text/event-stream");
+
+    const text = await res.text();
+    const events = parseSseEvents(text);
+
+    const errorEvent = events.find((e) => e.event === "error");
+    expect(errorEvent).toBeDefined();
+    expect((errorEvent!.data as { message: string }).message).toBe(
+      "compose_file resolves outside the apps directory",
+    );
+    expect(mockDeployAppStreaming).toHaveBeenCalled();
+    expect(mockRecordDeploy).not.toHaveBeenCalled();
+  });
+
   it("sets SSE headers (Content-Type, Cache-Control, Connection)", async () => {
     mockDeployAppStreaming.mockResolvedValue({
       success: true,
