@@ -36,7 +36,7 @@ beforeEach(() => {
   // git status --porcelain — empty stdout means clean tree.
   // git ls-remote — exit 0 means remote reachable.
   mockAccess.mockResolvedValue(undefined);
-  mockReadFile.mockResolvedValue("services:\n  app:\n    labels:\n      - traefik.enable=true\n" as any);
+  mockReadFile.mockResolvedValue("services:\n  app:\n    labels:\n      - traefik.enable=true\n");
   mockRunExec.mockImplementation(async (command, args) => {
     if (command === "docker") {
       return { stdout: "abc123\n", stderr: "", exitCode: 0 }; // containers present
@@ -93,7 +93,7 @@ describe("runPreflightChecks", () => {
   });
 
   it("fails when traefik labels missing", async () => {
-    mockReadFile.mockResolvedValue("services:\n  app:\n    image: node\n" as any);
+    mockReadFile.mockResolvedValue("services:\n  app:\n    image: node\n");
 
     const report = await runPreflightChecks({ appDir: "/app", config: baseConfig });
 
@@ -148,7 +148,7 @@ describe("runPreflightChecks", () => {
 
   it("force flag ignores non-critical failures", async () => {
     // Traefik labels missing (non-critical) + git dirty (non-critical)
-    mockReadFile.mockResolvedValue("services:\n  app:\n    image: node\n" as any);
+    mockReadFile.mockResolvedValue("services:\n  app:\n    image: node\n");
     mockRunExec.mockImplementation(async (command, args) => {
       if (command === "docker") {
         return { stdout: "abc\n", stderr: "", exitCode: 0 };

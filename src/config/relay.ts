@@ -130,14 +130,14 @@ export async function loadRelayConfig(appDir: string): Promise<RelayConfig> {
   let content: string;
   try {
     content = await readFile(configPath, "utf-8");
-  } catch (err: any) {
-    if (err.code === "ENOENT") {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new RelayConfigError(
         `No .relay.yml found in ${appDir}`,
       );
     }
     throw new RelayConfigError(
-      `Failed to read ${configPath}: ${err.message}`,
+      `Failed to read ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 

@@ -432,11 +432,11 @@ async function runStep(
       output: (r.stdout + "\n" + r.stderr).trim(),
       durationMs: Date.now() - start,
     };
-  } catch (err: any) {
+  } catch (err) {
     return {
       name,
       status: "failure",
-      output: err.message ?? String(err),
+      output: err instanceof Error ? err.message : String(err),
       durationMs: Date.now() - start,
     };
   }

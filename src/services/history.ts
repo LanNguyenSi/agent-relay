@@ -2,6 +2,21 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { env } from "../config/env.js";
 
+/**
+ * recordDeploy only reads these four fields off whatever deploy/rollback
+ * outcome produced it. It intentionally does not import the full
+ * `DeployResult`/`DeployBlockedResult` types from deploy/engine.js: those
+ * require `steps`, but `rollbackApp` (services/apps.ts) returns a lighter
+ * ad-hoc object without `durationMs`, and the `??` fallbacks below already
+ * treat commitBefore/commitAfter/durationMs as optional.
+ */
+interface DeployOutcome {
+  success: boolean;
+  commitBefore?: string;
+  commitAfter?: string;
+  durationMs?: number;
+}
+
 export interface DeployRecord {
   id: string;
   app: string;
@@ -45,7 +60,7 @@ async function save(): Promise<void> {
   await writeFile(path, JSON.stringify(records, null, 2));
 }
 
-export async function recordDeploy(app: string, result: any, triggeredBy: string): Promise<DeployRecord> {
+export async function recordDeploy(app: string, result: DeployOutcome, triggeredBy: string): Promise<DeployRecord> {
   const list = await load();
 
   const record: DeployRecord = {
