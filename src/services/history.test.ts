@@ -7,7 +7,7 @@
  * in-memory `records` cache (which is module-level state).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 

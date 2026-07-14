@@ -104,8 +104,8 @@ api.post("/apps/:name/deploy", async (c) => {
               await recordDeploy(name, result, "api");
               send("done", result);
             }
-          } catch (err: any) {
-            send("error", { message: err.message });
+          } catch (err) {
+            send("error", { message: err instanceof Error ? err.message : String(err) });
           }
 
           controller.close();
