@@ -143,7 +143,9 @@ Run pre-flight checks without deploying.
     { "name": "traefik_labels", "passed": true, "message": "Traefik labels found", "critical": false },
     { "name": "health_defined", "passed": true, "message": "Health endpoint: /api/health", "critical": true },
     { "name": "git_clean", "passed": true, "message": "Working tree clean", "critical": false },
-    { "name": "git_remote_reachable", "passed": true, "message": "Git remote is reachable", "critical": true }
+    { "name": "git_remote_reachable", "passed": true, "message": "Git remote is reachable", "critical": false },
+    { "name": "apps_root_mount_congruence", "passed": true, "message": "Host and relay agree on /apps (mount congruence probe round-tripped)", "critical": true },
+    { "name": "compose_bind_mount_sources_exist", "passed": true, "message": "All 2 compose bind-mount source(s) exist.", "critical": true }
   ]
 }
 ```
@@ -234,7 +236,7 @@ Recent Docker Compose logs.
 
 ### `relay_preflight`
 
-Run pre-flight checks without deploying. Returns the same six checks as `GET /api/apps/:name/preflight`.
+Run pre-flight checks without deploying. Returns the same 8 checks as `GET /api/apps/:name/preflight`.
 
 | Input | Type | Required | Description |
 |-------|------|----------|-------------|
