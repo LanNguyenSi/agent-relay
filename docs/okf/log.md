@@ -14,5 +14,7 @@
   `relay_preflight` section both claimed 6 checks; PR #61 added
   `apps_root_mount_congruence` and `compose_bind_mount_sources_exist`,
   bringing the total to 8 (`src/deploy/preflight.test.ts` "runs all 8
-  checks").
+  checks"). The same edit corrected `git_remote_reachable`'s critical
+  flag in the example JSON from `true` (wrong) to `false`, matching
+  `src/deploy/preflight.ts`.
 - 2026-07-16T05:50:00Z, bundle scaffolded (task 33072897, agent-tasks).
