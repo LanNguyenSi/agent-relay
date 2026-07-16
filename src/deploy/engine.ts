@@ -41,8 +41,12 @@ export interface DeployOptions {
   onStep?: (step: DeployStep) => void;
   /**
    * Skip non-critical preflight checks. Mirrors the API's `force` query
-   * param — the critical ones (`compose_file_exists`, `health_defined`)
-   * still gate because a deploy with those failing cannot succeed.
+   * param — the critical ones (`compose_file_exists`, `health_defined`,
+   * `apps_root_mount_congruence`, `compose_bind_mount_sources_exist`)
+   * still gate: the first two because a deploy with those failing cannot
+   * succeed, the latter two because letting them through silently masks
+   * a deployed app's on-host config with an empty directory (2026-07-15
+   * incident class) rather than merely failing the deploy.
    */
   force?: boolean;
 }
@@ -83,17 +87,22 @@ async function defaultFlowDeploy(
     onStep?.(step);
   }
 
-  // Pre-pull preflight: dirty-tree + reachable-remote checks. These
-  // only have signal BEFORE git pull (a successful pull renders them
-  // tautological), so they run here. If they trip the deploy is blocked
-  // before any working-tree mutation happens — `git pull` doesn't run,
-  // pre_update doesn't fire, the operator's WIP stays intact.
+  // Pre-pull preflight: dirty-tree + reachable-remote checks, plus the
+  // apps-root mount congruence probe (also placed pre-pull because it
+  // has signal about the host/relay APPS_DIR view, not about the app's
+  // tree). If any of these trip, the deploy is blocked before any
+  // working-tree mutation happens — `git pull` doesn't run, pre_update
+  // doesn't fire, the operator's WIP stays intact.
   //
-  // Force semantics: both pre-pull checks are non-critical, and
-  // runPreflightChecks gates only on critical checks when force=true.
-  // So `--force` bypasses the pre-pull gate entirely — by design:
-  // "I know what I'm doing, clobber my WIP" is exactly when an operator
-  // reaches for force.
+  // Force semantics: the dirty-tree and reachable-remote checks are
+  // non-critical, and runPreflightChecks gates only on critical checks
+  // when force=true, so `--force` bypasses those two — by design: "I
+  // know what I'm doing, clobber my WIP" is exactly when an operator
+  // reaches for force. apps_root_mount_congruence is critical and is NOT
+  // bypassed by force: an undetected APPS_DIR mismatch silently masks a
+  // deployed app's config with an empty directory regardless of whether
+  // the operator meant to force past the git checks (2026-07-15 incident
+  // class).
   const prePullPreflightStart = Date.now();
   const prePullPreflight = await runPreflightChecks({
     appDir,
