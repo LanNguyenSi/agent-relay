@@ -14,14 +14,16 @@ vi.mock("node:fs/promises", () => ({
   unlink: vi.fn(),
 }));
 
-// Fixed so mount-congruence assertions on the probe token / hostname-based
-// docker inspect argv are deterministic across machines.
-vi.mock("node:crypto", () => ({ randomUUID: () => "test-mount-probe-token" }));
+// Fixed (via a vi.fn() so individual tests can override it) so
+// mount-congruence assertions on the probe token / hostname-based docker
+// inspect argv are deterministic across machines.
+vi.mock("node:crypto", () => ({ randomUUID: vi.fn(() => "test-mount-probe-token") }));
 vi.mock("node:os", () => ({ hostname: () => "relay-container-id" }));
 
 import { runPreflightChecks } from "./preflight.js";
 import { runExec } from "./exec.js";
 import { access, readFile, stat, writeFile, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
 
 const mockRunExec = vi.mocked(runExec);
@@ -30,6 +32,11 @@ const mockReadFile = vi.mocked(readFile);
 const mockStat = vi.mocked(stat);
 const mockWriteFile = vi.mocked(writeFile);
 const mockUnlink = vi.mocked(unlink);
+// randomUUID's real return type is a branded UUID template-literal type;
+// cast test tokens through it so mockReturnValue(Once) accepts plain
+// strings without fighting the branding.
+type UUID = ReturnType<typeof randomUUID>;
+const mockRandomUUID = vi.mocked(randomUUID);
 
 const baseConfig: RelayConfig = {
   name: "test-app",
@@ -47,6 +54,10 @@ beforeEach(() => {
 
   originalAppsDir = env.APPS_DIR;
   env.APPS_DIR = "/apps";
+
+  // vi.resetAllMocks() above clears any implementation set on the node:crypto
+  // mock too (it's a vi.fn()), so restore the deterministic default here.
+  mockRandomUUID.mockReturnValue("test-mount-probe-token" as UUID);
 
   // Defaults: everything passes.
   // docker compose ps — non-empty stdout means containers are running.
@@ -422,12 +433,12 @@ describe("runPreflightChecks", () => {
       const check = report.checks.find((c) => c.name === "apps_root_mount_congruence");
       expect(check?.passed).toBe(true);
       expect(mockWriteFile).toHaveBeenCalledWith(
-        "/apps/.agent-relay-mount-probe",
+        "/apps/.agent-relay-mount-probe-test-mount-probe-token",
         "test-mount-probe-token",
         "utf-8",
       );
       // Marker is always cleaned up afterwards.
-      expect(mockUnlink).toHaveBeenCalledWith("/apps/.agent-relay-mount-probe");
+      expect(mockUnlink).toHaveBeenCalledWith("/apps/.agent-relay-mount-probe-test-mount-probe-token");
       // Probe bind-mounts APPS_DIR read-only via --mount (never -v, which
       // would auto-create a missing source and mask the exact failure
       // mode this check exists to catch).
@@ -471,7 +482,112 @@ describe("runPreflightChecks", () => {
       expect(check?.message).toMatch(/symlink/i);
       expect(report.passed).toBe(false);
       // Cleanup still attempted even on failure.
-      expect(mockUnlink).toHaveBeenCalledWith("/apps/.agent-relay-mount-probe");
+      expect(mockUnlink).toHaveBeenCalledWith("/apps/.agent-relay-mount-probe-test-mount-probe-token");
+    });
+
+    it("2026-07-15 incident path: reports NOT the same directory (not does-not-exist) when the probe container ran but the marker was absent", async () => {
+      mockContainerized();
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "docker" && args[0] === "inspect") {
+          return { stdout: "agent-relay:latest\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args[0] === "run") {
+          // BusyBox `cat` in the probe container: the bind source DOES
+          // exist on the host (docker started the container fine) but
+          // resolves to a different directory than the one the relay
+          // wrote the marker into — the actual incident state, where
+          // stderr still contains "No such file or directory" but for a
+          // completely different reason than a missing host APPS_DIR.
+          return {
+            stdout: "",
+            stderr:
+              "cat: can't open '/probe/.agent-relay-mount-probe-test-mount-probe-token': No such file or directory",
+            exitCode: 1,
+          };
+        }
+        if (command === "git" && args.includes("status")) return { stdout: "", stderr: "", exitCode: 0 };
+        if (command === "git" && args.includes("ls-remote")) return { stdout: "ref\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "pre-pull",
+      });
+
+      const check = report.checks.find((c) => c.name === "apps_root_mount_congruence");
+      expect(check?.passed).toBe(false);
+      expect(check?.critical).toBe(true);
+      expect(check?.message).toContain("NOT the same directory");
+      expect(check?.message).not.toMatch(/does not exist on the docker host/i);
+      expect(report.passed).toBe(false);
+    });
+
+    it("marker filename is per-invocation: writeFile, the docker-run cat argument, and unlink all use the same token-derived name, and it differs across invocations", async () => {
+      mockContainerized();
+      mockRandomUUID.mockReturnValueOnce("token-aaa" as UUID).mockReturnValueOnce("token-bbb" as UUID);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "docker" && args[0] === "inspect") {
+          return { stdout: "agent-relay:latest\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args[0] === "run") {
+          // Echo back whichever marker filename was requested so the
+          // check passes regardless of which invocation is running.
+          const catArg = (args as string[])[args.length - 1]!;
+          const token = catArg.split("-mount-probe-")[1];
+          return { stdout: `${token}\n`, stderr: "", exitCode: 0 };
+        }
+        if (command === "git" && args.includes("status")) return { stdout: "", stderr: "", exitCode: 0 };
+        if (command === "git" && args.includes("ls-remote")) return { stdout: "ref\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+
+      const reportA = await runPreflightChecks({ appDir: "/app", config: baseConfig, phase: "pre-pull" });
+      const reportB = await runPreflightChecks({ appDir: "/app", config: baseConfig, phase: "pre-pull" });
+
+      expect(reportA.checks.find((c) => c.name === "apps_root_mount_congruence")?.passed).toBe(true);
+      expect(reportB.checks.find((c) => c.name === "apps_root_mount_congruence")?.passed).toBe(true);
+
+      const markerNameA = "/apps/.agent-relay-mount-probe-token-aaa";
+      const markerNameB = "/apps/.agent-relay-mount-probe-token-bbb";
+
+      expect(mockWriteFile).toHaveBeenNthCalledWith(1, markerNameA, "token-aaa", "utf-8");
+      expect(mockWriteFile).toHaveBeenNthCalledWith(2, markerNameB, "token-bbb", "utf-8");
+      expect(mockUnlink).toHaveBeenNthCalledWith(1, markerNameA);
+      expect(mockUnlink).toHaveBeenNthCalledWith(2, markerNameB);
+
+      const runCalls = mockRunExec.mock.calls.filter(
+        (c) => c[0] === "docker" && (c[1] as string[])[0] === "run",
+      );
+      expect(runCalls).toHaveLength(2);
+      expect((runCalls[0]?.[1] as string[]).at(-1)).toBe("/probe/.agent-relay-mount-probe-token-aaa");
+      expect((runCalls[1]?.[1] as string[]).at(-1)).toBe("/probe/.agent-relay-mount-probe-token-bbb");
+      expect((runCalls[0]?.[1] as string[]).at(-1)).not.toBe((runCalls[1]?.[1] as string[]).at(-1));
+    });
+
+    it("force=true still fails on a congruence token mismatch (critical, not bypassed)", async () => {
+      mockContainerized();
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "docker" && args[0] === "inspect") {
+          return { stdout: "agent-relay:latest\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args[0] === "run") {
+          return { stdout: "some-other-content\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "git" && args.includes("status")) return { stdout: "", stderr: "", exitCode: 0 };
+        if (command === "git" && args.includes("ls-remote")) return { stdout: "ref\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "pre-pull",
+        force: true,
+      });
+
+      expect(report.passed).toBe(false);
     });
 
     it("fails with a symlink instruction when the probe token does not match (host sees a different directory)", async () => {
@@ -548,7 +664,7 @@ describe("runPreflightChecks", () => {
       expect(check?.passed).toBe(false);
       expect(check?.message).toContain("EACCES");
       // Cleanup is still attempted even though the write failed.
-      expect(mockUnlink).toHaveBeenCalledWith("/apps/.agent-relay-mount-probe");
+      expect(mockUnlink).toHaveBeenCalledWith("/apps/.agent-relay-mount-probe-test-mount-probe-token");
     });
 
     it("fails closed on an unexpected docker error distinct from a missing bind source", async () => {
@@ -584,12 +700,16 @@ describe("runPreflightChecks", () => {
         "services:\n  app:\n    volumes:\n      - ./config/app.env:/etc/app/app.env:ro\n",
       );
       mockStat.mockImplementation(async (path) => {
-        if (path === "/app/config/app.env") throw new Error("ENOENT");
+        if (path === "/apps/app/config/app.env") throw new Error("ENOENT");
         return {} as Awaited<ReturnType<typeof stat>>;
       });
 
+      // appDir is a direct child of APPS_DIR (env.APPS_DIR = "/apps" per
+      // beforeEach) — matching the production invariant documented in
+      // config/relay.ts's assertComposeFileContained, which the relative
+      // containment check below now also relies on.
       const report = await runPreflightChecks({
-        appDir: "/app",
+        appDir: "/apps/app",
         config: baseConfig,
         phase: "post-pull",
       });
@@ -597,7 +717,7 @@ describe("runPreflightChecks", () => {
       const check = report.checks.find((c) => c.name === "compose_bind_mount_sources_exist");
       expect(check?.passed).toBe(false);
       expect(check?.critical).toBe(true);
-      expect(check?.message).toContain("/app/config/app.env");
+      expect(check?.message).toContain("/apps/app/config/app.env");
       expect(report.passed).toBe(false); // deploy is blocked
     });
 
@@ -641,14 +761,14 @@ describe("runPreflightChecks", () => {
       mockStat.mockRejectedValue(new Error("ENOENT"));
 
       const report = await runPreflightChecks({
-        appDir: "/app",
+        appDir: "/apps/app",
         config: baseConfig,
         phase: "post-pull",
       });
 
       const check = report.checks.find((c) => c.name === "compose_bind_mount_sources_exist");
       expect(check?.passed).toBe(false);
-      expect(check?.message).toContain("/app/data");
+      expect(check?.message).toContain("/apps/app/data");
     });
 
     it("skips absolute sources outside APPS_DIR (e.g. the docker socket) without failing", async () => {
@@ -666,6 +786,41 @@ describe("runPreflightChecks", () => {
       expect(check?.passed).toBe(true);
       expect(check?.message).toMatch(/outside APPS_DIR/i);
       expect(mockStat).not.toHaveBeenCalled();
+    });
+
+    it("skips relative sources that escape APPS_DIR via ../.. without failing", async () => {
+      mockReadFile.mockResolvedValue(
+        "services:\n  app:\n    volumes:\n      - ../../outside.txt:/etc/outside.txt\n",
+      );
+
+      // appDir "/apps/app" is a direct child of APPS_DIR "/apps"; going up
+      // two levels from appDir lands outside "/apps" entirely.
+      const report = await runPreflightChecks({
+        appDir: "/apps/app",
+        config: baseConfig,
+        phase: "post-pull",
+      });
+
+      const check = report.checks.find((c) => c.name === "compose_bind_mount_sources_exist");
+      expect(check?.passed).toBe(true);
+      expect(check?.message).toMatch(/escapes APPS_DIR/i);
+      expect(mockStat).not.toHaveBeenCalled();
+    });
+
+    it("force=true still fails on a missing bind-mount source (critical, not bypassed)", async () => {
+      mockReadFile.mockResolvedValue(
+        "services:\n  app:\n    volumes:\n      - ./config/app.env:/etc/app/app.env:ro\n",
+      );
+      mockStat.mockRejectedValue(new Error("ENOENT"));
+
+      const report = await runPreflightChecks({
+        appDir: "/apps/app",
+        config: baseConfig,
+        phase: "post-pull",
+        force: true,
+      });
+
+      expect(report.passed).toBe(false);
     });
 
     it("checks absolute sources inside APPS_DIR", async () => {
@@ -744,16 +899,16 @@ describe("runPreflightChecks", () => {
       mockStat.mockResolvedValue({} as Awaited<ReturnType<typeof stat>>);
 
       const report = await runPreflightChecks({
-        appDir: "/app",
+        appDir: "/apps/app",
         config: baseConfig,
         phase: "post-pull",
       });
 
       const check = report.checks.find((c) => c.name === "compose_bind_mount_sources_exist");
       expect(check?.passed).toBe(true);
-      expect(mockStat).toHaveBeenCalledWith("/app/data");
-      expect(mockStat).toHaveBeenCalledWith("/app/config/app.yml");
-      expect(mockStat).toHaveBeenCalledWith("/app/secrets/app.key");
+      expect(mockStat).toHaveBeenCalledWith("/apps/app/data");
+      expect(mockStat).toHaveBeenCalledWith("/apps/app/config/app.yml");
+      expect(mockStat).toHaveBeenCalledWith("/apps/app/secrets/app.key");
     });
   });
 });

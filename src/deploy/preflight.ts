@@ -144,7 +144,7 @@ async function checkGitRemoteReachable(appDir: string): Promise<PreflightCheck> 
   };
 }
 
-const MOUNT_PROBE_FILENAME = ".agent-relay-mount-probe";
+const MOUNT_PROBE_FILENAME_PREFIX = ".agent-relay-mount-probe";
 
 /**
  * Incident 2026-07-15: agent-relay runs `docker compose` INSIDE its own
@@ -165,6 +165,14 @@ const MOUNT_PROBE_FILENAME = ".agent-relay-mount-probe";
  * If the relay isn't containerized at all (no `/.dockerenv`), `docker
  * compose` runs directly on the host and congruence holds by construction
  * — nothing to probe.
+ *
+ * The `/.dockerenv` gate is docker-specific: a relay running under podman
+ * or nerdctl would not find that file and would skip the probe entirely
+ * (falling through to the "not containerized" pass, incorrectly). The
+ * probe also assumes a `cat` binary exists in the relay's own image —
+ * true for `node:22-alpine`, but a distroless base image would make the
+ * probe container fail to start and this check would fail closed instead
+ * of confirming congruence.
  */
 async function checkAppsRootMountCongruence(): Promise<PreflightCheck> {
   const name = "apps_root_mount_congruence";
@@ -184,8 +192,16 @@ async function checkAppsRootMountCongruence(): Promise<PreflightCheck> {
     };
   }
 
-  const markerPath = join(appsDir, MOUNT_PROBE_FILENAME);
   const token = randomUUID();
+  // Per-invocation filename, not a shared constant path: the relay has no
+  // deploy serialization, so a standalone `GET /api/apps/:name/preflight`
+  // can overlap a concurrent deploy's own probe. A shared marker name
+  // would let one invocation's write/unlink race another's read/write,
+  // corrupting the congruence result (and the file) for both. Embedding
+  // the token in the filename makes each invocation's marker unique
+  // end-to-end.
+  const markerFilename = `${MOUNT_PROBE_FILENAME_PREFIX}-${token}`;
+  const markerPath = join(appsDir, markerFilename);
 
   try {
     await writeFile(markerPath, token, "utf-8");
@@ -220,7 +236,7 @@ async function checkAppsRootMountCongruence(): Promise<PreflightCheck> {
         "--entrypoint",
         "cat",
         image,
-        `/probe/${MOUNT_PROBE_FILENAME}`,
+        `/probe/${markerFilename}`,
       ],
       appsDir,
     );
@@ -235,10 +251,13 @@ async function checkAppsRootMountCongruence(): Promise<PreflightCheck> {
 
     if (probe.exitCode !== 0) {
       const stderr = probe.stderr.toLowerCase();
-      const missingSource =
+      // Daemon-level error: the bind source itself doesn't exist on the
+      // docker host, so the `docker run` never even started the probe
+      // container. Distinct from the container-level error below.
+      const hostDirMissing =
         stderr.includes("bind source path does not exist") ||
-        stderr.includes("no such file or directory");
-      if (missingSource) {
+        stderr.includes("invalid mount config");
+      if (hostDirMissing) {
         return {
           name,
           passed: false,
@@ -247,6 +266,27 @@ async function checkAppsRootMountCongruence(): Promise<PreflightCheck> {
             `resolves compose bind-mount sources against the HOST ` +
             `filesystem, not the relay container's view. ${fixHint} ` +
             `Docker error: ${probe.stderr.trim()}`,
+          critical: true,
+        };
+      }
+      // Container-level error: the probe container RAN (the bind source
+      // exists on the host) but `cat` couldn't find the marker inside it
+      // — e.g. BusyBox's `cat: can't open '...': No such file or
+      // directory`. That means the host's ${appsDir} exists but is a
+      // DIFFERENT directory than the one the relay wrote the marker into
+      // (the actual 2026-07-15 incident state). Do not conflate this with
+      // "host dir does not exist" above — the incident was exactly this
+      // case, where the host directory did exist.
+      const markerAbsent = stderr.includes("no such file or directory");
+      if (markerAbsent) {
+        return {
+          name,
+          passed: false,
+          message:
+            `Host ${appsDir} exists but is NOT the same directory the ` +
+            `relay sees (probe marker absent — the probe container ran ` +
+            `but could not find the marker file). ${fixHint} Docker ` +
+            `error: ${probe.stderr.trim()}`,
           critical: true,
         };
       }
@@ -390,7 +430,18 @@ async function checkComposeBindMountSourcesExist(
       }
       toCheck.push(resolved);
     } else {
-      toCheck.push(resolve(appDir, src));
+      // A relative source is normally contained by construction (appDir
+      // itself lives under APPS_DIR), but a deep enough `../../..`
+      // escape can still resolve outside it — apply the same containment
+      // test used for absolute sources above rather than trusting the
+      // relative form.
+      const resolved = resolve(appDir, src);
+      const contained = resolved === appsDir || resolved.startsWith(appsDir + sep);
+      if (!contained) {
+        skipped.push(`${src} (escapes APPS_DIR)`);
+        continue;
+      }
+      toCheck.push(resolved);
     }
   }
 
@@ -415,7 +466,12 @@ async function checkComposeBindMountSourcesExist(
         `compose bind-mount sources against the HOST filesystem; a missing ` +
         `source is silently auto-created by docker as an empty directory on ` +
         `the host, masking what should have been real app config ` +
-        `(2026-07-15 incident class).${skippedNote}`,
+        `(2026-07-15 incident class). If this is a first deploy and a path ` +
+        `is meant to be an intentionally empty data/log directory (e.g. ` +
+        `./data, ./logs), create it explicitly on the relay host under the ` +
+        `app's directory (\`mkdir -p\`) and redeploy — letting docker ` +
+        `auto-create it is exactly what this check refuses to do ` +
+        `silently.${skippedNote}`,
       critical: true,
     };
   }
