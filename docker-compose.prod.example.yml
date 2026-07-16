@@ -17,7 +17,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/.ssh:/root/.ssh:ro
-      # Adjust this path to where your app repos live on the host:
+      # Adjust this path to where your app repos live on the host. The docker
+      # daemon resolves deployed apps' own bind mounts against the HOST's
+      # /apps (DooD), so host /apps must be this SAME directory, e.g. via a
+      # host symlink /apps -> /path/to/apps. See docs/operations.md.
       - /path/to/apps:/apps
     networks:
       - traefik

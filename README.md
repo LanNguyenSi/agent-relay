@@ -41,6 +41,8 @@ sudo RELAY_DOMAIN=relay.example.com \
 
 The installer detects what's on port 80, picks an install mode (greenfield with Traefik / join an existing Traefik / port-only behind nginx), pulls `ghcr.io/lannguyensi/agent-relay:latest`, and prints a generated `AUTH_TOKEN`. See [docs/operations.md](docs/operations.md) for the full mode matrix and env vars.
 
+The relay runs `docker compose` for deployed apps from inside its own container, so the docker daemon needs the host's `/apps` to be the same directory as `APPS_DIR`. The installer sets this up automatically (a `/apps -> $APPS_DIR` symlink when they differ) and fails loudly if it cannot; see [docs/operations.md](docs/operations.md#apps_dir-hostcontainer-contract) for the full contract.
+
 If you don't yet have a domain, drop `RELAY_DOMAIN` and the installer falls back to `port-only` mode (loopback bind, no TLS):
 
 ```bash

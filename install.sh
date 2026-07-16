@@ -560,6 +560,66 @@ fi
 # ── Step 6: agent-relay ────────────────────────────────────────────────────
 mkdir -p "$RELAY_DIR" "$APPS_DIR"
 
+# APPS_DIR host/container contract (incident 2026-07-15). The relay's own
+# compose file (below) bind-mounts the HOST's APPS_DIR at /apps, and the
+# relay's .env (below) pins APPS_DIR=/apps — the in-container view. The
+# relay then runs `docker compose` for DEPLOYED apps from INSIDE that same
+# container (DooD, via the mounted docker.sock): the docker daemon always
+# resolves those apps' compose bind-mount sources against the HOST
+# filesystem, never the relay container's view. So the host's /apps must be
+# the SAME directory as $APPS_DIR, or the daemon silently auto-creates
+# missing bind-mount sources as empty directories while deploys report
+# success. See "APPS_DIR host/container contract" in docs/operations.md.
+if [ "$APPS_DIR" != "/apps" ]; then
+  if [ -L /apps ]; then
+    apps_link_target="$(readlink -f /apps 2>/dev/null || true)"
+    apps_dir_resolved="$(readlink -f "$APPS_DIR" 2>/dev/null || echo "$APPS_DIR")"
+    if [ "$apps_link_target" = "$apps_dir_resolved" ]; then
+      log "/apps symlink already points at ${APPS_DIR}"
+    else
+      err "$(cat <<BANNER
+/apps is a symlink but points at '${apps_link_target:-<broken link>}', not APPS_DIR='${APPS_DIR}'.
+
+The relay runs docker compose for deployed apps INSIDE its own container
+(DooD). The docker daemon resolves bind-mount sources for those apps
+against the HOST filesystem, so the HOST /apps must be the SAME directory
+as APPS_DIR, or every deployed-app file bind-mount is silently
+auto-created by docker as an empty directory while deploys report
+success (2026-07-15 incident class).
+
+Fix:
+  sudo rm /apps
+  sudo ln -s '${APPS_DIR}' /apps
+BANNER
+)"
+    fi
+  elif [ -e /apps ]; then
+    err "$(cat <<BANNER
+/apps already exists and is not a symlink to APPS_DIR='${APPS_DIR}'.
+
+The relay runs docker compose for deployed apps INSIDE its own container
+(DooD). The docker daemon resolves bind-mount sources for those apps
+against the HOST filesystem, so the HOST /apps must be the SAME directory
+as APPS_DIR, or every deployed-app file bind-mount is silently
+auto-created by docker as an empty directory while deploys report
+success (2026-07-15 incident class).
+
+Fix: move whatever is at /apps out of the way (inspect it first — it may
+hold data that running containers still mount), then re-run, or symlink
+manually:
+  sudo mv /apps /apps.pre-relay-\$(date +%Y%m%d)
+  sudo ln -s '${APPS_DIR}' /apps
+BANNER
+)"
+  else
+    if ln -s "$APPS_DIR" /apps 2>/dev/null; then
+      log "Created symlink /apps -> ${APPS_DIR} (required so the docker daemon on the host resolves deployed-app bind mounts against the same /apps the relay sees — see docs/operations.md)"
+    else
+      err "Could not create symlink /apps -> ${APPS_DIR} (permission denied?). Create it manually and re-run: sudo ln -s '${APPS_DIR}' /apps"
+    fi
+  fi
+fi
+
 # Preserve existing token or generate new one
 if [ -f "$RELAY_DIR/.env" ] && grep -q '^AUTH_TOKEN=' "$RELAY_DIR/.env"; then
   AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$RELAY_DIR/.env" | cut -d= -f2-)
