@@ -35,11 +35,25 @@ export async function safeAppDir(name: string): Promise<string> {
   if (dir !== appsRoot && !dir.startsWith(appsRoot + sep)) {
     throw new RelayConfigError("Invalid app path");
   }
-  // Resolve symlinks and verify the real path is still inside APPS_DIR. The same
-  // trailing-separator guard applies after realpath, so a symlink to a
-  // sibling-prefixed directory (e.g. /apps/x -> /appsteak) cannot escape.
-  const real = await realpath(dir).catch(() => dir);
+  // Resolve APPS_DIR's real path FIRST, then rebuild the app dir from that
+  // resolved root before resolving symlinks on the app dir itself — both
+  // sides of the containment check below must go through the same
+  // normalization. Building the child from the unresolved `appsRoot` (via
+  // `dir` above) and only falling back to that unresolved string when
+  // `realpath(dir)` fails (ENOENT — the app doesn't exist yet, e.g. an app
+  // never deployed) compares an unresolved child against a resolved parent.
+  // That's a false positive whenever APPS_DIR's own path crosses a symlink
+  // (e.g. /tmp -> /private/tmp or /var -> /private/var): the nonexistent
+  // child keeps the symlinked prefix while the parent loses it, so a
+  // genuinely-contained app dir looks like it escapes. Deriving the
+  // fallback from `appsReal` keeps both sides in the same normalized form
+  // while still resolving (and rejecting) a symlink escape inside the app
+  // dir itself. The same trailing-separator guard applies after realpath,
+  // so a symlink to a sibling-prefixed directory (e.g. /apps/x -> /appsteak)
+  // cannot escape.
   const appsReal = await realpath(appsRoot).catch(() => appsRoot);
+  const realBase = resolve(appsReal, name);
+  const real = await realpath(realBase).catch(() => realBase);
   if (real !== appsReal && !real.startsWith(appsReal + sep)) {
     throw new RelayConfigError("App path escapes APPS_DIR");
   }

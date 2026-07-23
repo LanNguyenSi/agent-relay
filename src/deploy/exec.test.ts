@@ -63,7 +63,12 @@ describe("runExec — both stdout and stderr", () => {
 
 describe("runShell", () => {
   it("wraps a shell command string and returns result", async () => {
-    const result = await runShell("echo -n hello", cwd);
+    // `printf`, not `echo -n`: whether a shell's `echo` builtin treats `-n`
+    // as a flag or a literal argument is implementation/mode-dependent (e.g.
+    // bash invoked as `sh` — which is what /bin/sh is on macOS — ignores
+    // echo's options entirely in POSIX mode). `printf` has no such ambiguity
+    // across `/bin/sh` implementations.
+    const result = await runShell("printf hello", cwd);
     expect(result.stdout.trim()).toBe("hello");
     expect(result.exitCode).toBe(0);
   });
