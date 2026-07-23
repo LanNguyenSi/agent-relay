@@ -70,6 +70,20 @@ describe("safeAppDir", () => {
     await expect(safeAppDir("demo")).resolves.toBe(expected);
   });
 
+  it("resolves a not-yet-existing app dir under a symlinked APPS_DIR parent", async () => {
+    // Regression for the /var -> /private/var class: APPS_DIR itself crosses
+    // a symlink and the app dir does not exist yet. Building the ENOENT
+    // fallback from the unresolved parent compared a symlinked child prefix
+    // against the resolved root and false-positived as an escape. Kept
+    // host-independent via an explicit symlink so the guard also fails on
+    // CI runners whose tmpdir is a real directory.
+    const linkRoot = resolve(tmpRoot, "apps-link");
+    await symlink(appsDir, linkRoot);
+    env.APPS_DIR = linkRoot;
+    const expected = resolve(await realpath(appsDir), "neverdeployed");
+    await expect(safeAppDir("neverdeployed")).resolves.toBe(expected);
+  });
+
   it("rejects a symlink escaping to a sibling-prefixed dir (apps vs apps-evil)", async () => {
     // The trailing-separator false-positive: a symlink APPS_DIR/escape ->
     // <tmpRoot>/apps-evil. Its realpath string-starts with appsReal
