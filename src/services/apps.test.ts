@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, symlink, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { safeAppDir, validateBranch, fetchLogs } from "./apps.js";
@@ -93,6 +93,93 @@ describe("safeAppDir", () => {
     await mkdir(sibling, { recursive: true });
     await symlink(sibling, resolve(appsDir, "escape"));
     await expect(safeAppDir("escape")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects a DANGLING top-level symlink whose target is outside APPS_DIR", async () => {
+    // Defense-in-depth follow-up to PR #64: a symlink APPS_DIR/danger ->
+    // <tmpRoot>/not-created-yet is planted before its target exists.
+    // realpath(child) ENOENTs (the target doesn't exist), and the old
+    // fallback treated that ENOENT as "app not deployed yet" and returned
+    // the in-dir child path unconditionally — even though the entry IS a
+    // symlink pointing outside APPS_DIR. A later write following that link
+    // would land outside APPS_DIR the moment the target is created.
+    const outsideTarget = resolve(tmpRoot, "not-created-yet");
+    await symlink(outsideTarget, resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects a DANGLING top-level symlink with a relative target outside APPS_DIR", async () => {
+    // Same as above but with a relative symlink target (e.g. `../../etc`),
+    // which resolves against the symlink's own directory rather than cwd.
+    await symlink("../not-created-yet", resolve(appsDir, "danger-relative"));
+    await expect(safeAppDir("danger-relative")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("still resolves a not-yet-existing app dir that is NOT a symlink (no dirent at all)", async () => {
+    // Pins the PR #64 fallback: safeAppDir("neverdeployed") in the earlier
+    // test above already covers this for a symlinked APPS_DIR parent; this
+    // covers the plain case where APPS_DIR/<name> has no dirent whatsoever
+    // (neither a real dir nor a symlink), which must still fall back to the
+    // in-dir child path rather than being rejected.
+    const expected = resolve(await realpath(appsDir), "stillnodir");
+    await expect(safeAppDir("stillnodir")).resolves.toBe(expected);
+  });
+
+  it("does not reject a dangling top-level symlink whose target stays inside APPS_DIR", async () => {
+    // A symlink pointing at a not-yet-created sibling dir *inside*
+    // APPS_DIR is not an escape and must still resolve — to the symlink's
+    // own (resolved-parent) location, same contract as the plain
+    // never-deployed fallback above, not to its (nonexistent) target.
+    const linkPath = resolve(appsDir, "future-app");
+    const insideTarget = resolve(appsDir, "not-yet-created-sibling");
+    await symlink(insideTarget, linkPath);
+    const expected = resolve(await realpath(appsDir), "future-app");
+    await expect(safeAppDir("future-app")).resolves.toBe(expected);
+  });
+
+  it("does not reject a dangling top-level symlink under a symlinked APPS_DIR whose absolute target stays inside APPS_DIR", async () => {
+    // Host-independent regression for the /var -> /private/var class,
+    // applied to the new target-containment check itself (mirrors the
+    // symlinked-APPS_DIR-parent test above, but for a dangling symlink's
+    // OWN target rather than the app dir itself). env.APPS_DIR is set to
+    // `linkRoot`, an explicit symlink to `appsDir`, so this forces the same
+    // symlink-crossing on every host, not just ones where the OS tmpdir
+    // happens to cross one (e.g. macOS /var -> /private/var). The dangling
+    // symlink's absolute target is built from that unresolved `linkRoot`
+    // prefix, as a real deploy naturally would; a naive lexical resolve()
+    // of the target would keep that unresolved prefix and never match
+    // `appsReal`, false-positiving a legitimately-contained target as an
+    // escape. bestEffortReal() must resolve it through the same symlinked
+    // ancestor as `appsReal` before comparing.
+    const linkRoot = resolve(tmpRoot, "apps-link-2");
+    await symlink(appsDir, linkRoot);
+    env.APPS_DIR = linkRoot;
+    const insideTargetUnresolved = resolve(linkRoot, "not-yet-created-sibling");
+    await symlink(insideTargetUnresolved, resolve(linkRoot, "future-app-2"));
+    const expected = resolve(await realpath(appsDir), "future-app-2");
+    await expect(safeAppDir("future-app-2")).resolves.toBe(expected);
+  });
+
+  it("keeps the tolerant fallback for a self-referential symlink (ELOOP)", async () => {
+    // Error-class pin: only ENOENT gets the dangling-symlink treatment.
+    // A symlink loop makes realpath() throw ELOOP; the pre-#64 behavior
+    // (and listApps' deliberate posture) is the tolerant in-dir fallback,
+    // not a raw errno leaking out of the API as a 500. The kernel cannot
+    // follow a loop either, so nothing escapes through this fallback.
+    const loopPath = resolve(appsDir, "loop");
+    await symlink(loopPath, loopPath);
+    const expected = resolve(await realpath(appsDir), "loop");
+    await expect(safeAppDir("loop")).resolves.toBe(expected);
+  });
+
+  it("keeps the tolerant fallback for a symlink through a regular file (ENOTDIR)", async () => {
+    // Same error-class pin for ENOTDIR: a symlink whose target path
+    // descends through an existing regular file must fall back to the
+    // in-dir child path, not throw a raw errno.
+    await writeFile(resolve(appsDir, "afile"), "not a dir\n");
+    await symlink(resolve(appsDir, "afile", "sub"), resolve(appsDir, "through-file"));
+    const expected = resolve(await realpath(appsDir), "through-file");
+    await expect(safeAppDir("through-file")).resolves.toBe(expected);
   });
 });
 

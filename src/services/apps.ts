@@ -1,5 +1,5 @@
-import { resolve, sep } from "node:path";
-import { readdir, stat, realpath } from "node:fs/promises";
+import { resolve, sep, dirname, basename, isAbsolute } from "node:path";
+import { readdir, stat, lstat, readlink, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy } from "../deploy/engine.js";
@@ -18,6 +18,27 @@ import { runExec } from "../deploy/exec.js";
 // tree.
 
 export { RelayConfigError };
+
+// realpath() requires every path segment to exist, so it can't tell us where
+// a DANGLING symlink's target really is. This walks up to the nearest
+// existing ancestor, resolves *that* (following any symlinks in it, e.g. a
+// symlinked APPS_DIR parent), then rebuilds the missing tail on top —
+// the one-level fallback safeAppDir applies to `appsRoot` itself,
+// generalized to arbitrary depth so it also normalizes a dangling
+// symlink's own target path before it's compared against `appsReal`.
+// The root side deliberately KEEPS its one-level fallback: if APPS_DIR
+// itself does not exist there is nothing inside it to check, so the two
+// sides intentionally do not share this helper.
+async function bestEffortReal(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    const parent = dirname(path);
+    if (parent === path) return path; // reached filesystem root
+    return resolve(await bestEffortReal(parent), basename(path));
+  }
+}
 
 const APP_NAME = /^[a-zA-Z0-9_-]+$/;
 const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
@@ -53,7 +74,46 @@ export async function safeAppDir(name: string): Promise<string> {
   // cannot escape.
   const appsReal = await realpath(appsRoot).catch(() => appsRoot);
   const realBase = resolve(appsReal, name);
-  const real = await realpath(realBase).catch(() => realBase);
+  const real = await realpath(realBase).catch(async (err: NodeJS.ErrnoException) => {
+    // Only ENOENT gets the dangling-symlink treatment below. Every other
+    // error class (ELOOP, ENOTDIR, EACCES, ...) keeps the pre-existing
+    // tolerant fallback to the in-dir child path, same posture as
+    // listApps' deliberate ELOOP tolerance: this check stays scoped to
+    // the dangling-link case, and the kernel cannot follow what it
+    // cannot resolve, so nothing new escapes through that fallback.
+    if (err.code !== "ENOENT") return realBase;
+    // realpath() throws ENOENT both when `realBase` simply doesn't exist yet
+    // (a never-deployed app: fall back to the unresolved path, handled
+    // below) and when it exists as a DANGLING top-level symlink whose
+    // target doesn't exist yet — e.g. APPS_DIR/<name> -> /etc, planted
+    // before the target path is created. realpath can't resolve a target
+    // that doesn't exist, so it ENOENTs in both cases; lstat (which does
+    // NOT follow symlinks) tells them apart. For the symlink case we
+    // resolve the link target ourselves via bestEffortReal() — the same
+    // normalization realpath would apply once the target exists — and
+    // reject it here if that target escapes APPS_DIR, instead of silently
+    // falling back to the in-dir child path and letting a later write
+    // follow the link out.
+    const link = await lstat(realBase).catch(() => null);
+    if (link?.isSymbolicLink()) {
+      try {
+        const target = await readlink(realBase);
+        const targetPath = isAbsolute(target) ? target : resolve(dirname(realBase), target);
+        const resolvedTarget = await bestEffortReal(targetPath);
+        if (resolvedTarget !== appsReal && !resolvedTarget.startsWith(appsReal + sep)) {
+          throw new RelayConfigError("App path escapes APPS_DIR");
+        }
+      } catch (linkErr) {
+        if (linkErr instanceof RelayConfigError) throw linkErr;
+        // Same posture as the non-ENOENT branch above: an unresolvable
+        // link target (ELOOP chain, EACCES, a dirent racing away) falls
+        // back to the pre-existing in-dir child path instead of leaking
+        // a raw errno out of the API as a 500.
+        return realBase;
+      }
+    }
+    return realBase;
+  });
   if (real !== appsReal && !real.startsWith(appsReal + sep)) {
     throw new RelayConfigError("App path escapes APPS_DIR");
   }
