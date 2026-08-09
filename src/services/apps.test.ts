@@ -181,6 +181,143 @@ describe("safeAppDir", () => {
     const expected = resolve(await realpath(appsDir), "through-file");
     await expect(safeAppDir("through-file")).resolves.toBe(expected);
   });
+
+  it("rejects chained dangling symlinks with an absolute first jump (B1)", async () => {
+    // Follow-up to PR #68 (task d39b85ce): bestEffortReal() only resolved
+    // the IMMEDIATE readlink target. If that target was ITSELF a dangling
+    // symlink, the old code walked up to the nearest existing ancestor
+    // (APPS_DIR) and rebuilt the tail lexically, accepting the chain as
+    // contained even though the kernel would follow it outside APPS_DIR.
+    // apps/hop -> <tmpRoot>/outside-b1 (dangling, absolute, outside
+    // APPS_DIR), then apps/danger -> apps/hop.
+    const outside = resolve(tmpRoot, "outside-b1");
+    await symlink(outside, resolve(appsDir, "hop"));
+    await symlink(resolve(appsDir, "hop"), resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects chained dangling symlinks with a relative first jump (B2)", async () => {
+    // Same class as B1 (task d39b85ce), with a relative first jump:
+    // apps/hop2 -> "../outside-b2" (dangling, relative, outside APPS_DIR),
+    // then apps/danger2 -> "hop2" (relative).
+    await symlink("../outside-b2", resolve(appsDir, "hop2"));
+    await symlink("hop2", resolve(appsDir, "danger2"));
+    await expect(safeAppDir("danger2")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects a lexical `..` collapse through an existing outward symlink (B3)", async () => {
+    // Follow-up to PR #68 (task d39b85ce): the old code built the link
+    // target path with `resolve(dirname(realBase), target)`, which
+    // collapses `..` TEXTUALLY before any filesystem access, while the
+    // kernel resolves `..` only AFTER following the symlink ahead of it.
+    // apps/hop3 -> <tmpRoot>/outside-b3/deep (EXISTS), apps/danger3 ->
+    // "hop3/../newdir" (the "newdir" tail does not exist). Lexically this
+    // collapses to <apps>/newdir (looks contained); the kernel really
+    // lands on <tmpRoot>/outside-b3/newdir (outside APPS_DIR).
+    const outside = resolve(tmpRoot, "outside-b3");
+    const deep = resolve(outside, "deep");
+    await mkdir(deep, { recursive: true });
+    await symlink(deep, resolve(appsDir, "hop3"));
+    await symlink("hop3/../newdir", resolve(appsDir, "danger3"));
+    await expect(safeAppDir("danger3")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects a dangling intermediate segment reattached mid-chain, absolute target (P1)", async () => {
+    // Fix-round follow-up to task d39b85ce (round 1 review): bestEffortReal
+    // rebuilds a MISSING segment lexically via resolve(realParent,
+    // basename) but, before this fix, never re-checked whether that
+    // rebuilt segment was itself a symlink — so a dangling link reattached
+    // mid-chain (not just the chain's own final leg) was never followed.
+    // apps/mid -> <tmpRoot>/outside-p1 (dangling, absolute), apps/danger ->
+    // "mid/tail" (relative, tail appended past the dangling hop). Kernel
+    // truth: <tmpRoot>/outside-p1/tail, outside APPS_DIR. Measured
+    // ACCEPTED before this round's fix; must be rejected now.
+    const outside = resolve(tmpRoot, "outside-p1");
+    await symlink(outside, resolve(appsDir, "mid"));
+    await symlink("mid/tail", resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects `..` collapsing through a DANGLING outward symlink (P2)", async () => {
+    // Same root cause as P1, exercised through the `..`-collapse path
+    // instead of a plain tail: apps/mid -> <tmpRoot>/outside-p2/sub
+    // (dangling, absolute), apps/danger -> "mid/../pwned". The B3 test
+    // above only covers `..` after an EXISTING outward symlink; this pins
+    // the dangling variant of the same escape. Kernel truth:
+    // <tmpRoot>/outside-p2/pwned (".." cancels "sub", landing outside
+    // APPS_DIR). Measured ACCEPTED before this round's fix.
+    const outside = resolve(tmpRoot, "outside-p2", "sub");
+    await symlink(outside, resolve(appsDir, "mid"));
+    await symlink("mid/../pwned", resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects a dangling intermediate segment reattached mid-chain, deeper tail (P12)", async () => {
+    // Same class as P1 with a two-segment tail, pinning that the fix
+    // applies uniformly regardless of how many segments are rebuilt after
+    // the dangling hop. apps/mid -> <tmpRoot>/outside-p12 (dangling),
+    // apps/danger -> "mid/a/b". Kernel truth: <tmpRoot>/outside-p12/a/b.
+    const outside = resolve(tmpRoot, "outside-p12");
+    await symlink(outside, resolve(appsDir, "mid"));
+    await symlink("mid/a/b", resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("does not reject a chain of in-dir dangling symlinks under a symlinked APPS_DIR (no over-reject)", async () => {
+    // Positive control for the P1/P2/P12 fix: the same mid-chain
+    // parent-symlink re-check must NOT reject a chain that stays fully
+    // contained. apps/chainA -> "chainB" -> "chainC" (all relative,
+    // in-dir; chainC itself is never created, so the whole chain stays
+    // dangling), resolved under a symlinked APPS_DIR parent (env.APPS_DIR
+    // = linkRoot) to also exercise the appsReal-crossing path.
+    const linkRoot = resolve(tmpRoot, "apps-link-3");
+    await symlink(appsDir, linkRoot);
+    env.APPS_DIR = linkRoot;
+    await symlink("chainB", resolve(appsDir, "chainA"));
+    await symlink("chainC", resolve(appsDir, "chainB"));
+    const expected = resolve(await realpath(appsDir), "chainA");
+    await expect(safeAppDir("chainA")).resolves.toBe(expected);
+  });
+
+  it("terminates on a cyclic, kernel-invisible manufactured symlink chain (depth-limit pin)", async () => {
+    // Fix-round follow-up (finding 3): the old CHAIN_LENGTH=50 version of
+    // this test was inert — measured against both origin/main AND this
+    // branch with MAX_SYMLINK_DEPTH deleted entirely, it passed unchanged
+    // either way. A fully-materialized 50-symlink chain trips the KERNEL's
+    // own ELOOP inside realpath() before this module's own depth guard is
+    // ever reached, so the assertion (in a try/catch that only fires on a
+    // RangeError) never actually exercised MAX_SYMLINK_DEPTH.
+    // This construction is kernel-invisible instead: apps/a -> "nodir/../b"
+    // and apps/b -> "nodir/../a". "nodir" never exists, so every hop
+    // resolves through this module's OWN bestEffortReal/resolveSymlinkChain
+    // recursion (never a single kernel-followed symlink chain the OS could
+    // ELOOP on its own) and cycles a<->b indefinitely without our own
+    // MAX_SYMLINK_DEPTH guard. The assertion below is unconditional
+    // (outside any catch): without the guard this hangs (measured: still
+    // unresolved after 3s in a bounded mutation probe, vs. ~2-10ms with the
+    // guard in place); with the guard, the ELOOP it raises is caught by
+    // safeAppDir's existing tolerant ELOOP-class fallback and the promise
+    // resolves.
+    await symlink("nodir/../b", resolve(appsDir, "a"));
+    await symlink("nodir/../a", resolve(appsDir, "b"));
+    await expect(safeAppDir("a")).resolves.toBeDefined();
+  });
+
+  it("rejects a ~30-hop manufactured chain ending outside APPS_DIR (under kernel SYMLOOP)", async () => {
+    // Companion to the cyclic test above: exercises this module's OWN
+    // per-hop depth counting (not the kernel's) on a chain short enough
+    // that the kernel's own SYMLOOP_MAX (~32-40, OS-dependent) does not
+    // intervene, so a failure here is attributable to OUR recursion, not a
+    // kernel-level ELOOP. apps/link0 -> link1 -> ... -> link30 -> <outside>
+    // (dangling, absolute, outside APPS_DIR). Must be rejected as an
+    // escape, not silently accepted or ELOOP-tolerated.
+    const CHAIN_LENGTH = 30;
+    for (let i = 0; i < CHAIN_LENGTH; i++) {
+      await symlink(`link${i + 1}`, resolve(appsDir, `link${i}`));
+    }
+    await symlink(resolve(tmpRoot, "outside-30hop"), resolve(appsDir, `link${CHAIN_LENGTH}`));
+    await expect(safeAppDir("link0")).rejects.toThrow("App path escapes APPS_DIR");
+  });
 });
 
 // Coverage for fetchLogs migrated call sites: compose_file is the element
