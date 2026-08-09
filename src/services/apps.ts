@@ -25,7 +25,11 @@ export { RelayConfigError };
 // symlinked APPS_DIR parent), then rebuilds the missing tail on top —
 // the one-level fallback safeAppDir applies to `appsRoot` itself,
 // generalized to arbitrary depth so it also normalizes a dangling
-// symlink's own target path before it's compared against `appsReal`.
+// symlink's own target path before it's compared against `appsReal`. Fed a
+// RAW (not pre-collapsed via path.resolve()) path string, this also
+// resolves a `..` that follows a symlink in kernel order rather than
+// lexically — see resolveSymlinkChain below, which is what supplies that
+// raw string.
 // The root side deliberately KEEPS its one-level fallback: if APPS_DIR
 // itself does not exist there is nothing inside it to check, so the two
 // sides intentionally do not share this helper.
@@ -38,6 +42,54 @@ async function bestEffortReal(path: string): Promise<string> {
     if (parent === path) return path; // reached filesystem root
     return resolve(await bestEffortReal(parent), basename(path));
   }
+}
+
+// SYMLOOP_MAX analog: bounds how many hops resolveSymlinkChain will follow
+// through a manufactured chain of individually-dangling symlinks. A single
+// fully-materialized chain is already bounded by the kernel's own ELOOP
+// detection inside bestEffortReal's realpath() call; this guards the case
+// that detection can't see — each hop below is a SEPARATE readlink() +
+// realpath() round trip (not one syscall spanning the whole chain), so a
+// sufficiently long or cyclic manufactured chain would otherwise recurse
+// without the kernel ever getting to count it in a single lookup.
+const MAX_SYMLINK_DEPTH = 40;
+
+// Resolves a symlink's target (`raw`, as read via readlink()) to its
+// best-effort real location, starting from the directory (`base`) the
+// symlink itself lives in. Two escape variants this closes beyond the
+// single-jump case already handled by bestEffortReal/PR #68:
+//   - Chained dangling symlinks (e.g. apps/danger -> apps/hop -> <outside>,
+//     where NEITHER leg exists on disk yet): bestEffortReal's rebuilt
+//     candidate can itself still be a symlink, since bestEffortReal only
+//     walks up to the nearest existing ANCESTOR — it never re-checks
+//     whether the tail it reattaches is itself a link. This function does,
+//     recursively, up to MAX_SYMLINK_DEPTH.
+//   - Lexical `..` collapse through an existing outward-pointing symlink
+//     (e.g. apps/hop3 -> <outside>/deep (exists), apps/danger3 ->
+//     "hop3/../newdir" (the "newdir" tail doesn't exist)): `raw` is
+//     concatenated onto `base` WITHOUT going through path.resolve() first.
+//     resolve() cannot tell a real directory segment from a symlink that
+//     points elsewhere, so it would collapse the embedded `..` ahead of
+//     any symlink check and land back inside APPS_DIR even though the
+//     kernel — which applies `..` only AFTER following the symlink ahead
+//     of it — would land outside. Keeping `..` as a literal path segment
+//     and letting bestEffortReal's realpath() call do the resolving
+//     applies it in that same, correct order.
+// This is still defense-in-depth, not a closure of the underlying TOCTOU
+// window (the filesystem can change between this check and a later write)
+// or of a symlink that resolves to APPS_DIR itself — both out of scope.
+async function resolveSymlinkChain(base: string, raw: string, depth = 0): Promise<string> {
+  if (depth >= MAX_SYMLINK_DEPTH) {
+    const err = new Error("Too many levels of symbolic links") as NodeJS.ErrnoException;
+    err.code = "ELOOP";
+    throw err;
+  }
+  const targetPath = isAbsolute(raw) ? raw : base + sep + raw;
+  const real = await bestEffortReal(targetPath);
+  const link = await lstat(real).catch(() => null);
+  if (!link?.isSymbolicLink()) return real;
+  const nextTarget = await readlink(real);
+  return resolveSymlinkChain(dirname(real), nextTarget, depth + 1);
 }
 
 const APP_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -89,26 +141,29 @@ export async function safeAppDir(name: string): Promise<string> {
     // before the target path is created. realpath can't resolve a target
     // that doesn't exist, so it ENOENTs in both cases; lstat (which does
     // NOT follow symlinks) tells them apart. For the symlink case we
-    // resolve the link target ourselves via bestEffortReal() — the same
-    // normalization realpath would apply once the target exists — and
-    // reject it here if that target escapes APPS_DIR, instead of silently
-    // falling back to the in-dir child path and letting a later write
-    // follow the link out.
+    // resolve the link target ourselves via resolveSymlinkChain() — the
+    // same normalization realpath would apply once the target exists,
+    // generalized to follow a CHAIN of dangling symlinks (not just the
+    // immediate one) and to apply an embedded `..` in kernel order rather
+    // than lexically (see resolveSymlinkChain's own comment for both
+    // variants this closes) — and reject it here if that target escapes
+    // APPS_DIR, instead of silently falling back to the in-dir child path
+    // and letting a later write follow the link out.
     const link = await lstat(realBase).catch(() => null);
     if (link?.isSymbolicLink()) {
       try {
         const target = await readlink(realBase);
-        const targetPath = isAbsolute(target) ? target : resolve(dirname(realBase), target);
-        const resolvedTarget = await bestEffortReal(targetPath);
+        const resolvedTarget = await resolveSymlinkChain(dirname(realBase), target);
         if (resolvedTarget !== appsReal && !resolvedTarget.startsWith(appsReal + sep)) {
           throw new RelayConfigError("App path escapes APPS_DIR");
         }
       } catch (linkErr) {
         if (linkErr instanceof RelayConfigError) throw linkErr;
         // Same posture as the non-ENOENT branch above: an unresolvable
-        // link target (ELOOP chain, EACCES, a dirent racing away) falls
-        // back to the pre-existing in-dir child path instead of leaking
-        // a raw errno out of the API as a 500.
+        // link target (ELOOP chain — including a manufactured chain
+        // exceeding MAX_SYMLINK_DEPTH — EACCES, a dirent racing away)
+        // falls back to the pre-existing in-dir child path instead of
+        // leaking a raw errno out of the API as a 500.
         return realBase;
       }
     }
