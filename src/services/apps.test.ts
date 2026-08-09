@@ -222,27 +222,101 @@ describe("safeAppDir", () => {
     await expect(safeAppDir("danger3")).rejects.toThrow("App path escapes APPS_DIR");
   });
 
-  it("terminates without unbounded recursion on a long chain of dangling symlinks", async () => {
-    // AC: symlink chains are resolved with a depth limit (~40,
-    // SYMLOOP_MAX analog); a chain longer than that must settle instead of
-    // recursing forever or blowing the call stack. Chain: apps/link0 ->
-    // link1 -> ... -> link50 -> <outside> (dangling), all relative, well
-    // past MAX_SYMLINK_DEPTH. Vitest's own test timeout is the guard
-    // against a genuine hang; the try/catch below additionally pins that a
-    // depth overrun (or the kernel's own ELOOP for the fully-materialized
-    // chain) surfaces as an ordinary Error — the existing tolerant
-    // ELOOP-class fallback, or an escape rejection — never a raw
-    // RangeError from exceeding the JS call stack.
-    const CHAIN_LENGTH = 50;
+  it("rejects a dangling intermediate segment reattached mid-chain, absolute target (P1)", async () => {
+    // Fix-round follow-up to task d39b85ce (round 1 review): bestEffortReal
+    // rebuilds a MISSING segment lexically via resolve(realParent,
+    // basename) but, before this fix, never re-checked whether that
+    // rebuilt segment was itself a symlink — so a dangling link reattached
+    // mid-chain (not just the chain's own final leg) was never followed.
+    // apps/mid -> <tmpRoot>/outside-p1 (dangling, absolute), apps/danger ->
+    // "mid/tail" (relative, tail appended past the dangling hop). Kernel
+    // truth: <tmpRoot>/outside-p1/tail, outside APPS_DIR. Measured
+    // ACCEPTED before this round's fix; must be rejected now.
+    const outside = resolve(tmpRoot, "outside-p1");
+    await symlink(outside, resolve(appsDir, "mid"));
+    await symlink("mid/tail", resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects `..` collapsing through a DANGLING outward symlink (P2)", async () => {
+    // Same root cause as P1, exercised through the `..`-collapse path
+    // instead of a plain tail: apps/mid -> <tmpRoot>/outside-p2/sub
+    // (dangling, absolute), apps/danger -> "mid/../pwned". The B3 test
+    // above only covers `..` after an EXISTING outward symlink; this pins
+    // the dangling variant of the same escape. Kernel truth:
+    // <tmpRoot>/outside-p2/pwned (".." cancels "sub", landing outside
+    // APPS_DIR). Measured ACCEPTED before this round's fix.
+    const outside = resolve(tmpRoot, "outside-p2", "sub");
+    await symlink(outside, resolve(appsDir, "mid"));
+    await symlink("mid/../pwned", resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("rejects a dangling intermediate segment reattached mid-chain, deeper tail (P12)", async () => {
+    // Same class as P1 with a two-segment tail, pinning that the fix
+    // applies uniformly regardless of how many segments are rebuilt after
+    // the dangling hop. apps/mid -> <tmpRoot>/outside-p12 (dangling),
+    // apps/danger -> "mid/a/b". Kernel truth: <tmpRoot>/outside-p12/a/b.
+    const outside = resolve(tmpRoot, "outside-p12");
+    await symlink(outside, resolve(appsDir, "mid"));
+    await symlink("mid/a/b", resolve(appsDir, "danger"));
+    await expect(safeAppDir("danger")).rejects.toThrow("App path escapes APPS_DIR");
+  });
+
+  it("does not reject a chain of in-dir dangling symlinks under a symlinked APPS_DIR (no over-reject)", async () => {
+    // Positive control for the P1/P2/P12 fix: the same mid-chain
+    // parent-symlink re-check must NOT reject a chain that stays fully
+    // contained. apps/chainA -> "chainB" -> "chainC" (all relative,
+    // in-dir; chainC itself is never created, so the whole chain stays
+    // dangling), resolved under a symlinked APPS_DIR parent (env.APPS_DIR
+    // = linkRoot) to also exercise the appsReal-crossing path.
+    const linkRoot = resolve(tmpRoot, "apps-link-3");
+    await symlink(appsDir, linkRoot);
+    env.APPS_DIR = linkRoot;
+    await symlink("chainB", resolve(appsDir, "chainA"));
+    await symlink("chainC", resolve(appsDir, "chainB"));
+    const expected = resolve(await realpath(appsDir), "chainA");
+    await expect(safeAppDir("chainA")).resolves.toBe(expected);
+  });
+
+  it("terminates on a cyclic, kernel-invisible manufactured symlink chain (depth-limit pin)", async () => {
+    // Fix-round follow-up (finding 3): the old CHAIN_LENGTH=50 version of
+    // this test was inert — measured against both origin/main AND this
+    // branch with MAX_SYMLINK_DEPTH deleted entirely, it passed unchanged
+    // either way. A fully-materialized 50-symlink chain trips the KERNEL's
+    // own ELOOP inside realpath() before this module's own depth guard is
+    // ever reached, so the assertion (in a try/catch that only fires on a
+    // RangeError) never actually exercised MAX_SYMLINK_DEPTH.
+    // This construction is kernel-invisible instead: apps/a -> "nodir/../b"
+    // and apps/b -> "nodir/../a". "nodir" never exists, so every hop
+    // resolves through this module's OWN bestEffortReal/resolveSymlinkChain
+    // recursion (never a single kernel-followed symlink chain the OS could
+    // ELOOP on its own) and cycles a<->b indefinitely without our own
+    // MAX_SYMLINK_DEPTH guard. The assertion below is unconditional
+    // (outside any catch): without the guard this hangs (measured: still
+    // unresolved after 3s in a bounded mutation probe, vs. ~2-10ms with the
+    // guard in place); with the guard, the ELOOP it raises is caught by
+    // safeAppDir's existing tolerant ELOOP-class fallback and the promise
+    // resolves.
+    await symlink("nodir/../b", resolve(appsDir, "a"));
+    await symlink("nodir/../a", resolve(appsDir, "b"));
+    await expect(safeAppDir("a")).resolves.toBeDefined();
+  });
+
+  it("rejects a ~30-hop manufactured chain ending outside APPS_DIR (under kernel SYMLOOP)", async () => {
+    // Companion to the cyclic test above: exercises this module's OWN
+    // per-hop depth counting (not the kernel's) on a chain short enough
+    // that the kernel's own SYMLOOP_MAX (~32-40, OS-dependent) does not
+    // intervene, so a failure here is attributable to OUR recursion, not a
+    // kernel-level ELOOP. apps/link0 -> link1 -> ... -> link30 -> <outside>
+    // (dangling, absolute, outside APPS_DIR). Must be rejected as an
+    // escape, not silently accepted or ELOOP-tolerated.
+    const CHAIN_LENGTH = 30;
     for (let i = 0; i < CHAIN_LENGTH; i++) {
       await symlink(`link${i + 1}`, resolve(appsDir, `link${i}`));
     }
-    await symlink(resolve(tmpRoot, "outside-chain"), resolve(appsDir, `link${CHAIN_LENGTH}`));
-    try {
-      await safeAppDir("link0");
-    } catch (err) {
-      expect(err).not.toBeInstanceOf(RangeError);
-    }
+    await symlink(resolve(tmpRoot, "outside-30hop"), resolve(appsDir, `link${CHAIN_LENGTH}`));
+    await expect(safeAppDir("link0")).rejects.toThrow("App path escapes APPS_DIR");
   });
 });
 
