@@ -16,9 +16,10 @@ deliberately do not duplicate them.
 ## Modules
 
 - [Health check reality](health-check-reality.md), the wired inline health
-  check in `engine.ts` (fixed retries, docker-compose-exec probing) versus
-  the fully-tested but unimported exponential-backoff module in
-  `health.ts`, and the `README.md` description that matches the dead code.
+  check in `engine.ts` (fixed retries, docker-compose-exec probing).
+  Resolved 2026-08-10: the unimported exponential-backoff module
+  `health.ts` was deleted as dead code and `README.md` now describes the
+  wired behavior.
 
 ## Invariants
 

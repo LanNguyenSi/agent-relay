@@ -73,7 +73,7 @@ Requirements for non-root mode:
 Each app on the VPS is a git repo with a `docker-compose.yml` and a `.relay.yml`. The default flow:
 
 1. **Deploy.** `pre_update` commands → `git pull` → re-read `.relay.yml` → pre-flight checks → `docker compose build` → `docker compose up -d` → `post_update` commands.
-2. **Health check.** HTTP probe against the configured `health` path with exponential backoff retries.
+2. **Health check.** In-container probe: for each running compose service, `docker compose exec` runs a `node -e` fetch against `http://localhost:<port><health>` — the port comes from `health_port`, or a fixed candidate list (3000, 3001, 4000, 5000, 8000, 8080). Up to 5 attempts, 5 seconds apart; the first service/port that responds OK passes.
 3. **Auto-rollback.** On health failure, `git reset --hard` to the previous commit, rebuild, restart.
 
 `.relay.yml` is re-read **after** `git pull` on purpose: a commit that *fixes* a broken `.relay.yml` lets the deploy through, instead of pre-flight gating on the stale pre-pull copy. Full rationale in [docs/security.md](docs/security.md#why-relayyml-is-re-read-after-git-pull).
