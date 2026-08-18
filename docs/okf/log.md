@@ -2,6 +2,15 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-08-18T17:55:00Z, task 1074feb5 fix-round (MED-1/LOW-8): updated
+  `deploy-failure-surfaces.md` — `rollbackApp` now returns the same
+  `blocked`-style outcome as a deploy (`RollbackBlockedResult`, HTTP
+  `{ result }`, MCP `ok(result)`, `recordDeploy` skipped on the blocked
+  branch), correcting the prior "throws on failure instead, no
+  blocked-style outcome" description. Also updated `deploy-phase-model.md`
+  for the new `only` preflight-check-selection option both rollback call
+  sites now use, and `docs/integration.md` for `POST /apps/:name/rollback`'s
+  blocked response shape.
 - 2026-07-16T05:58:10Z, CI now watches staleness: warn-only `okf-kit check`
   on every PR (`.github/workflows/okf-staleness.yml`, canonical pattern
   from harness#350).

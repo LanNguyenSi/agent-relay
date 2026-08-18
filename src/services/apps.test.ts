@@ -470,7 +470,7 @@ describe("rollbackApp — preflight gate", () => {
     expect(upCall).toBeDefined();
   });
 
-  it("runs preflight with phase: 'all', force: true against the app dir before gating", async () => {
+  it("runs preflight with phase: 'all', force: true, only: the two critical rollback checks against the app dir before gating", async () => {
     mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
 
     await rollbackApp("myapp");
@@ -480,5 +480,71 @@ describe("rollbackApp — preflight gate", () => {
     expect(callArgs.phase).toBe("all");
     expect(callArgs.force).toBe(true);
     expect(callArgs.config).toEqual(fakeConfig);
+    // MED-3: the rollback gate must restrict the battery to exactly the two
+    // checks that catch the DooD host/relay APPS_DIR mismatch — the other 6
+    // (git-pull-only or non-critical signal) must never even be requested,
+    // since an emergency rollback shouldn't wait on runExec calls (300s
+    // timeout each) that buy it nothing. Negative control: deleting `only`
+    // from the rollbackApp call site turns this assertion red (measured
+    // below in the fix-round mutation probe).
+    expect(callArgs.only).toEqual([
+      "apps_root_mount_congruence",
+      "compose_bind_mount_sources_exist",
+    ]);
+  });
+
+  // MED-2 fix-round regression: reviewer mutation M9 moved the preflight
+  // block to BEFORE `git reset --hard` in rollbackApp. Every existing test
+  // above still passed 231/231 against that mutant, because none of them
+  // pin the *order* of the two calls — only that both happen and that a
+  // blocked preflight prevents compose build/up. Placement AFTER the reset
+  // is the entire point of this gate (see the RollbackBlockedResult JSDoc:
+  // "the working tree has already been reset to `target` by the time this
+  // can be returned"): the reviewer's mutant reset the tree AFTER preflight
+  // already ran, without re-checking. This test pins that ordering directly
+  // via mock.invocationCallOrder (a global counter vitest assigns across
+  // ALL mock functions in the test, not just the one it's called on), so a
+  // reordering trips it even though every other assertion in this file
+  // stays green.
+  it("orders the preflight call AFTER the git reset --hard runExec call, not before (M9 regression)", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+
+    await rollbackApp("myapp");
+
+    const resetCallIndex = mockRunExec.mock.calls.findIndex(
+      ([cmd, args]) => cmd === "git" && args.includes("reset") && args.includes("--hard"),
+    );
+    expect(resetCallIndex).toBeGreaterThanOrEqual(0);
+    const resetOrder = mockRunExec.mock.invocationCallOrder[resetCallIndex]!;
+
+    expect(mockRunPreflightChecks).toHaveBeenCalledOnce();
+    const preflightOrder = mockRunPreflightChecks.mock.invocationCallOrder[0]!;
+
+    expect(preflightOrder).toBeGreaterThan(resetOrder);
+  });
+
+  // LOW-6: rollbackApp used to load .relay.yml BEFORE the reset, so
+  // preflight and compose build/up ran against whatever config was on disk
+  // pre-rollback rather than the config the rolled-back commit actually
+  // ships (analogous to why deploy/engine.ts re-reads .relay.yml after
+  // `git pull`, see its "reload .relay.yml" step). This pins that
+  // loadRelayConfig is called AFTER the git reset --hard call, so the
+  // reloaded config — not a pre-reset snapshot — is what preflight/build/up
+  // see.
+  it("reloads .relay.yml AFTER the git reset --hard call, not before", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+
+    await rollbackApp("myapp");
+
+    const resetCallIndex = mockRunExec.mock.calls.findIndex(
+      ([cmd, args]) => cmd === "git" && args.includes("reset") && args.includes("--hard"),
+    );
+    expect(resetCallIndex).toBeGreaterThanOrEqual(0);
+    const resetOrder = mockRunExec.mock.invocationCallOrder[resetCallIndex]!;
+
+    expect(mockLoadRelayConfig).toHaveBeenCalledOnce();
+    const loadOrder = mockLoadRelayConfig.mock.invocationCallOrder[0]!;
+
+    expect(loadOrder).toBeGreaterThan(resetOrder);
   });
 });

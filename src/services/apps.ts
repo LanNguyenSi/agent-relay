@@ -3,7 +3,7 @@ import { readdir, stat, lstat, readlink, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy } from "../deploy/engine.js";
-import { runPreflightChecks, type PreflightReport } from "../deploy/preflight.js";
+import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
 
 // Preflight used to run here before git pull. That meant a commit that
@@ -344,7 +344,6 @@ export async function rollbackApp(
   toCommit?: string,
 ): Promise<RollbackResult | RollbackBlockedResult> {
   const dir = await safeAppDir(name);
-  const config = await loadRelayConfig(dir);
   const target = toCommit ? validateCommitRef(toCommit) : "HEAD~1";
 
   const commitBefore = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
@@ -352,17 +351,36 @@ export async function rollbackApp(
   const checkout = await runExec("git", ["reset", "--hard", target], dir);
   if (checkout.exitCode !== 0) throw new Error("Rollback failed: " + checkout.stderr);
 
+  // Reload .relay.yml against the tree `git reset --hard` just moved to —
+  // same rationale as deploy/engine.ts's "reload .relay.yml" step: the
+  // commit being rolled back TO may carry its own compose_file/health/
+  // rollback values, and the preflight + build/up below must validate and
+  // run against THAT config, not whatever was loaded from the pre-reset
+  // tree. (If the rolled-back commit's .relay.yml is itself invalid,
+  // loadRelayConfig throws RelayConfigError here, same as every other
+  // safeAppDir()-then-loadRelayConfig() call site in this module.)
+  const config = await loadRelayConfig(dir);
+
   // Same gate, same rationale, as deploy/engine.ts's rollbackIfEnabled: the
   // 2026-07-15 incident class (docker silently auto-creating an empty
   // bind-mount directory over a deployed app's config) applies just as much
   // to this standalone rollback path as it does to auto-rollback or a
-  // forward deploy. `phase: "all"` covers both `apps_root_mount_congruence`
-  // and `compose_bind_mount_sources_exist`; `force: true` means only the
-  // critical checks gate — `git_clean`/`git_remote_reachable` are about
-  // protecting a `git pull`, which this function never runs (it resets
-  // hard), so gating on them here would fail rollbacks for reasons that
-  // don't apply to rollback at all.
-  const preflight = await runPreflightChecks({ appDir: dir, config, phase: "all", force: true });
+  // forward deploy. `only: ROLLBACK_CRITICAL_CHECKS` restricts the battery
+  // to exactly `apps_root_mount_congruence` and
+  // `compose_bind_mount_sources_exist` — the other checks
+  // (`git_clean`/`git_remote_reachable` protect a `git pull`, which this
+  // function never runs; the rest are non-critical signal) are never even
+  // started, so this emergency-restore path isn't waiting on runExec calls
+  // (300s timeout each) that buy it nothing. `phase: "all"` stays explicit
+  // so both checks' phase buckets (pre-pull and post-pull) are visited —
+  // `only` then narrows within that to just the two.
+  const preflight = await runPreflightChecks({
+    appDir: dir,
+    config,
+    phase: "all",
+    force: true,
+    only: ROLLBACK_CRITICAL_CHECKS,
+  });
   if (!preflight.passed) {
     const commitAfter = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
     return { success: false, blocked: true, preflight, commitBefore, commitAfter };

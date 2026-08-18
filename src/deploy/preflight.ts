@@ -42,23 +42,55 @@ export interface PreflightOptions {
   config: RelayConfig;
   force?: boolean;
   phase?: PreflightPhase;
+  /**
+   * Restrict the battery to exactly these check names (`PreflightCheck.name`),
+   * regardless of `phase`'s pre-pull/post-pull bucketing. Unlike `force`
+   * (which still RUNS every check for the given phase and only changes how
+   * `passed` is computed), an omitted check here is never started at all —
+   * its `runExec` call (each bounded by exec.ts's 300s timeout) never
+   * fires. Built for the rollback gate (see `ROLLBACK_CRITICAL_CHECKS`
+   * below): a `git reset --hard` rollback is the emergency-restore path and
+   * has no business waiting on `git ls-remote` / `docker compose ps` calls
+   * whose only purpose is protecting a `git pull` rollback never runs.
+   */
+  only?: readonly string[];
 }
 
+/**
+ * The two critical checks that catch the DooD host/relay `APPS_DIR`
+ * mismatch (2026-07-15 incident class) — `apps_root_mount_congruence` and
+ * `compose_bind_mount_sources_exist` — and nothing else. Shared by both
+ * rollback gates (`rollbackApp` in `services/apps.ts` and
+ * `rollbackIfEnabled` in `deploy/engine.ts`) via `only`, so the two paths
+ * can't drift on which checks a rollback is gated on. The other 6 checks
+ * (`git_clean`, `git_remote_reachable`, `compose_file_exists`,
+ * `containers_running`, `traefik_labels`, `health_defined`) either protect
+ * `git pull` (which a rollback never runs) or are non-critical signal —
+ * gating a rollback on them, or even just running them before restoring
+ * the last-known-good containers, buys nothing but latency.
+ */
+export const ROLLBACK_CRITICAL_CHECKS: readonly string[] = [
+  "apps_root_mount_congruence",
+  "compose_bind_mount_sources_exist",
+];
+
 export async function runPreflightChecks(options: PreflightOptions): Promise<PreflightReport> {
-  const { appDir, config, force = false, phase = "all" } = options;
+  const { appDir, config, force = false, phase = "all", only } = options;
+  const wanted = only ? new Set(only) : null;
+  const include = (name: string) => wanted === null || wanted.has(name);
 
   const tasks: Array<Promise<PreflightCheck>> = [];
   if (phase === "pre-pull" || phase === "all") {
-    tasks.push(checkGitClean(appDir));
-    tasks.push(checkGitRemoteReachable(appDir));
-    tasks.push(checkAppsRootMountCongruence());
+    if (include("git_clean")) tasks.push(checkGitClean(appDir));
+    if (include("git_remote_reachable")) tasks.push(checkGitRemoteReachable(appDir));
+    if (include("apps_root_mount_congruence")) tasks.push(checkAppsRootMountCongruence());
   }
   if (phase === "post-pull" || phase === "all") {
-    tasks.push(checkComposeFileExists(appDir, config.compose_file));
-    tasks.push(checkContainersRunning(appDir, config.compose_file));
-    tasks.push(checkTraefikLabels(appDir, config.compose_file));
-    tasks.push(checkHealthDefined(config));
-    tasks.push(checkComposeBindMountSourcesExist(appDir, config.compose_file));
+    if (include("compose_file_exists")) tasks.push(checkComposeFileExists(appDir, config.compose_file));
+    if (include("containers_running")) tasks.push(checkContainersRunning(appDir, config.compose_file));
+    if (include("traefik_labels")) tasks.push(checkTraefikLabels(appDir, config.compose_file));
+    if (include("health_defined")) tasks.push(checkHealthDefined(config));
+    if (include("compose_bind_mount_sources_exist")) tasks.push(checkComposeBindMountSourcesExist(appDir, config.compose_file));
   }
   const checks = await Promise.all(tasks);
 

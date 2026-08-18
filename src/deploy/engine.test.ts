@@ -465,9 +465,11 @@ describe("deploy — auto-rollback preflight gate", () => {
     const preflightStep = rollbackSteps.find((s) => s.name === "rollback: preflight");
     expect(preflightStep?.status).toBe("failure");
     // Message must clearly read as a BLOCKED rollback, not a generic deploy
-    // failure — the risk the spec explicitly calls out.
+    // failure — the risk the spec explicitly calls out. (A companion
+    // `not.toContain("deploy failed")` assertion used to sit here; the
+    // production string is "not a deploy failure" — different wording —
+    // so that assertion could never fail and was struck as inert.)
     expect(preflightStep?.output).toContain("ROLLBACK BLOCKED");
-    expect(preflightStep?.output).not.toContain("deploy failed");
     // compose build/up for the rollback must never have run: only the
     // forward-deploy's own (failed-health) build/up calls are present.
     const buildCalls = mockRunExec.mock.calls.filter(
@@ -509,14 +511,18 @@ describe("deploy — auto-rollback preflight gate", () => {
     ]);
     expect(rollbackSteps.every((s) => s.status === "success")).toBe(true);
 
-    // Rollback preflight must be gated by the critical checks, run against
-    // the whole battery (phase "all") since it needs both
+    // Rollback preflight must be gated by exactly the two critical checks —
     // apps_root_mount_congruence ("pre-pull" bucket) and
-    // compose_bind_mount_sources_exist ("post-pull" bucket), with force:
-    // true so non-critical git-pull-only checks don't gate a path that
-    // never pulls.
+    // compose_bind_mount_sources_exist ("post-pull" bucket) — via `only`,
+    // with `phase: "all"` so both buckets are visited and `force: true` for
+    // defense in depth. The other 6 checks (git-pull-only or non-critical
+    // signal) must not even be requested.
     const rollbackPreflightCall = mockRunPreflightChecks.mock.calls.find((c) => c[0].phase === "all");
     expect(rollbackPreflightCall?.[0].force).toBe(true);
+    expect(rollbackPreflightCall?.[0].only).toEqual([
+      "apps_root_mount_congruence",
+      "compose_bind_mount_sources_exist",
+    ]);
   });
 });
 

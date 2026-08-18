@@ -385,6 +385,83 @@ describe("runPreflightChecks", () => {
     });
   });
 
+  describe("only parameter", () => {
+    it("restricts the battery to exactly the named checks, across both phase buckets", async () => {
+      // apps_root_mount_congruence lives in the pre-pull bucket,
+      // compose_bind_mount_sources_exist in the post-pull bucket — only
+      // combined with the default phase ("all") must pick up both and
+      // nothing else, which is the exact shape the rollback gate needs
+      // (ROLLBACK_CRITICAL_CHECKS in preflight.ts).
+      const report = await runPreflightChecks({
+        appDir: "/apps/app",
+        config: baseConfig,
+        only: ["apps_root_mount_congruence", "compose_bind_mount_sources_exist"],
+      });
+
+      const names = report.checks.map((c) => c.name).sort();
+      expect(names).toEqual(["apps_root_mount_congruence", "compose_bind_mount_sources_exist"]);
+    });
+
+    it("restricts within a single phase bucket too", async () => {
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "post-pull",
+        only: ["compose_file_exists"],
+      });
+
+      expect(report.checks.map((c) => c.name)).toEqual(["compose_file_exists"]);
+    });
+
+    it("never even starts a check it excludes, not just filters the result afterward (negative control)", async () => {
+      // If `only` merely filtered the finished report, checkGitClean and
+      // checkGitRemoteReachable would still have shelled out to `git status`
+      // / `git ls-remote` — this pins that they're never invoked at all
+      // when excluded via `only`, which is the whole latency point of the
+      // MED-3 fix (each runExec call is bounded by exec.ts's 300s timeout).
+      const report = await runPreflightChecks({
+        appDir: "/apps/app",
+        config: baseConfig,
+        only: ["apps_root_mount_congruence", "compose_bind_mount_sources_exist"],
+      });
+
+      expect(report.checks).toHaveLength(2);
+      const gitCalls = mockRunExec.mock.calls.filter(
+        (c) => c[0] === "git" && (c[1].includes("status") || c[1].includes("ls-remote")),
+      );
+      expect(gitCalls).toHaveLength(0);
+      const composeCalls = mockRunExec.mock.calls.filter(
+        (c) => c[0] === "docker" && c[1].includes("ps"),
+      );
+      expect(composeCalls).toHaveLength(0);
+    });
+
+    it("without `only`, the excluded-in-the-above-test checks DO run (positive control pinning the negative control's premise)", async () => {
+      const report = await runPreflightChecks({ appDir: "/apps/app", config: baseConfig });
+
+      const names = report.checks.map((c) => c.name);
+      expect(names).toContain("git_clean");
+      expect(names).toContain("git_remote_reachable");
+      expect(names).toContain("containers_running");
+      expect(report.checks).toHaveLength(8);
+    });
+
+    it("gates on all checks named in `only` when passed together with a critical failure (force does not exempt them)", async () => {
+      mockAccess.mockRejectedValue(new Error("ENOENT")); // compose file missing (critical)
+
+      const report = await runPreflightChecks({
+        appDir: "/app",
+        config: baseConfig,
+        phase: "post-pull",
+        only: ["compose_file_exists"],
+        force: true,
+      });
+
+      expect(report.checks).toHaveLength(1);
+      expect(report.passed).toBe(false);
+    });
+  });
+
   describe("apps_root_mount_congruence", () => {
     function mockContainerized() {
       mockAccess.mockImplementation(async (path) => {
