@@ -3,7 +3,7 @@ import { readdir, stat, lstat, readlink, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy } from "../deploy/engine.js";
-import { runPreflightChecks } from "../deploy/preflight.js";
+import { runPreflightChecks, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
 
 // Preflight used to run here before git pull. That meant a commit that
@@ -314,7 +314,35 @@ export async function deployAppStreaming(
   });
 }
 
-export async function rollbackApp(name: string, toCommit?: string) {
+/**
+ * Returned when preflight rejects the standalone rollback. Mirrors
+ * deploy/engine.ts's `DeployBlockedResult` shape (`blocked: true` +
+ * `preflight`) so the HTTP and MCP surfaces can branch on the same `"blocked"
+ * in result` check they already use for a blocked deploy, instead of
+ * throwing a flat Error message that would read identically to any other
+ * rollback failure (bad commit ref, docker build failure, ...). The working
+ * tree has already been reset to `target` by the time this can be returned
+ * (see rollbackApp below), so `commitAfter` reflects that — the rollback is
+ * blocked, not silently a no-op.
+ */
+export interface RollbackBlockedResult {
+  success: false;
+  blocked: true;
+  preflight: PreflightReport;
+  commitBefore: string;
+  commitAfter: string;
+}
+
+export interface RollbackResult {
+  success: true;
+  commitBefore: string;
+  commitAfter: string;
+}
+
+export async function rollbackApp(
+  name: string,
+  toCommit?: string,
+): Promise<RollbackResult | RollbackBlockedResult> {
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
   const target = toCommit ? validateCommitRef(toCommit) : "HEAD~1";
@@ -323,6 +351,22 @@ export async function rollbackApp(name: string, toCommit?: string) {
 
   const checkout = await runExec("git", ["reset", "--hard", target], dir);
   if (checkout.exitCode !== 0) throw new Error("Rollback failed: " + checkout.stderr);
+
+  // Same gate, same rationale, as deploy/engine.ts's rollbackIfEnabled: the
+  // 2026-07-15 incident class (docker silently auto-creating an empty
+  // bind-mount directory over a deployed app's config) applies just as much
+  // to this standalone rollback path as it does to auto-rollback or a
+  // forward deploy. `phase: "all"` covers both `apps_root_mount_congruence`
+  // and `compose_bind_mount_sources_exist`; `force: true` means only the
+  // critical checks gate — `git_clean`/`git_remote_reachable` are about
+  // protecting a `git pull`, which this function never runs (it resets
+  // hard), so gating on them here would fail rollbacks for reasons that
+  // don't apply to rollback at all.
+  const preflight = await runPreflightChecks({ appDir: dir, config, phase: "all", force: true });
+  if (!preflight.passed) {
+    const commitAfter = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
+    return { success: false, blocked: true, preflight, commitBefore, commitAfter };
+  }
 
   const build = await runExec("docker", ["compose", "-f", config.compose_file, "build"], dir);
   if (build.exitCode !== 0) throw new Error("Rebuild failed: " + build.stderr);

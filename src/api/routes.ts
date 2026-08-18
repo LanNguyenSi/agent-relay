@@ -145,6 +145,14 @@ api.post("/apps/:name/rollback", async (c) => {
 
   try {
     const result = await apps.rollbackApp(name, body.to_commit);
+    if ("blocked" in result && result.blocked) {
+      // Same wrapping convention as the deploy blocked branch above: nest
+      // under `result` so clients branch on `body.result.blocked` for both
+      // endpoints instead of two divergent shapes. This is a loud,
+      // structured preflight rejection — distinct from the generic
+      // {error, 400} shape a build/up/git failure below still throws into.
+      return c.json({ result });
+    }
     const record = await recordDeploy(name, result, "api");
     return c.json({ deploy: record, ...result });
   } catch (err) {

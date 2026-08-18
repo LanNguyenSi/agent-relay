@@ -196,6 +196,33 @@ describe("relay_rollback", () => {
     expect(mockRecordDeploy).not.toHaveBeenCalled();
   });
 
+  it("returns ok result but does NOT call recordDeploy when rollback is blocked by preflight", async () => {
+    // Task 1074feb5: a rollback blocked by a critical preflight check must
+    // surface the same structured shape relay_deploy already uses for a
+    // blocked deploy — not the flat err() message a thrown Error produces.
+    const blockedResult = {
+      success: false,
+      blocked: true,
+      preflight: {
+        passed: false,
+        checks: [
+          { name: "compose_bind_mount_sources_exist", passed: false, message: "missing source", critical: true },
+        ],
+      },
+      commitBefore: "aaa",
+      commitAfter: "bbb",
+    };
+    mockRollbackApp.mockResolvedValue(blockedResult as never);
+
+    const tools = getTools();
+    const raw = await tools["relay_rollback"]!.handler({ app: "myapp" });
+    const result = parseResult(raw);
+
+    expect(result).toEqual(blockedResult);
+    expect(mockRecordDeploy).not.toHaveBeenCalled();
+    expect((raw as ToolResult).isError).toBeUndefined();
+  });
+
   it("COMMIT_REF schema: accepts valid hex SHA (4-40 chars)", () => {
     const tools = getTools();
     const schema = tools["relay_rollback"]!.inputSchema;

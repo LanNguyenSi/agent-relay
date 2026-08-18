@@ -180,9 +180,10 @@ describe("deploy — default flow", () => {
 
     expect(result.success).toBe(false);
     const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
-    expect(rollbackSteps.length).toBe(3);
+    expect(rollbackSteps.length).toBe(4);
     expect(rollbackSteps.map((s) => s.name)).toEqual([
       "rollback: git reset",
+      "rollback: preflight",
       "rollback: compose build",
       "rollback: compose up",
     ]);
@@ -332,7 +333,7 @@ describe("deploy — default flow", () => {
       expect(result.success).toBe(false);
       // Pre-pull rollback=true wins: rollback steps must fire
       const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
-      expect(rollbackSteps.length).toBe(3);
+      expect(rollbackSteps.length).toBe(4);
       // Verify the skipped-rollback branch did NOT fire (would have produced
       // a single "rollback" step with status=skipped)
       expect(result.steps.find((s) => s.name === "rollback" && s.status === "skipped"))
@@ -406,6 +407,116 @@ describe("deploy — default flow", () => {
 
     expect(result.success).toBe(false);
     expect(result.steps.find((s) => s.name === "git pull")).toBeUndefined();
+  });
+});
+
+// Task 1074feb5: the auto-rollback path (rollbackIfEnabled) used to run
+// `git reset --hard` then `docker compose build`/`up` with no preflight
+// gating at all — reintroducing the exact bind-mount-empty-dir incident
+// class (2026-07-15) that d5e0aad9 closed for forward deploys, just via the
+// rollback door instead of the deploy door. These tests pin that the
+// rollback path now runs the same preflight gate before compose build/up,
+// and that a blocked rollback surfaces loudly (a dedicated failed step,
+// distinctly worded from a plain deploy failure) rather than silently
+// proceeding to compose build/up.
+describe("deploy — auto-rollback preflight gate", () => {
+  it("blocks auto-rollback compose build/up when a critical preflight check fails", async () => {
+    mockRunPreflightChecks.mockImplementation(async (opts) => {
+      // Default-flow deploy only ever calls with phase "pre-pull" or
+      // "post-pull" explicitly; the rollback gate is the only caller in
+      // this flow that passes phase "all" (+ force: true) — see
+      // rollbackIfEnabled's own JSDoc for why.
+      if (opts.phase === "all") {
+        return {
+          passed: false,
+          checks: [
+            {
+              name: "compose_bind_mount_sources_exist",
+              passed: false,
+              message: "Missing compose bind-mount source path(s)",
+              critical: true,
+            },
+          ],
+        };
+      }
+      return { passed: true, checks: [] };
+    });
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "", stderr: "", exitCode: 1 }; // health check fails -> triggers auto-rollback
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    expect(result.success).toBe(false);
+    const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
+    expect(rollbackSteps.map((s) => s.name)).toEqual(["rollback: git reset", "rollback: preflight"]);
+    const preflightStep = rollbackSteps.find((s) => s.name === "rollback: preflight");
+    expect(preflightStep?.status).toBe("failure");
+    // Message must clearly read as a BLOCKED rollback, not a generic deploy
+    // failure — the risk the spec explicitly calls out.
+    expect(preflightStep?.output).toContain("ROLLBACK BLOCKED");
+    expect(preflightStep?.output).not.toContain("deploy failed");
+    // compose build/up for the rollback must never have run: only the
+    // forward-deploy's own (failed-health) build/up calls are present.
+    const buildCalls = mockRunExec.mock.calls.filter(
+      ([cmd, args]) => cmd === "docker" && args.includes("compose") && args.includes("build"),
+    );
+    expect(buildCalls).toHaveLength(1); // forward deploy only, no rollback rebuild
+    const upCalls = mockRunExec.mock.calls.filter(
+      ([cmd, args]) => cmd === "docker" && args.includes("compose") && args.includes("up"),
+    );
+    expect(upCalls).toHaveLength(1); // forward deploy only, no rollback restart
+  });
+
+  it("runs auto-rollback compose build/up through to completion when preflight passes", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "", stderr: "", exitCode: 1 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    expect(result.success).toBe(false);
+    const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
+    expect(rollbackSteps.map((s) => s.name)).toEqual([
+      "rollback: git reset",
+      "rollback: preflight",
+      "rollback: compose build",
+      "rollback: compose up",
+    ]);
+    expect(rollbackSteps.every((s) => s.status === "success")).toBe(true);
+
+    // Rollback preflight must be gated by the critical checks, run against
+    // the whole battery (phase "all") since it needs both
+    // apps_root_mount_congruence ("pre-pull" bucket) and
+    // compose_bind_mount_sources_exist ("post-pull" bucket), with force:
+    // true so non-critical git-pull-only checks don't gate a path that
+    // never pulls.
+    const rollbackPreflightCall = mockRunPreflightChecks.mock.calls.find((c) => c[0].phase === "all");
+    expect(rollbackPreflightCall?.[0].force).toBe(true);
   });
 });
 

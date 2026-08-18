@@ -293,6 +293,36 @@ describe("POST /api/apps/:name/rollback — error mapping", () => {
     expect(res.status).toBe(200);
     expect(mockRecordDeploy).toHaveBeenCalledWith("myapp", rollbackResult, "api");
   });
+
+  it("returns { result } with blocked:true and skips recordDeploy when rollback is preflight-blocked", async () => {
+    // Task 1074feb5: same wrapping as a blocked deploy (200, { result:
+    // {..., blocked: true, preflight} }) — a loud, structured rejection,
+    // not the flat {error} shape a thrown Error still produces above.
+    const blockedResult = {
+      success: false,
+      blocked: true,
+      preflight: {
+        passed: false,
+        checks: [
+          { name: "compose_bind_mount_sources_exist", passed: false, message: "missing source", critical: true },
+        ],
+      },
+      commitBefore: "old",
+      commitAfter: "new",
+    };
+    mockRollbackApp.mockResolvedValue(blockedResult as never);
+
+    const res = await request("/apps/myapp/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to_commit: "abc1234" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: typeof blockedResult };
+    expect(body.result).toEqual(blockedResult);
+    expect(mockRecordDeploy).not.toHaveBeenCalled();
+  });
 });
 
 // ── GET /system — execSync 500 fallback ──────────────────────────────────────
