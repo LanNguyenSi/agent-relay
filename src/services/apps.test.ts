@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { safeAppDir, validateBranch, fetchLogs } from "./apps.js";
+import { safeAppDir, validateBranch, fetchLogs, rollbackApp } from "./apps.js";
 import { env } from "../config/env.js";
 import type { RelayConfig } from "../config/relay.js";
 
@@ -17,11 +17,23 @@ vi.mock("../config/relay.js", async () => {
   return { ...actual, loadRelayConfig: vi.fn() };
 });
 
+// Mock preflight for rollbackApp's gating tests below — mirrors the pattern
+// in deploy/engine.test.ts (mock the module, keep everything except
+// runPreflightChecks real).
+vi.mock("../deploy/preflight.js", async () => {
+  const actual = await vi.importActual<typeof import("../deploy/preflight.js")>(
+    "../deploy/preflight.js",
+  );
+  return { ...actual, runPreflightChecks: vi.fn() };
+});
+
 import { runExec } from "../deploy/exec.js";
 import { loadRelayConfig } from "../config/relay.js";
+import { runPreflightChecks } from "../deploy/preflight.js";
 
 const mockRunExec = vi.mocked(runExec);
 const mockLoadRelayConfig = vi.mocked(loadRelayConfig);
+const mockRunPreflightChecks = vi.mocked(runPreflightChecks);
 
 describe("validateBranch", () => {
   it("accepts well-formed branch names", () => {
@@ -372,5 +384,167 @@ describe("fetchLogs — compose_file passed as literal arg-array element", () =>
     expect(args[dashFIdx + 1]).toBe("docker-compose.prod.yml");
     // Service name is the final element when provided
     expect(args.at(-1)).toBe("backend");
+  });
+});
+
+// Task 1074feb5: rollbackApp used to run `git reset --hard` then `docker
+// compose build`/`up` with no preflight gating at all, reintroducing the
+// bind-mount-empty-dir incident class (2026-07-15) that d5e0aad9 closed for
+// forward deploys. These tests pin that the standalone rollback path is now
+// gated the same critical checks, before compose build/up, and that a
+// blocked rollback returns a structured result (mirroring
+// DeployBlockedResult) instead of silently proceeding.
+describe("rollbackApp — preflight gate", () => {
+  let tmpRoot: string;
+  let appsDir: string;
+  let originalAppsDir: string;
+
+  const fakeConfig: RelayConfig = {
+    name: "myapp",
+    health: "/health",
+    compose_file: "docker-compose.yml",
+    pre_update: [],
+    post_update: [],
+    rollback: true,
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    tmpRoot = await mkdtemp(resolve(tmpdir(), "agent-relay-rollbackapp-"));
+    appsDir = resolve(tmpRoot, "apps");
+    await mkdir(resolve(appsDir, "myapp"), { recursive: true });
+    originalAppsDir = env.APPS_DIR;
+    env.APPS_DIR = appsDir;
+    mockLoadRelayConfig.mockResolvedValue(fakeConfig);
+    mockRunExec.mockResolvedValue({ stdout: "abc123\n", stderr: "", exitCode: 0 });
+  });
+
+  afterEach(async () => {
+    env.APPS_DIR = originalAppsDir;
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("blocks rollback and returns a structured blocked result when a critical check fails (missing bind-mount source)", async () => {
+    mockRunPreflightChecks.mockResolvedValue({
+      passed: false,
+      checks: [
+        {
+          name: "compose_bind_mount_sources_exist",
+          passed: false,
+          message: "Missing compose bind-mount source path(s) referenced in docker-compose.yml",
+          critical: true,
+        },
+      ],
+    });
+
+    const result = await rollbackApp("myapp", "HEAD~1");
+
+    expect(result.success).toBe(false);
+    expect("blocked" in result && result.blocked).toBe(true);
+    if ("blocked" in result) {
+      expect(result.preflight.passed).toBe(false);
+      expect(result.preflight.checks[0]?.name).toBe("compose_bind_mount_sources_exist");
+      expect(result.commitBefore).toBe("abc123");
+      // The working tree WAS reset (checkout succeeded) even though the
+      // rollback is blocked before compose build/up — commitAfter reflects
+      // that, distinguishing "blocked" from "no-op".
+      expect(result.commitAfter).toBe("abc123");
+    }
+    // compose build/up must never have run.
+    const buildCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("build"));
+    expect(buildCall).toBeUndefined();
+    const upCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("up"));
+    expect(upCall).toBeUndefined();
+  });
+
+  it("proceeds through compose build/up and returns success when preflight passes", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+
+    const result = await rollbackApp("myapp");
+
+    expect(result.success).toBe(true);
+    expect("blocked" in result).toBe(false);
+    const buildCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("build"));
+    expect(buildCall).toBeDefined();
+    const upCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("up"));
+    expect(upCall).toBeDefined();
+  });
+
+  it("runs preflight with phase: 'all', force: true, only: the two critical rollback checks against the app dir before gating", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+
+    await rollbackApp("myapp");
+
+    expect(mockRunPreflightChecks).toHaveBeenCalledOnce();
+    const callArgs = mockRunPreflightChecks.mock.calls[0]![0];
+    expect(callArgs.phase).toBe("all");
+    expect(callArgs.force).toBe(true);
+    expect(callArgs.config).toEqual(fakeConfig);
+    // MED-3: the rollback gate must restrict the battery to exactly the two
+    // checks that catch the DooD host/relay APPS_DIR mismatch — the other 6
+    // (git-pull-only or non-critical signal) must never even be requested,
+    // since an emergency rollback shouldn't wait on runExec calls (300s
+    // timeout each) that buy it nothing. Negative control: deleting `only`
+    // from the rollbackApp call site turns this assertion red (measured
+    // below in the fix-round mutation probe).
+    expect(callArgs.only).toEqual([
+      "apps_root_mount_congruence",
+      "compose_bind_mount_sources_exist",
+    ]);
+  });
+
+  // MED-2 fix-round regression: reviewer mutation M9 moved the preflight
+  // block to BEFORE `git reset --hard` in rollbackApp. Every existing test
+  // above still passed 231/231 against that mutant, because none of them
+  // pin the *order* of the two calls — only that both happen and that a
+  // blocked preflight prevents compose build/up. Placement AFTER the reset
+  // is the entire point of this gate (see the RollbackBlockedResult JSDoc:
+  // "the working tree has already been reset to `target` by the time this
+  // can be returned"): the reviewer's mutant reset the tree AFTER preflight
+  // already ran, without re-checking. This test pins that ordering directly
+  // via mock.invocationCallOrder (a global counter vitest assigns across
+  // ALL mock functions in the test, not just the one it's called on), so a
+  // reordering trips it even though every other assertion in this file
+  // stays green.
+  it("orders the preflight call AFTER the git reset --hard runExec call, not before (M9 regression)", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+
+    await rollbackApp("myapp");
+
+    const resetCallIndex = mockRunExec.mock.calls.findIndex(
+      ([cmd, args]) => cmd === "git" && args.includes("reset") && args.includes("--hard"),
+    );
+    expect(resetCallIndex).toBeGreaterThanOrEqual(0);
+    const resetOrder = mockRunExec.mock.invocationCallOrder[resetCallIndex]!;
+
+    expect(mockRunPreflightChecks).toHaveBeenCalledOnce();
+    const preflightOrder = mockRunPreflightChecks.mock.invocationCallOrder[0]!;
+
+    expect(preflightOrder).toBeGreaterThan(resetOrder);
+  });
+
+  // LOW-6: rollbackApp used to load .relay.yml BEFORE the reset, so
+  // preflight and compose build/up ran against whatever config was on disk
+  // pre-rollback rather than the config the rolled-back commit actually
+  // ships (analogous to why deploy/engine.ts re-reads .relay.yml after
+  // `git pull`, see its "reload .relay.yml" step). This pins that
+  // loadRelayConfig is called AFTER the git reset --hard call, so the
+  // reloaded config — not a pre-reset snapshot — is what preflight/build/up
+  // see.
+  it("reloads .relay.yml AFTER the git reset --hard call, not before", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+
+    await rollbackApp("myapp");
+
+    const resetCallIndex = mockRunExec.mock.calls.findIndex(
+      ([cmd, args]) => cmd === "git" && args.includes("reset") && args.includes("--hard"),
+    );
+    expect(resetCallIndex).toBeGreaterThanOrEqual(0);
+    const resetOrder = mockRunExec.mock.invocationCallOrder[resetCallIndex]!;
+
+    expect(mockLoadRelayConfig).toHaveBeenCalledOnce();
+    const loadOrder = mockLoadRelayConfig.mock.invocationCallOrder[0]!;
+
+    expect(loadOrder).toBeGreaterThan(resetOrder);
   });
 });

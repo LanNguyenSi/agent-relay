@@ -77,6 +77,12 @@ export function createMcpServer(): McpServer {
     async ({ app, to_commit }) => {
       try {
         const result = await apps.rollbackApp(app, to_commit);
+        if ("blocked" in result && result.blocked) {
+          // Same shape/branch as relay_deploy's blocked case: a loud,
+          // structured preflight rejection, not the flat err() message a
+          // build/up/git failure below still throws into.
+          return ok(result);
+        }
         await recordDeploy(app, result, "mcp");
         return ok({ ...result, message: `Rolled back to ${result.commitAfter}` });
       } catch (e) {

@@ -110,11 +110,18 @@ Response: deploy result with step-by-step output, commit before/after, and durat
 
 ### `POST /api/apps/:name/rollback`
 
-Rollback an app to a previous commit, rebuild, and restart.
+Rollback an app to a previous commit, rebuild, and restart. Runs `git reset --hard`, then two critical preflight checks (`apps_root_mount_congruence`, `compose_bind_mount_sources_exist` — the same DooD bind-mount-safety gate a deploy runs), then `docker compose build` + `up`.
 
 | Body field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `to_commit` | `string` | `HEAD~1` | Target commit SHA (hex, 4-40 chars) or `HEAD~N` |
+
+Response is one of two `200` shapes:
+
+- Success: `{ "deploy": { "...": "..." }, "success": true, "commitBefore": "abc1234", "commitAfter": "def5678" }` — `deploy` is the recorded history entry (same shape as `GET /api/deploys` entries).
+- Blocked (a critical preflight check rejected the rollback): `{ "result": { "success": false, "blocked": true, "preflight": { "passed": false, "checks": [ "..." ] }, "commitBefore": "abc1234", "commitAfter": "def5678" } }`. The working tree has already been reset to the target commit at this point (`commitAfter` reflects that), but `compose build`/`up` never ran, so the running containers are unchanged. No `deploy` history entry is recorded for a blocked rollback, same as a blocked deploy.
+
+A rollback failure that isn't a blocked preflight (bad commit ref, `compose build`/`up` failure, …) still returns `400 { "error": "..." }`, not either shape above.
 
 ### `GET /api/apps/:name/logs`
 

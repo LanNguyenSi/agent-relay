@@ -1,5 +1,5 @@
 import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
-import { runPreflightChecks, type PreflightReport } from "./preflight.js";
+import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "./preflight.js";
 import { runExec, runShell } from "./exec.js";
 
 export interface DeployStep {
@@ -399,6 +399,44 @@ async function runHealthCheck(
   return healthStep.status === "success";
 }
 
+/**
+ * Gates the auto-rollback build/up on the same critical preflight checks
+ * that gate a forward deploy (Task d5e0aad9 / 2026-07-15 incident):
+ * `apps_root_mount_congruence` and `compose_bind_mount_sources_exist` exist
+ * specifically to catch the DooD host/relay APPS_DIR mismatch that makes
+ * docker silently auto-create an empty bind-mount directory over a deployed
+ * app's real config. That failure mode doesn't care whether the working
+ * tree just moved via `git pull` (forward deploy) or `git reset --hard`
+ * (rollback, right above) — the incident class is identical either way, so
+ * rollback must not run `compose build`/`up` ungated just because it's the
+ * safety-net path rather than the forward path.
+ *
+ * `only: ROLLBACK_CRITICAL_CHECKS` restricts the battery to exactly
+ * `apps_root_mount_congruence` (bucketed "pre-pull" in preflight.ts, but it
+ * only probes the host/relay APPS_DIR view — nothing about `git pull`) and
+ * `compose_bind_mount_sources_exist` ("post-pull", validated against the
+ * tree `git reset --hard` just moved to, same as a forward deploy validates
+ * against the tree `git pull` just moved to). `phase: "all"` stays explicit
+ * so both checks' phase buckets are visited before `only` narrows within
+ * them.
+ *
+ * Unlike `force` alone (which still RUNS every check and only changes how
+ * `passed` is computed), `only` means the other 6 checks are never even
+ * started: `git_clean` and `git_remote_reachable` exist to protect a `git
+ * pull`, which rollback never runs — it resets hard to a commit already on
+ * disk, so a dirty tree or an unreachable remote have no bearing on whether
+ * the rollback can proceed. `containers_running`, `traefik_labels`,
+ * `compose_file_exists`, and `health_defined` are the remaining non-gating
+ * or already-covered signal. This is the auto-rollback path taken when a
+ * forward deploy's health check just failed — an emergency restore of the
+ * last-known-good containers has no business waiting on `git ls-remote` /
+ * `docker compose ps` calls (each bounded by exec.ts's 300s timeout) for
+ * checks that don't gate it anyway. `force: true` is kept alongside `only`
+ * for defense in depth: both remaining checks are critical, so it's
+ * currently a no-op on the `passed` computation, but it keeps the intent
+ * ("only critical checks gate here") explicit even if a future check name
+ * were added to `ROLLBACK_CRITICAL_CHECKS` without being critical.
+ */
 async function rollbackIfEnabled(
   config: RelayConfig,
   appDir: string,
@@ -415,6 +453,31 @@ async function rollbackIfEnabled(
   );
   steps.push(checkoutStep);
   if (checkoutStep.status === "failure") return;
+
+  const preflightStart = Date.now();
+  const preflight = await runPreflightChecks({
+    appDir,
+    config,
+    phase: "all",
+    force: true,
+    only: ROLLBACK_CRITICAL_CHECKS,
+  });
+  const checksOutput = preflight.checks
+    .map((c) => `${c.passed ? "✓" : "✗"} ${c.name}: ${c.message}`)
+    .join("\n");
+  const preflightStep: DeployStep = {
+    name: "rollback: preflight",
+    status: preflight.passed ? "success" : "failure",
+    output: preflight.passed
+      ? checksOutput
+      : `ROLLBACK BLOCKED (not a deploy failure) — a critical preflight check ` +
+        `rejected the rollback before compose build/up ran; the working tree ` +
+        `was already reset to ${commitSha} but the running containers are ` +
+        `unchanged:\n${checksOutput}`,
+    durationMs: Date.now() - preflightStart,
+  };
+  steps.push(preflightStep);
+  if (!preflight.passed) return;
 
   const rebuildStep = await runStep("rollback: compose build", () =>
     runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir),
