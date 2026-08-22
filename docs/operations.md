@@ -161,6 +161,7 @@ The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management
 | `typecheck` | `tsc --noEmit` | Type check without emitting |
 | `test` | `vitest run` | Run tests |
 | `test:watch` | `vitest` | Run tests in watch mode |
+| `coverage` | `vitest run --coverage` | Run tests with coverage report |
 
 ## Runtime environment variables
 
