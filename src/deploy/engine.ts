@@ -173,7 +173,7 @@ async function defaultFlowDeploy(
   });
   emit(reloadStep);
   if (reloadStep.status === "failure") {
-    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps, onStep);
     const commitAfter = await getCurrentCommit(appDir);
     return result(false, commitBefore, commitAfter, steps, start);
   }
@@ -225,7 +225,7 @@ async function defaultFlowDeploy(
   );
   emit(buildStep);
   if (buildStep.status === "failure") {
-    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps, onStep);
     return result(false, commitBefore, commitBefore, steps, start);
   }
 
@@ -235,7 +235,7 @@ async function defaultFlowDeploy(
   );
   emit(upStep);
   if (upStep.status === "failure") {
-    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps, onStep);
     return result(false, commitBefore, commitBefore, steps, start);
   }
 
@@ -246,7 +246,7 @@ async function defaultFlowDeploy(
     const step = await runStep(`post_update: ${cmd}`, () => runShell(cmd, appDir));
     emit(step);
     if (step.status === "failure") {
-      await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
+      await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps, onStep);
       return result(false, commitBefore, commitBefore, steps, start);
     }
   }
@@ -255,7 +255,7 @@ async function defaultFlowDeploy(
   const healthOk = await runHealthCheck({ ...options, config }, steps);
   if (steps.length > 0) onStep?.(steps[steps.length - 1]); // emit health check step
   if (!healthOk) {
-    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps);
+    await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps, onStep);
     const commitAfter = await getCurrentCommit(appDir);
     return result(false, commitBefore, commitAfter, steps, start);
   }
@@ -334,7 +334,7 @@ async function customCommandDeploy(
   steps.push(reloadStep);
   onStep?.(reloadStep);
   if (reloadStep.status === "failure") {
-    await rollbackIfEnabled(preCommandConfig, appDir, commitBefore, steps);
+    await rollbackIfEnabled(preCommandConfig, appDir, commitBefore, steps, onStep);
     const commitAfter = await getCurrentCommit(appDir);
     return result(false, commitBefore, commitAfter, steps, start);
   }
@@ -344,7 +344,7 @@ async function customCommandDeploy(
   const healthOk = await runHealthCheck({ ...options, config }, steps);
   if (steps.length > 0) onStep?.(steps[steps.length - 1]!); // emit health check step
   if (!healthOk) {
-    await rollbackIfEnabled(preCommandConfig, appDir, commitBefore, steps);
+    await rollbackIfEnabled(preCommandConfig, appDir, commitBefore, steps, onStep);
     const commitAfter = await getCurrentCommit(appDir);
     return result(false, commitBefore, commitAfter, steps, start);
   }
@@ -353,12 +353,29 @@ async function customCommandDeploy(
   return result(true, commitBefore, commitAfter, steps, start);
 }
 
+// Cap on the docker-logs excerpt appended to a failed health-check step's
+// output — keeps the deploy record's step log bounded even for a chatty
+// container, while still giving an operator the tail they'd otherwise have
+// to SSH in and fetch by hand.
+const HEALTH_FAILURE_LOG_TAIL_LINES = 50;
+const HEALTH_FAILURE_LOG_MAX_CHARS = 4000;
+
 async function runHealthCheck(
   options: DeployOptions,
   steps: DeployStep[],
 ): Promise<boolean> {
   const { appDir, config } = options;
   const healthPath = config.health;
+
+  // Last probe's own result (HTTP status or the fetch error text), kept
+  // across retries so a final failure can report what the LAST attempt
+  // actually saw instead of just "no service responded" — that bare
+  // message carries no diagnostic signal (Task 1f6895f6 / the 2026-08-18
+  // project-forge incident, deploy 8ab63a36, where the health-check step
+  // output was empty and debugging had to fall back to manual SSH).
+  let lastProbeService = "";
+  let lastProbeDetail = "";
+  let lastKnownServices: string[] = [];
 
   // Try each running service with node fetch, with retries for startup time
   const healthStep = await runStep("health check", async () => {
@@ -374,17 +391,20 @@ async function runHealthCheck(
         appDir,
       );
       const serviceList = services.stdout.trim().split("\n").filter(Boolean);
+      if (serviceList.length > 0) lastKnownServices = serviceList;
 
       for (const service of serviceList) {
         const ports = config.health_port ? [config.health_port] : [3000, 3001, 4000, 5000, 8000, 8080];
         for (const port of ports) {
           // Trust boundary: healthPath (config.health) is operator-controlled and interpolated here — pre-existing residual, not a regression introduced by the runExec migration.
-          const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{if(r.ok)process.exit(0);else process.exit(1)}).catch(()=>process.exit(1))`;
+          const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{console.log('HTTP_STATUS='+r.status);process.exit(r.ok?0:1)}).catch(e=>{console.log('PROBE_ERROR='+(e&&e.message?e.message:String(e)));process.exit(1)})`;
           const check = await runExec(
             "docker",
             ["compose", "-f", config.compose_file, "exec", "-T", service, "node", "-e", jsSnippet],
             appDir,
           );
+          lastProbeService = `${service}:${port}${healthPath}`;
+          lastProbeDetail = (check.stdout + " " + check.stderr).trim() || `exit code ${check.exitCode}`;
           if (check.exitCode === 0) {
             return { stdout: `Health check passed: ${service}:${port}${healthPath} (attempt ${attempt + 1})`, stderr: "", exitCode: 0 };
           }
@@ -392,11 +412,53 @@ async function runHealthCheck(
       }
     }
 
-    return { stdout: `Health check failed: no service responded on ${healthPath} after ${maxRetries} attempts`, stderr: "", exitCode: 1 };
+    const probeDetail = lastProbeDetail
+      ? ` — last probe (${lastProbeService}): ${lastProbeDetail}`
+      : " — no running service was reachable to probe";
+    const containerLogs = await captureContainerLogsTail(appDir, config.compose_file, lastKnownServices);
+    return {
+      stdout:
+        `Health check failed: no service responded on ${healthPath} after ${maxRetries} attempts${probeDetail}\n\n` +
+        containerLogs,
+      stderr: "",
+      exitCode: 1,
+    };
   });
   steps.push(healthStep);
 
   return healthStep.status === "success";
+}
+
+/**
+ * Captures a capped `docker compose logs --tail` excerpt of the app's
+ * container(s) for inclusion in a failed health-check step's output, so the
+ * deploy record itself carries what the relay already knows instead of
+ * requiring a manual SSH + `docker logs` round-trip to debug a failure
+ * (Task 1f6895f6).
+ */
+async function captureContainerLogsTail(
+  appDir: string,
+  composeFile: string,
+  services: string[],
+): Promise<string> {
+  if (services.length === 0) {
+    return "Container logs: no running services were found to inspect";
+  }
+  try {
+    const logs = await runExec(
+      "docker",
+      ["compose", "-f", composeFile, "logs", "--tail", String(HEALTH_FAILURE_LOG_TAIL_LINES), ...services],
+      appDir,
+    );
+    const combined = (logs.stdout + "\n" + logs.stderr).trim();
+    const capped =
+      combined.length > HEALTH_FAILURE_LOG_MAX_CHARS
+        ? `...[truncated]...\n${combined.slice(-HEALTH_FAILURE_LOG_MAX_CHARS)}`
+        : combined;
+    return `Container logs (last ${HEALTH_FAILURE_LOG_TAIL_LINES} lines, ${services.join(", ")}):\n${capped || "(empty)"}`;
+  } catch (err) {
+    return `Container logs: failed to fetch (${err instanceof Error ? err.message : String(err)})`;
+  }
 }
 
 /**
@@ -442,16 +504,33 @@ async function rollbackIfEnabled(
   appDir: string,
   commitSha: string,
   steps: DeployStep[],
+  onStep?: (step: DeployStep) => void,
 ): Promise<void> {
+  // Rollback steps used to only land in `steps` (visible in the final
+  // DeployResult) without also firing `onStep`. That left the SSE stream
+  // silent for the whole rollback duration (git reset + preflight + compose
+  // build/up can take a while), and a stream that goes quiet for too long
+  // risks a proxy/idle-timeout dropping the connection before the trailing
+  // `done` event ships — which is exactly how a caller can end up with a
+  // deploy record that never learned it rolled back (Task 1f6895f6 / the
+  // 2026-08-18 project-forge incident, deploy 8ab63a36). Emitting here too
+  // means a listener building its own step log from the stream (rather than
+  // waiting for the final result) already has the rollback steps even if
+  // the connection dies before `done`.
+  function emit(step: DeployStep) {
+    steps.push(step);
+    onStep?.(step);
+  }
+
   if (!config.rollback) {
-    steps.push({ name: "rollback", status: "skipped", output: "Rollback disabled in config", durationMs: 0 });
+    emit({ name: "rollback", status: "skipped", output: "Rollback disabled in config", durationMs: 0 });
     return;
   }
 
   const checkoutStep = await runStep("rollback: git reset", () =>
     runExec("git", ["reset", "--hard", commitSha], appDir),
   );
-  steps.push(checkoutStep);
+  emit(checkoutStep);
   if (checkoutStep.status === "failure") return;
 
   const preflightStart = Date.now();
@@ -476,19 +555,19 @@ async function rollbackIfEnabled(
         `unchanged:\n${checksOutput}`,
     durationMs: Date.now() - preflightStart,
   };
-  steps.push(preflightStep);
+  emit(preflightStep);
   if (!preflight.passed) return;
 
   const rebuildStep = await runStep("rollback: compose build", () =>
     runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir),
   );
-  steps.push(rebuildStep);
+  emit(rebuildStep);
   if (rebuildStep.status === "failure") return;
 
   const restartStep = await runStep("rollback: compose up", () =>
     runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir),
   );
-  steps.push(restartStep);
+  emit(restartStep);
 }
 
 async function runStep(
