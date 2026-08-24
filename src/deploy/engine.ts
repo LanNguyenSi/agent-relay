@@ -360,6 +360,12 @@ async function customCommandDeploy(
 const HEALTH_FAILURE_LOG_TAIL_LINES = 50;
 const HEALTH_FAILURE_LOG_MAX_CHARS = 4000;
 
+// Symmetric cap on the last probe's own detail (HTTP status / fetch error
+// text) — much smaller than the container-log cap since this is a single
+// probe result, not a log tail, but still bounded rather than trusting
+// whatever the in-container fetch call happened to print.
+const PROBE_DETAIL_MAX_CHARS = 300;
+
 async function runHealthCheck(
   options: DeployOptions,
   steps: DeployStep[],
@@ -397,14 +403,23 @@ async function runHealthCheck(
         const ports = config.health_port ? [config.health_port] : [3000, 3001, 4000, 5000, 8000, 8080];
         for (const port of ports) {
           // Trust boundary: healthPath (config.health) is operator-controlled and interpolated here — pre-existing residual, not a regression introduced by the runExec migration.
-          const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{console.log('HTTP_STATUS='+r.status);process.exit(r.ok?0:1)}).catch(e=>{console.log('PROBE_ERROR='+(e&&e.message?e.message:String(e)));process.exit(1)})`;
+          // stdout is explicitly flushed (write's callback) before process.exit():
+          // console.log()+process.exit() can truncate output when stdout is a
+          // pipe, since exit() doesn't wait for the write to drain. Defensive
+          // hardening for the probe output this file now depends on for
+          // diagnostics — not confirmed as the 2026-08-18 incident's own
+          // root cause.
+          const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{process.stdout.write('HTTP_STATUS='+r.status+'\\n',()=>process.exit(r.ok?0:1))}).catch(e=>{process.stdout.write('PROBE_ERROR='+(e&&e.message?e.message:String(e))+'\\n',()=>process.exit(1))})`;
           const check = await runExec(
             "docker",
             ["compose", "-f", config.compose_file, "exec", "-T", service, "node", "-e", jsSnippet],
             appDir,
           );
           lastProbeService = `${service}:${port}${healthPath}`;
-          lastProbeDetail = (check.stdout + " " + check.stderr).trim() || `exit code ${check.exitCode}`;
+          lastProbeDetail = ((check.stdout + " " + check.stderr).trim() || `exit code ${check.exitCode}`).slice(
+            0,
+            PROBE_DETAIL_MAX_CHARS,
+          );
           if (check.exitCode === 0) {
             return { stdout: `Health check passed: ${service}:${port}${healthPath} (attempt ${attempt + 1})`, stderr: "", exitCode: 0 };
           }
@@ -444,21 +459,23 @@ async function captureContainerLogsTail(
   if (services.length === 0) {
     return "Container logs: no running services were found to inspect";
   }
-  try {
-    const logs = await runExec(
-      "docker",
-      ["compose", "-f", composeFile, "logs", "--tail", String(HEALTH_FAILURE_LOG_TAIL_LINES), ...services],
-      appDir,
-    );
-    const combined = (logs.stdout + "\n" + logs.stderr).trim();
-    const capped =
-      combined.length > HEALTH_FAILURE_LOG_MAX_CHARS
-        ? `...[truncated]...\n${combined.slice(-HEALTH_FAILURE_LOG_MAX_CHARS)}`
-        : combined;
-    return `Container logs (last ${HEALTH_FAILURE_LOG_TAIL_LINES} lines, ${services.join(", ")}):\n${capped || "(empty)"}`;
-  } catch (err) {
-    return `Container logs: failed to fetch (${err instanceof Error ? err.message : String(err)})`;
-  }
+  // No try/catch here: runExec (exec.ts) resolves the promise it returns
+  // unconditionally — a failed child process comes back as a non-zero
+  // exitCode, never a rejection — so there was nothing for a catch to ever
+  // observe. A prior version of this function caught and reported a
+  // "failed to fetch" case that no test could reach and no code path could
+  // trigger.
+  const logs = await runExec(
+    "docker",
+    ["compose", "-f", composeFile, "logs", "--tail", String(HEALTH_FAILURE_LOG_TAIL_LINES), ...services],
+    appDir,
+  );
+  const combined = (logs.stdout + "\n" + logs.stderr).trim();
+  const capped =
+    combined.length > HEALTH_FAILURE_LOG_MAX_CHARS
+      ? `...[truncated]...\n${combined.slice(-HEALTH_FAILURE_LOG_MAX_CHARS)}`
+      : combined;
+  return `Container logs (last ${HEALTH_FAILURE_LOG_TAIL_LINES} lines, ${services.join(", ")}):\n${capped || "(empty)"}`;
 }
 
 /**
