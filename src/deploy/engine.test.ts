@@ -189,6 +189,147 @@ describe("deploy — default flow", () => {
     ]);
   });
 
+  // Task 1f6895f6 / the 2026-08-18 project-forge incident (deploy 8ab63a36):
+  // the health-check step's output carried no diagnostic detail (no HTTP
+  // status / probe error, no container logs), so debugging the real cause
+  // required a manual SSH round-trip.
+  it("enriches the health-check failure output with the last probe result and a container-log tail", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "HTTP_STATUS=503", stderr: "", exitCode: 1 };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        return { stdout: "app  | Error: could not connect to db\napp  | retrying...\n", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    expect(result.success).toBe(false);
+    const healthStep = result.steps.find((s) => s.name === "health check");
+    expect(healthStep?.status).toBe("failure");
+    // Last probe result (HTTP status this time; a PROBE_ERROR= case is
+    // exercised in the next test) survives into the step output.
+    expect(healthStep?.output).toContain("HTTP_STATUS=503");
+    // Container-log excerpt is appended too.
+    expect(healthStep?.output).toContain("could not connect to db");
+
+    const logsCall = mockRunExec.mock.calls.find(
+      ([cmd, callArgs]) => cmd === "docker" && callArgs.includes("logs"),
+    );
+    expect(logsCall).toBeDefined();
+    expect(logsCall?.[1]).toEqual(
+      expect.arrayContaining(["compose", "-f", "docker-compose.yml", "logs", "--tail", "50", "app"]),
+    );
+  });
+
+  it("captures a fetch-error probe detail (not just a bare exit code) on health-check failure", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "PROBE_ERROR=connect ECONNREFUSED 127.0.0.1:3000", stderr: "", exitCode: 1 };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    const healthStep = result.steps.find((s) => s.name === "health check");
+    expect(healthStep?.output).toContain("PROBE_ERROR=connect ECONNREFUSED");
+  });
+
+  it("does not attempt a container-log fetch when no service was ever running", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      // No running services at all — docker compose ps returns empty.
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    const healthStep = result.steps.find((s) => s.name === "health check");
+    expect(healthStep?.status).toBe("failure");
+    expect(healthStep?.output).toContain("no running services were found to inspect");
+    const logsCall = mockRunExec.mock.calls.find(
+      ([cmd, callArgs]) => cmd === "docker" && callArgs.includes("logs"),
+    );
+    expect(logsCall).toBeUndefined();
+  });
+
+  // Task 1f6895f6: rollback steps used to only land in the final
+  // `result.steps` array, never in the `onStep` stream. A long silent
+  // stretch on the SSE connection during rollback (git reset + preflight +
+  // compose build/up) risks a proxy/idle-timeout dropping the connection
+  // before the trailing `done` event ships — a caller building its own
+  // step log purely from the stream (as deploy-panel does) would then never
+  // learn a rollback happened at all, and the deploy record is left
+  // without a visible rollback step.
+  it("streams rollback steps via onStep, not just the final result", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "", stderr: "", exitCode: 1 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const seen: string[] = [];
+    const result = await deploy({ appDir: "/app", config: baseConfig, onStep: (s) => seen.push(s.name) });
+
+    expect(result.success).toBe(false);
+    const rollbackNames = [
+      "rollback: git reset",
+      "rollback: preflight",
+      "rollback: compose build",
+      "rollback: compose up",
+    ];
+    for (const name of rollbackNames) {
+      expect(seen).toContain(name);
+    }
+    // A listener rebuilding its own step log purely from the onStep stream
+    // (mirroring what deploy-panel's SSE consumer does before a `done`
+    // event ever arrives) ends up with exactly the same steps, in the same
+    // order, as the final result — the whole point of streaming them.
+    expect(seen).toEqual(result.steps.map((s) => s.name));
+  });
+
   it("skips rollback when disabled", async () => {
     mockRunExec.mockImplementation(async (command, args) => {
       if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
