@@ -1,4 +1,4 @@
-import { readFile, access, stat, writeFile, unlink } from "node:fs/promises";
+import { readFile, access, stat, writeFile, unlink, realpath } from "node:fs/promises";
 import { join, resolve, sep, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
@@ -442,8 +442,22 @@ async function checkComposeBindMountSourcesExist(
   const sources = collectBindMountSources(doc as Record<string, unknown>);
   // Mirrors the containment style in config/relay.ts's
   // assertComposeFileContained: `startsWith(appsDir + sep)` (not just
-  // `appsDir`) avoids a sibling-name prefix false-positive.
-  const appsDir = resolve(env.APPS_DIR);
+  // `appsDir`) avoids a sibling-name prefix false-positive. Resolve APPS_DIR
+  // with realpath to handle symlinks (e.g. /apps -> /private/apps on macOS);
+  // appDir is already realpath-ed from safeAppDir(), so compare both against
+  // the resolved real path. ENOENT means the directory doesn't exist yet
+  // (e.g. a fresh checkout) — fall back to the lexical form.
+  const appsDirLexical = resolve(env.APPS_DIR);
+  let appsDir: string;
+  try {
+    appsDir = await realpath(appsDirLexical);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      appsDir = appsDirLexical;
+    } else {
+      throw err;
+    }
+  }
 
   const toCheck: string[] = [];
   const skipped: string[] = [];
@@ -466,7 +480,8 @@ async function checkComposeBindMountSourcesExist(
       // itself lives under APPS_DIR), but a deep enough `../../..`
       // escape can still resolve outside it — apply the same containment
       // test used for absolute sources above rather than trusting the
-      // relative form.
+      // relative form. appDir is already realpath-ed from safeAppDir(), so
+      // resolve relative to it and compare against the realpath-ed appsDir.
       const resolved = resolve(appDir, src);
       const contained = resolved === appsDir || resolved.startsWith(appsDir + sep);
       if (!contained) {

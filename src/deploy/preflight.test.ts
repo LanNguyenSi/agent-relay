@@ -12,6 +12,7 @@ vi.mock("node:fs/promises", () => ({
   stat: vi.fn(),
   writeFile: vi.fn(),
   unlink: vi.fn(),
+  realpath: vi.fn(),
 }));
 
 // Fixed (via a vi.fn() so individual tests can override it) so
@@ -22,7 +23,7 @@ vi.mock("node:os", () => ({ hostname: () => "relay-container-id" }));
 
 import { runPreflightChecks } from "./preflight.js";
 import { runExec } from "./exec.js";
-import { access, readFile, stat, writeFile, unlink } from "node:fs/promises";
+import { access, readFile, stat, writeFile, unlink, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
 
@@ -32,6 +33,7 @@ const mockReadFile = vi.mocked(readFile);
 const mockStat = vi.mocked(stat);
 const mockWriteFile = vi.mocked(writeFile);
 const mockUnlink = vi.mocked(unlink);
+const mockRealpath = vi.mocked(realpath);
 // randomUUID's real return type is a branded UUID template-literal type;
 // cast test tokens through it so mockReturnValue(Once) accepts plain
 // strings without fighting the branding.
@@ -75,6 +77,7 @@ beforeEach(() => {
   mockStat.mockResolvedValue({} as Awaited<ReturnType<typeof stat>>);
   mockWriteFile.mockResolvedValue(undefined);
   mockUnlink.mockResolvedValue(undefined);
+  mockRealpath.mockImplementation(async (path) => String(path));
   mockRunExec.mockImplementation(async (command, args) => {
     if (command === "docker") {
       return { stdout: "abc123\n", stderr: "", exitCode: 0 }; // containers present
@@ -986,6 +989,99 @@ describe("runPreflightChecks", () => {
       expect(mockStat).toHaveBeenCalledWith("/apps/app/data");
       expect(mockStat).toHaveBeenCalledWith("/apps/app/config/app.yml");
       expect(mockStat).toHaveBeenCalledWith("/apps/app/secrets/app.key");
+    });
+
+    it("REGRESSION: symlink-containing APPS_DIR (e.g. /var -> /private/var on macOS) — a relative bind source is checked against the real path, not skipped", async () => {
+      mockReadFile.mockResolvedValue(
+        "services:\n  app:\n    volumes:\n      - ./config/app.env:/etc/app/app.env:ro\n",
+      );
+      // Mock realpath to simulate /apps being a symlink to /private/apps
+      // appDir comes from safeAppDir and is already realpath-ed to /private/apps/app
+      mockRealpath.mockImplementation(async (path) => {
+        const pathStr = String(path);
+        if (pathStr === "/apps") return "/private/apps";
+        if (pathStr.startsWith("/apps/")) {
+          return pathStr.replace(/^\/apps/, "/private/apps");
+        }
+        return pathStr;
+      });
+      mockStat.mockImplementation(async (path) => {
+        if (path === "/private/apps/app/config/app.env") throw new Error("ENOENT");
+        return {} as Awaited<ReturnType<typeof stat>>;
+      });
+
+      // appDir is already realpath-ed from safeAppDir (would be /private/apps/app
+      // when APPS_DIR=/apps points to /private/apps via a symlink)
+      const report = await runPreflightChecks({
+        appDir: "/private/apps/app",
+        config: baseConfig,
+        phase: "post-pull",
+      });
+
+      const check = report.checks.find((c) => c.name === "compose_bind_mount_sources_exist");
+      expect(check?.passed).toBe(false);
+      expect(check?.critical).toBe(true);
+      expect(check?.message).toContain("/private/apps/app/config/app.env");
+      expect(report.passed).toBe(false);
+    });
+
+    it("REGRESSION: symlink-containing APPS_DIR — a relative bind source exists when checked against the real path", async () => {
+      mockReadFile.mockResolvedValue(
+        "services:\n  app:\n    volumes:\n      - ./config/app.env:/etc/app/app.env:ro\n",
+      );
+      // Mock realpath to simulate /apps being a symlink to /private/apps
+      mockRealpath.mockImplementation(async (path) => {
+        const pathStr = String(path);
+        if (pathStr === "/apps") return "/private/apps";
+        if (pathStr.startsWith("/apps/")) {
+          return pathStr.replace(/^\/apps/, "/private/apps");
+        }
+        return pathStr;
+      });
+      mockStat.mockResolvedValue({} as Awaited<ReturnType<typeof stat>>);
+
+      // appDir is already realpath-ed from safeAppDir (would be /private/apps/app)
+      const report = await runPreflightChecks({
+        appDir: "/private/apps/app",
+        config: baseConfig,
+        phase: "post-pull",
+      });
+
+      const check = report.checks.find((c) => c.name === "compose_bind_mount_sources_exist");
+      expect(check?.passed).toBe(true);
+      // The bind-mount source is checked and exists; the message confirms at least 1 source
+      expect(check?.message).toMatch(/All 1 compose bind-mount source/);
+      // Verify that realpath was called on APPS_DIR
+      expect(mockRealpath).toHaveBeenCalledWith("/apps");
+      // Since appDir is already realpath-ed, the source path is already resolved
+      expect(mockStat).toHaveBeenCalledWith("/private/apps/app/config/app.env");
+    });
+
+    it("NEGATIVE CONTROL: relative sources that escape APPS_DIR still pass when checked against the real path", async () => {
+      mockReadFile.mockResolvedValue(
+        "services:\n  app:\n    volumes:\n      - ../../outside.txt:/etc/outside.txt\n",
+      );
+      // Mock realpath to simulate /apps being a symlink to /private/apps
+      mockRealpath.mockImplementation(async (path) => {
+        const pathStr = String(path);
+        if (pathStr === "/apps") return "/private/apps";
+        if (pathStr.startsWith("/apps/")) {
+          return pathStr.replace(/^\/apps/, "/private/apps");
+        }
+        return pathStr;
+      });
+
+      // appDir is already realpath-ed from safeAppDir (would be /private/apps/app)
+      const report = await runPreflightChecks({
+        appDir: "/private/apps/app",
+        config: baseConfig,
+        phase: "post-pull",
+      });
+
+      const check = report.checks.find((c) => c.name === "compose_bind_mount_sources_exist");
+      expect(check?.passed).toBe(true);
+      expect(check?.message).toMatch(/escapes APPS_DIR/i);
+      expect(mockStat).not.toHaveBeenCalled();
     });
   });
 });
