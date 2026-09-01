@@ -10,6 +10,9 @@ name: OKF staleness
 # non-blocking. Canonical pattern for the five OKF bundle repos
 # (see the okf-kit initiative memory for the current list):
 # keep them in sync.
+# The okf-kit pin below can lead the other bundle repos' pins for a while:
+# treat a mismatch as expected until a fleet-wide sweep brings every repo
+# back onto the same pinned version, not as drift to fix here.
 
 on:
   pull_request:

@@ -2,8 +2,76 @@
 
 <!-- Add new entries at the top, newest first. -->
 
-- 2026-09-01T06:41:00Z, task dd3cd90d re-anchor pass: re-verified all six
-  content docs against sources at this repo's head (`b7a0f93`). Re-pointed
+- 2026-09-01T06:56:00Z, task dd3cd90d review round 2 fix pass: reviewer
+  hand-audited all 70 citation tokens across the six content docs (not just
+  `citations-resolve`'s blank/non-blank check) and found four citations in
+  `deploy-phase-model.md` that resolved to non-blank but content-wrong code
+  behind the entry below's fresh timestamp, plus three lower-severity
+  issues. Re-pointed all four: `runPreflightChecks` (previously
+  `preflight.ts:47-70`, which lands on the function's JSDoc prose, not the
+  function) now cites the function itself at `preflight.ts:77-102`; the
+  `force` gate expression (previously `preflight.ts:65-67`, one line short
+  of the `passed = force ? ...` statement) now cites `preflight.ts:97-99`;
+  the post-pull-placement rationale for `compose_bind_mount_sources_exist`
+  (previously `preflight.ts:356-364`, the tail of
+  `checkAppsRootMountCongruence`) now cites the actual rationale comment at
+  `preflight.ts:388-401`; and `runPreflight` (previously
+  `apps.ts:178-182`, inside `safeAppDir`'s dangling-symlink comment) now
+  cites the function itself at `apps.ts:415-419`. Also fixed, same round:
+  (1) `path-containment-idiom.md`'s `safeAppDir` entry named only two
+  applications of the containment idiom (`apps.ts:151`, `apps.ts:218-220`);
+  `apps.ts` around line 203 applies it a third time, inside the
+  dangling-symlink-chain branch reached when the not-yet-deployed candidate
+  resolves to a dangling top-level symlink, rejecting an escape there
+  before the post-realpath re-check at `apps.ts:218-220` is ever reached;
+  named now, with citation `apps.ts:203-205`. (2)
+  `.github/workflows/okf-staleness.yml`'s "canonical
+  pattern ... keep them in sync" header comment reads as a parity claim
+  across the five OKF bundle repos; this repo is currently the only one
+  pinned to okf-kit@0.8.0, so added a line noting the pin here can lead the
+  others until a fleet-wide sweep brings them back in sync, not drift to fix
+  in this repo. (3) Off-by-one: `checkComposeBindMountSourcesExist` spans
+  `preflight.ts:402-532` (532 is the closing brace), not `402-531` as cited
+  in `path-containment-idiom.md` and in the entry below; corrected both to
+  `402-532`. Also verified and tightened `apps-dir-contract.md`'s
+  `install.sh` citation for the install-time symlink-enforcement block: the
+  previous `install.sh:561-618` was loose (561 is an unrelated `mkdir -p`
+  two lines above the actual guard, and 618 is inside the guard's last
+  branch, three lines short of its closing `fi`); tightened to
+  `install.sh:573-621`, the exact span from the
+  `if [ "$APPS_DIR" != "/apps" ]` guard line to its matching `fi`. (4) The
+  bare `352, 362` line-number pair in `deploy-phase-model.md` (no repeated
+  filename, risked being parsed as a continuation of the prior citation) is
+  now `engine.ts:352`, `engine.ts:362`; both call sites re-verified
+  unchanged (`rollbackIfEnabled(preCommandConfig, ...)`). The list-form
+  citation `engine.ts:191, 243, 253, 264, 273` a few lines above is
+  retained in that form, deliberately: all five numbers were re-verified as
+  `rollbackIfEnabled(prePullConfig, ...)` call sites, and the list
+  immediately follows the sentence naming that one call, unlike the
+  `352, 362` pair, which sits two sentences after a different citation
+  (`engine.ts:288`) for a different function and so read as ambiguous
+  without a repeated filename. Bumped `deploy-phase-model.md`,
+  `path-containment-idiom.md`, and `apps-dir-contract.md`'s `timestamp` to
+  `2026-09-01T06:56:00Z`; the other three content docs were not touched
+  this round. Correcting the entry below's opening claim: round 1
+  re-verified and re-pointed the citations its own `citations-resolve`
+  tooling run flagged as blank, across all six content docs; it did not
+  catch the four resolving-but-wrong `deploy-phase-model.md` citations
+  above, which review in this round found and fixed. That is not a
+  clean-sweep claim for this round either: this round rechecked only the
+  specific citations review flagged, not every one of the 70 tokens against
+  its source again from scratch. Ran `okf-kit@0.3.1 check --json docs/okf`:
+  0 warnings / 0 errors (unchanged from the entry below; this round's
+  defects were all content-wrong citations that `citations-resolve` cannot
+  detect, not blank-target ones). Ran `okf-kit@0.8.0 check --json docs/okf`:
+  0 findings (also unchanged, same reason).
+- 2026-09-01T06:41:00Z, task dd3cd90d re-anchor pass: re-verified and
+  re-pointed the citations this pass's `citations-resolve` tooling run
+  flagged as blank, across all six content docs against sources at this
+  repo's head (`b7a0f93`); see the entry above for four further
+  `deploy-phase-model.md` citations that resolved to non-blank but
+  content-wrong code, not caught by this pass, found and fixed by review.
+  Re-pointed
   `deploy-phase-model.md`'s three citations-resolve failures the
   step-timeout PR left stale (the entry below deliberately scoped them
   out): the `config.rollback` read (previously engine.ts line 408, now
@@ -31,8 +99,9 @@
   intermediate dangling-symlink-chain fallback before reaching that
   re-check, without changing the two-idiom-application shape this doc
   describes. Also re-pointed the same doc's
-  `checkComposeBindMountSourcesExist` span to `preflight.ts:402-531` (the
-  function grew by eleven lines); its `assertComposeFileContained`
+  `checkComposeBindMountSourcesExist` span to `preflight.ts:402-532`
+  (corrected from `402-531` by the entry above, an off-by-one against the
+  function's actual closing brace); its `assertComposeFileContained`
   citations in `relay.ts` were re-verified and needed no change.
   `apps-dir-contract.md`, `deploy-failure-surfaces.md`,
   `exec-trust-boundary.md`, and `health-check-reality.md` were
