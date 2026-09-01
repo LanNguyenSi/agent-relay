@@ -57,6 +57,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t agent-relay .
+      # The buildx plugin is load-bearing for Compose builds inside the relay
+      # (see Dockerfile); without it Compose falls back to the legacy builder.
+      - run: docker run --rm agent-relay docker buildx version
 
   shellcheck:
     runs-on: ubuntu-latest
