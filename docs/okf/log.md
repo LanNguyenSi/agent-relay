@@ -107,7 +107,9 @@
   `exec-trust-boundary.md`, and `health-check-reality.md` were
   re-verified claim by claim against their current sources (every cited
   span still contains the code the sentence describes) and needed no
-  citation changes, only the timestamp bump below. Bumped all six docs'
+  citation changes, only the timestamp bump below (as originally stated;
+  the entry above later tightened `apps-dir-contract.md`'s `install.sh`
+  span, so that claim no longer holds for that file). Bumped all six docs'
   `timestamp` to `2026-09-01T06:41:00Z` (past every cited source's own
   last commit at this repo's head) to clear the `sources-fresh` warnings
   the CI job had flagged for `apps-dir-contract.md`,
