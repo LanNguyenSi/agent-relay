@@ -3,7 +3,7 @@ type: invariant
 title: Exec trust boundary — runExec vs runShell, plus a residual not in docs/security.md
 description: docker/git calls go through execFile-backed runExec everywhere; only .relay.yml's command/pre_update/post_update go through shell-backed runShell. docs/security.md documents that boundary but not a same-tier residual — config.health is string-interpolated into a node -e JS snippet run via docker compose exec (engine.ts), a different injection mechanism than runShell.
 tags: [security, trust-boundary, exec, shell, health-check]
-timestamp: 2026-09-01T06:10:00Z
+timestamp: 2026-09-01T06:41:00Z
 sources:
   - src/deploy/exec.ts
   - src/deploy/engine.ts

@@ -3,7 +3,7 @@ type: invariant
 title: Deploy failure propagation across three surfaces — blocked vs failed vs success
 description: SSE has a dedicated `blocked` event, non-streaming HTTP wraps a blocked result under `{ result }` (PR #45), and MCP returns a plain ok(result) — all three agree that a BLOCKED deploy never calls recordDeploy and so never enters deploy history. `rollbackApp` (task 1074feb5) now returns the same `blocked` shape as a deploy, gated on preflight after `git reset --hard`, and both rollback callers follow the identical wrap/skip-recordDeploy pattern. PR #58 resolves app config before opening the SSE stream so an unknown app is a real 404, not a mid-stream error event.
 tags: [deploy, sse, mcp, api, history, blocked, rollback]
-timestamp: 2026-08-18T17:55:00Z
+timestamp: 2026-09-01T06:41:00Z
 sources:
   - src/api/routes.ts
   - src/mcp/server.ts

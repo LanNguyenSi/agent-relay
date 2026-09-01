@@ -10,7 +10,7 @@ description: >-
   2026-08-10 by operator decision, deleting health.ts and its test as dead
   code; README.md now describes the wired behavior.
 tags: [health-check, dead-code, docs-drift, deploy]
-timestamp: 2026-08-10T14:25:00Z
+timestamp: 2026-09-01T06:41:00Z
 sources:
   - src/deploy/engine.ts
   - README.md
