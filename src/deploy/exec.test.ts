@@ -79,7 +79,7 @@ describe("runShell", () => {
   });
 });
 
-describe("runExec — configurable timeout and maxBuffer", () => {
+describe("runExec: configurable timeout and maxBuffer", () => {
   it("reports the default timeoutMs and no killReason for a normal call", async () => {
     const result = await runExec("node", ["-e", "process.exit(0)"], cwd);
     expect(result.timeoutMs).toBe(300_000);

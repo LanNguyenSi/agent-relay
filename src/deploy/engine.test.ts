@@ -32,7 +32,7 @@ vi.mock("../config/relay.js", async () => {
   return { ...actual, loadRelayConfig: vi.fn() };
 });
 
-import { deploy } from "./engine.js";
+import { deploy, STEP_OUTPUT_MAX_CHARS } from "./engine.js";
 import { runShell, runExec } from "./exec.js";
 import { loadRelayConfig } from "../config/relay.js";
 import { runPreflightChecks } from "./preflight.js";
@@ -747,7 +747,7 @@ describe("deploy — default flow", () => {
       const buildStep = result.steps.find((s) => s.name === "compose build");
       expect(buildStep?.status).toBe("failure");
       expect(buildStep?.output).toContain(
-        "[relay] step output exceeded the 16 MB buffer and the process was killed",
+        "[relay] step output exceeded the 16 MiB buffer and the process was killed",
       );
     });
 
@@ -800,10 +800,64 @@ describe("deploy — default flow", () => {
       const result = await deploy({ appDir: "/app", config: { ...baseConfig, step_timeout_seconds: 900 } });
 
       const buildStep = result.steps.find((s) => s.name === "compose build");
+      const killLine = "[relay] step timed out after 900 s (raise step_timeout_seconds in .relay.yml)";
+      const notice = `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${hugeStdout.length} characters`;
       expect(buildStep?.output).toContain("[relay] output truncated: showing the last 200000 of");
-      expect(buildStep?.output.endsWith(
-        "[relay] step timed out after 900 s (raise step_timeout_seconds in .relay.yml)",
-      )).toBe(true);
+      expect(buildStep?.output.endsWith(killLine)).toBe(true);
+      // Pins that the cap is applied to the raw stdout+stderr BEFORE the
+      // kill-reason line is appended (not after): the exact total length
+      // below only holds when `total` in the notice reflects the
+      // pre-truncation combined output length WITHOUT the kill-reason
+      // line. A mutant that appends the kill line first, then caps the
+      // combined string, changes both the notice's `total` figure and the
+      // overall length, so this assertion catches it.
+      expect(buildStep?.output.length).toBe(
+        notice.length + 1 + STEP_OUTPUT_MAX_CHARS + 1 + killLine.length,
+      );
+    });
+
+    it("routes a rejected exec call's Error message through the same truncation cap", async () => {
+      const hugeMessage = "z".repeat(STEP_OUTPUT_MAX_CHARS + 50_000);
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          throw new Error(hugeMessage);
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      const expectedNotice = `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${hugeMessage.length} characters`;
+      const expectedTail = hugeMessage.slice(-STEP_OUTPUT_MAX_CHARS);
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output.startsWith(expectedNotice)).toBe(true);
+      expect(buildStep?.output).toBe(`${expectedNotice}\n${expectedTail}`);
+    });
+
+    it("returns output of exactly STEP_OUTPUT_MAX_CHARS characters verbatim, with no truncation notice", async () => {
+      const exactStdout = "a".repeat(STEP_OUTPUT_MAX_CHARS);
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return { stdout: exactStdout, stderr: "", exitCode: 0 };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.output).toBe(exactStdout);
+      expect(buildStep?.output).not.toContain("[relay] output truncated");
+      expect(buildStep?.output.length).toBe(STEP_OUTPUT_MAX_CHARS);
     });
   });
 });

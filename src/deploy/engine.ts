@@ -1,6 +1,6 @@
 import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "./preflight.js";
-import { runExec, runShell, type ExecOptions } from "./exec.js";
+import { runExec, runShell, type ExecOptions, type ExecResult } from "./exec.js";
 
 /**
  * Builds the ExecOptions for a long-running deploy step (git pull, compose
@@ -8,8 +8,8 @@ import { runExec, runShell, type ExecOptions } from "./exec.js";
  * `.relay.yml`. `step_timeout_seconds` overrides exec.ts's own default step
  * timeout; when the field is absent, exec.ts's default (300s) applies
  * unchanged. `!== undefined` (not truthiness) because 0 would otherwise be
- * indistinguishable from "absent" — moot today since the schema's `min(1)`
- * already rejects 0, but the check should not rely on that.
+ * indistinguishable from "absent" (moot today since the schema's `min(1)`
+ * already rejects 0, but the check should not rely on that).
  */
 export function stepExecOptions(config: RelayConfig): ExecOptions {
   return config.step_timeout_seconds !== undefined
@@ -602,15 +602,15 @@ async function rollbackIfEnabled(
   emit(restartStep);
 }
 
-// Cap on a DeployStep's stored `output` (stdout+stderr combined, plus any
-// `[relay] ...` reason line). Independent of exec.ts's per-stream
-// maxBufferBytes: that bounds what execFile buffers per stream before
-// killing the child; this bounds what the deploy record itself keeps once
-// both streams are captured and concatenated, since the API layer
-// serialises DeployStep.output verbatim into SSE and JSON and the
-// deploy-panel UI stores it as-is. In the spirit of
-// HEALTH_FAILURE_LOG_MAX_CHARS / PROBE_DETAIL_MAX_CHARS above.
-const STEP_OUTPUT_MAX_CHARS = 200_000;
+// Cap on a DeployStep's stored `output` (stdout+stderr combined, before any
+// `[relay] ...` notice or kill-reason line is added around it). Independent
+// of exec.ts's per-stream maxBufferBytes: that bounds what execFile buffers
+// per stream before killing the child; this bounds the kept payload once
+// both streams are captured and concatenated, since the deploy API's JSON
+// response, the SSE stream, and the MCP `relay_deploy` result all serialise
+// DeployStep.output verbatim. In the spirit of HEALTH_FAILURE_LOG_MAX_CHARS
+// / PROBE_DETAIL_MAX_CHARS above.
+export const STEP_OUTPUT_MAX_CHARS = 200_000;
 
 /**
  * Keeps the last STEP_OUTPUT_MAX_CHARS characters of a step's output when it
@@ -625,17 +625,7 @@ function capStepOutput(output: string): string {
   return `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${total} characters\n${tail}`;
 }
 
-async function runStep(
-  name: string,
-  fn: () => Promise<{
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-    timeoutMs?: number;
-    maxBufferBytes?: number;
-    killReason?: "timeout" | "maxbuffer";
-  }>,
-): Promise<DeployStep> {
+async function runStep(name: string, fn: () => Promise<ExecResult>): Promise<DeployStep> {
   const start = Date.now();
   try {
     const r = await fn();
@@ -648,7 +638,7 @@ async function runStep(
     } else if (r.killReason === "maxbuffer") {
       output +=
         r.maxBufferBytes !== undefined
-          ? `\n[relay] step output exceeded the ${Math.round(r.maxBufferBytes / (1024 * 1024))} MB buffer and the process was killed`
+          ? `\n[relay] step output exceeded the ${Math.round(r.maxBufferBytes / (1024 * 1024))} MiB buffer and the process was killed`
           : `\n[relay] step output exceeded the buffer and the process was killed`;
     }
     return {
