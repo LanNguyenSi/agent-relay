@@ -20,6 +20,8 @@ Treat the deploy branch like a deploy key:
 
 `compose_file` is the one exception. It is never shell-interpolated: it is passed as a literal argument to `docker compose` via an `execFile` arg array, so the charset regex (`[A-Za-z0-9._/-]+`) is path hygiene, not a shell-escape guard. Path traversal is contained separately by resolving the path and rejecting anything that lands outside `APPS_DIR`; `..` segments are therefore allowed as long as they stay under `APPS_DIR` (the legitimate sibling-app case `../other-app/docker-compose.yml`), while deeper escapes like `../../etc/passwd` are rejected.
 
+`step_timeout_seconds` is read from the same post-pull `.relay.yml`, so a pushed commit can also raise its own deploy's per-step exec timeout up to the 7200 s ceiling (`build`/`up`/`post_update`). This sits inside the trust boundary above rather than outside it: raising your own timeout is a strictly smaller capability than the arbitrary shell already granted by `command`/`pre_update`/`post_update`.
+
 ## Why `.relay.yml` is re-read after `git pull`
 
 `.relay.yml` is intentionally re-read **after** `git pull`, so config edits shipped in the same commit as the code they support take effect on the same deploy. This means a commit that *fixes* a broken `.relay.yml` lets the deploy through (post-pull pre-flight sees the fixed config), instead of gating on the stale pre-pull copy.

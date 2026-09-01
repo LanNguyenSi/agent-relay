@@ -5,7 +5,7 @@
  * - exitCode mapping: numeric (N), success (0), string code→1 (ENOENT)
  */
 import { describe, it, expect } from "vitest";
-import { runExec, runShell } from "./exec.js";
+import { runExec, runShell, DEFAULT_MAX_BUFFER_BYTES } from "./exec.js";
 
 const cwd = "/tmp";
 
@@ -84,6 +84,15 @@ describe("runExec — configurable timeout and maxBuffer", () => {
     const result = await runExec("node", ["-e", "process.exit(0)"], cwd);
     expect(result.timeoutMs).toBe(300_000);
     expect(result.killReason).toBeUndefined();
+  });
+
+  it("pins DEFAULT_MAX_BUFFER_BYTES to 16 MiB per stream", () => {
+    expect(DEFAULT_MAX_BUFFER_BYTES).toBe(16 * 1024 * 1024);
+  });
+
+  it("reports maxBufferBytes === DEFAULT_MAX_BUFFER_BYTES for a default call", async () => {
+    const result = await runExec("node", ["-e", "process.exit(0)"], cwd);
+    expect(result.maxBufferBytes).toBe(DEFAULT_MAX_BUFFER_BYTES);
   });
 
   it("kills a long-running process once opts.timeoutMs elapses and reports killReason 'timeout'", async () => {

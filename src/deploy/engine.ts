@@ -2,23 +2,17 @@ import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/r
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "./preflight.js";
 import { runExec, runShell, type ExecOptions } from "./exec.js";
 
-// The MB figure named in a step's maxbuffer-kill annotation (see runStep
-// below). No `.relay.yml` field overrides the buffer cap today, so this
-// mirrors exec.ts's DEFAULT_MAX_BUFFER_BYTES (64 * 1024 * 1024) expressed in
-// MB rather than bytes. Kept as a literal rather than an import so mocking
-// "./exec.js" in a test (vi.mock replaces the whole module) doesn't also
-// have to stub this constant.
-const MAX_BUFFER_MB = 64;
-
 /**
  * Builds the ExecOptions for a long-running deploy step (git pull, compose
  * build/up, pre_update/post_update/command hooks) from the operator's
  * `.relay.yml`. `step_timeout_seconds` overrides exec.ts's own default step
  * timeout; when the field is absent, exec.ts's default (300s) applies
- * unchanged.
+ * unchanged. `!== undefined` (not truthiness) because 0 would otherwise be
+ * indistinguishable from "absent" — moot today since the schema's `min(1)`
+ * already rejects 0, but the check should not rely on that.
  */
 export function stepExecOptions(config: RelayConfig): ExecOptions {
-  return config.step_timeout_seconds
+  return config.step_timeout_seconds !== undefined
     ? { timeoutMs: config.step_timeout_seconds * 1000 }
     : {};
 }
@@ -608,6 +602,29 @@ async function rollbackIfEnabled(
   emit(restartStep);
 }
 
+// Cap on a DeployStep's stored `output` (stdout+stderr combined, plus any
+// `[relay] ...` reason line). Independent of exec.ts's per-stream
+// maxBufferBytes: that bounds what execFile buffers per stream before
+// killing the child; this bounds what the deploy record itself keeps once
+// both streams are captured and concatenated, since the API layer
+// serialises DeployStep.output verbatim into SSE and JSON and the
+// deploy-panel UI stores it as-is. In the spirit of
+// HEALTH_FAILURE_LOG_MAX_CHARS / PROBE_DETAIL_MAX_CHARS above.
+const STEP_OUTPUT_MAX_CHARS = 200_000;
+
+/**
+ * Keeps the last STEP_OUTPUT_MAX_CHARS characters of a step's output when it
+ * exceeds the cap, prefixing the kept tail with a notice line naming how
+ * much was dropped. Applied BEFORE a `[relay] ...` kill-reason line is
+ * appended, so that line is never itself truncated away.
+ */
+function capStepOutput(output: string): string {
+  if (output.length <= STEP_OUTPUT_MAX_CHARS) return output;
+  const total = output.length;
+  const tail = output.slice(-STEP_OUTPUT_MAX_CHARS);
+  return `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${total} characters\n${tail}`;
+}
+
 async function runStep(
   name: string,
   fn: () => Promise<{
@@ -615,18 +632,24 @@ async function runStep(
     stderr: string;
     exitCode: number;
     timeoutMs?: number;
+    maxBufferBytes?: number;
     killReason?: "timeout" | "maxbuffer";
   }>,
 ): Promise<DeployStep> {
   const start = Date.now();
   try {
     const r = await fn();
-    let output = (r.stdout + "\n" + r.stderr).trim();
+    let output = capStepOutput((r.stdout + "\n" + r.stderr).trim());
     if (r.killReason === "timeout") {
-      const seconds = Math.round((r.timeoutMs ?? 0) / 1000);
-      output += `\n[relay] step timed out after ${seconds} s (raise step_timeout_seconds in .relay.yml)`;
+      output +=
+        r.timeoutMs !== undefined
+          ? `\n[relay] step timed out after ${Math.round(r.timeoutMs / 1000)} s (raise step_timeout_seconds in .relay.yml)`
+          : `\n[relay] step timed out (raise step_timeout_seconds in .relay.yml)`;
     } else if (r.killReason === "maxbuffer") {
-      output += `\n[relay] step output exceeded the ${MAX_BUFFER_MB} MB buffer and the process was killed`;
+      output +=
+        r.maxBufferBytes !== undefined
+          ? `\n[relay] step output exceeded the ${Math.round(r.maxBufferBytes / (1024 * 1024))} MB buffer and the process was killed`
+          : `\n[relay] step output exceeded the buffer and the process was killed`;
     }
     return {
       name,
@@ -638,7 +661,7 @@ async function runStep(
     return {
       name,
       status: "failure",
-      output: err instanceof Error ? err.message : String(err),
+      output: capStepOutput(err instanceof Error ? err.message : String(err)),
       durationMs: Date.now() - start,
     };
   }

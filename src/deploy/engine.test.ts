@@ -645,6 +645,166 @@ describe("deploy — default flow", () => {
       expect(buildStep?.status).toBe("failure");
       expect(buildStep?.output).toContain("timed out after 900 s");
     });
+
+    it("omits the duration when a timeout-killed step carries no timeoutMs", async () => {
+      const config: RelayConfig = { ...baseConfig };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return { stdout: "", stderr: "", exitCode: 1, killReason: "timeout" as const };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output).toContain(
+        "[relay] step timed out (raise step_timeout_seconds in .relay.yml)",
+      );
+      expect(buildStep?.output).not.toContain("after");
+    });
+
+    it("forwards { timeoutMs } to post_update runShell when configured", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        post_update: ["make migrate"],
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+
+      await deploy({ appDir: "/app", config });
+
+      const postUpdateCall = mockRunShell.mock.calls.find(([cmd]) => cmd === "make migrate");
+      expect(postUpdateCall?.[2]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("forwards { timeoutMs } to the command-mode command's runShell call", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        command: "./deploy.sh",
+        step_timeout_seconds: 900,
+      };
+
+      await deploy({ appDir: "/app", config });
+
+      const commandCall = mockRunShell.mock.calls.find(([cmd]) => cmd === "./deploy.sh");
+      expect(commandCall?.[2]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("forwards { timeoutMs } to the auto-rollback compose up call", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("node") && args.includes("-e")) {
+          return { stdout: "", stderr: "", exitCode: 1 }; // health fails -> triggers auto-rollback
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+      expect(result.success).toBe(false);
+
+      const rollbackUpCalls = mockRunExec.mock.calls.filter(
+        ([cmd, args]) => cmd === "docker" && args.includes("up"),
+      );
+      expect(rollbackUpCalls.length).toBeGreaterThan(0);
+      expect(rollbackUpCalls.at(-1)?.[3]).toEqual({ timeoutMs: 900_000 });
+    });
+  });
+
+  describe("maxBuffer annotation and stored-output cap", () => {
+    it("annotates a maxbuffer-killed step with the exact figure derived from maxBufferBytes", async () => {
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 1,
+            timeoutMs: 300_000,
+            maxBufferBytes: 16_777_216,
+            killReason: "maxbuffer" as const,
+          };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output).toContain(
+        "[relay] step output exceeded the 16 MB buffer and the process was killed",
+      );
+    });
+
+    it("keeps only the last STEP_OUTPUT_MAX_CHARS characters of an oversized step output, prefixed with a truncation notice", async () => {
+      const prefix = "PREFIX-";
+      const filler = "x".repeat(210_000);
+      const suffix = "-SUFFIX";
+      const hugeStdout = prefix + filler + suffix;
+      const totalLength = hugeStdout.length; // 210015
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return { stdout: hugeStdout, stderr: "", exitCode: 0 };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      const notice = `[relay] output truncated: showing the last 200000 of ${totalLength} characters`;
+      expect(buildStep?.output.startsWith(notice)).toBe(true);
+      expect(buildStep?.output.endsWith(suffix)).toBe(true);
+      expect(buildStep?.output.includes(prefix)).toBe(false);
+      expect(buildStep?.output.length).toBe(notice.length + 1 + 200_000);
+    });
+
+    it("keeps the kill-reason line intact even when the underlying output is truncated", async () => {
+      const hugeStdout = "y".repeat(250_000);
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return {
+            stdout: hugeStdout,
+            stderr: "",
+            exitCode: 1,
+            timeoutMs: 900_000,
+            killReason: "timeout" as const,
+          };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: { ...baseConfig, step_timeout_seconds: 900 } });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.output).toContain("[relay] output truncated: showing the last 200000 of");
+      expect(buildStep?.output.endsWith(
+        "[relay] step timed out after 900 s (raise step_timeout_seconds in .relay.yml)",
+      )).toBe(true);
+    });
   });
 });
 

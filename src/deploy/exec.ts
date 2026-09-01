@@ -5,11 +5,14 @@ import { execFile } from "node:child_process";
  * `ExecOptions.timeoutMs`. */
 export const DEFAULT_STEP_TIMEOUT_MS = 300_000;
 
-/** Default cap on combined stdout/stderr buffering before execFile kills the
- * child process with ERR_CHILD_PROCESS_STDIO_MAXBUFFER. Node's own default
- * is 1 MB, which is too easy for a chatty build to hit; 64 MiB gives real
- * headroom while still bounding memory use. */
-export const DEFAULT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+/** Default cap on stdout/stderr buffering, applied per stream (stdout and
+ * stderr each get their own budget) before execFile kills the child process
+ * with ERR_CHILD_PROCESS_STDIO_MAXBUFFER. Node's own default is 1 MB, which
+ * is too easy for a chatty build to hit; 16 MiB per stream gives real
+ * headroom while still bounding memory use. The combined step output stored
+ * on a DeployStep is capped separately (see STEP_OUTPUT_MAX_CHARS in
+ * engine.ts). */
+export const DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
 export interface ExecOptions {
   timeoutMs?: number;
@@ -27,6 +30,11 @@ export interface ExecResult {
    * fixtures in files outside this task's scope) keep compiling.
    */
   timeoutMs?: number;
+  /**
+   * The effective per-stream maxBuffer, in bytes, used for this call.
+   * Always set by runExec/runShell, same reasoning as timeoutMs above.
+   */
+  maxBufferBytes?: number;
   /** Set when the process was killed by execFile rather than exiting on its
    * own. Absent when the process exited normally (whatever the exit code). */
   killReason?: "timeout" | "maxbuffer";
@@ -59,6 +67,7 @@ export function runExec(
           stderr: stderr?.toString() ?? "",
           exitCode: error?.code !== undefined ? (typeof error.code === "number" ? error.code : 1) : 0,
           timeoutMs,
+          maxBufferBytes,
           ...(killReason ? { killReason } : {}),
         });
       },
