@@ -14,5 +14,10 @@ health: /api/health
 # post_update:
 #   - docker compose exec backend npx prisma migrate deploy
 
+# Optional: per-step exec timeout in seconds, 1-7200 (default: 300). Bounds
+# pre_update, git pull, compose build/up, post_update, command, and rollback
+# build/up.
+# step_timeout_seconds: 600
+
 # Auto-rollback on health check failure (default: true)
 rollback: true

@@ -32,7 +32,7 @@ vi.mock("../config/relay.js", async () => {
   return { ...actual, loadRelayConfig: vi.fn() };
 });
 
-import { deploy } from "./engine.js";
+import { deploy, STEP_OUTPUT_MAX_CHARS } from "./engine.js";
 import { runShell, runExec } from "./exec.js";
 import { loadRelayConfig } from "../config/relay.js";
 import { runPreflightChecks } from "./preflight.js";
@@ -548,6 +548,317 @@ describe("deploy — default flow", () => {
 
     expect(result.success).toBe(false);
     expect(result.steps.find((s) => s.name === "git pull")).toBeUndefined();
+  });
+
+  describe("step_timeout_seconds pass-through", () => {
+    it("forwards { timeoutMs } to compose build, compose up, and pre_update runShell when configured", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        pre_update: ["make db-generate"],
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+
+      await deploy({ appDir: "/app", config });
+
+      const buildCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("build"),
+      );
+      expect(buildCall?.[3]).toEqual({ timeoutMs: 900_000 });
+
+      const upCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("up"),
+      );
+      expect(upCall?.[3]).toEqual({ timeoutMs: 900_000 });
+
+      const preUpdateCall = mockRunShell.mock.calls.find(
+        ([cmd]) => cmd === "make db-generate",
+      );
+      expect(preUpdateCall?.[2]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("passes {} (no timeout override) at those same call sites when step_timeout_seconds is absent", async () => {
+      const config: RelayConfig = { ...baseConfig, pre_update: ["make db-generate"] };
+      mockLoadRelayConfig.mockResolvedValue(config);
+
+      await deploy({ appDir: "/app", config });
+
+      const buildCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("build"),
+      );
+      expect(buildCall?.[3]).toEqual({});
+
+      const preUpdateCall = mockRunShell.mock.calls.find(
+        ([cmd]) => cmd === "make db-generate",
+      );
+      expect(preUpdateCall?.[2]).toEqual({});
+    });
+
+    it("forwards { timeoutMs } to the auto-rollback compose build call", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("node") && args.includes("-e")) {
+          return { stdout: "", stderr: "", exitCode: 1 }; // health fails -> triggers auto-rollback
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+      expect(result.success).toBe(false);
+
+      const rollbackBuildCalls = mockRunExec.mock.calls.filter(
+        ([cmd, args]) => cmd === "docker" && args.includes("build"),
+      );
+      expect(rollbackBuildCalls.length).toBeGreaterThan(0);
+      expect(rollbackBuildCalls.at(-1)?.[3]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("annotates a timeout-killed step's output and keeps status failure", async () => {
+      const config: RelayConfig = { ...baseConfig, step_timeout_seconds: 900 };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 1,
+            timeoutMs: 900_000,
+            killReason: "timeout" as const,
+          };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output).toContain("timed out after 900 s");
+    });
+
+    it("omits the duration when a timeout-killed step carries no timeoutMs", async () => {
+      const config: RelayConfig = { ...baseConfig };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return { stdout: "", stderr: "", exitCode: 1, killReason: "timeout" as const };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output).toContain(
+        "[relay] step timed out (raise step_timeout_seconds in .relay.yml)",
+      );
+      expect(buildStep?.output).not.toContain("after");
+    });
+
+    it("forwards { timeoutMs } to post_update runShell when configured", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        post_update: ["make migrate"],
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+
+      await deploy({ appDir: "/app", config });
+
+      const postUpdateCall = mockRunShell.mock.calls.find(([cmd]) => cmd === "make migrate");
+      expect(postUpdateCall?.[2]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("forwards { timeoutMs } to the command-mode command's runShell call", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        command: "./deploy.sh",
+        step_timeout_seconds: 900,
+      };
+
+      await deploy({ appDir: "/app", config });
+
+      const commandCall = mockRunShell.mock.calls.find(([cmd]) => cmd === "./deploy.sh");
+      expect(commandCall?.[2]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("forwards { timeoutMs } to the auto-rollback compose up call", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("node") && args.includes("-e")) {
+          return { stdout: "", stderr: "", exitCode: 1 }; // health fails -> triggers auto-rollback
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+      expect(result.success).toBe(false);
+
+      const rollbackUpCalls = mockRunExec.mock.calls.filter(
+        ([cmd, args]) => cmd === "docker" && args.includes("up"),
+      );
+      expect(rollbackUpCalls.length).toBeGreaterThan(0);
+      expect(rollbackUpCalls.at(-1)?.[3]).toEqual({ timeoutMs: 900_000 });
+    });
+  });
+
+  describe("maxBuffer annotation and stored-output cap", () => {
+    it("annotates a maxbuffer-killed step with the exact figure derived from maxBufferBytes", async () => {
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 1,
+            timeoutMs: 300_000,
+            maxBufferBytes: 16_777_216,
+            killReason: "maxbuffer" as const,
+          };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output).toContain(
+        "[relay] step output exceeded the 16 MiB buffer and the process was killed",
+      );
+    });
+
+    it("keeps only the last STEP_OUTPUT_MAX_CHARS characters of an oversized step output, prefixed with a truncation notice", async () => {
+      const prefix = "PREFIX-";
+      const filler = "x".repeat(210_000);
+      const suffix = "-SUFFIX";
+      const hugeStdout = prefix + filler + suffix;
+      const totalLength = hugeStdout.length; // 210015
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return { stdout: hugeStdout, stderr: "", exitCode: 0 };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      const notice = `[relay] output truncated: showing the last 200000 of ${totalLength} characters`;
+      expect(buildStep?.output.startsWith(notice)).toBe(true);
+      expect(buildStep?.output.endsWith(suffix)).toBe(true);
+      expect(buildStep?.output.includes(prefix)).toBe(false);
+      expect(buildStep?.output.length).toBe(notice.length + 1 + 200_000);
+    });
+
+    it("keeps the kill-reason line intact even when the underlying output is truncated", async () => {
+      const hugeStdout = "y".repeat(250_000);
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return {
+            stdout: hugeStdout,
+            stderr: "",
+            exitCode: 1,
+            timeoutMs: 900_000,
+            killReason: "timeout" as const,
+          };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: { ...baseConfig, step_timeout_seconds: 900 } });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      const killLine = "[relay] step timed out after 900 s (raise step_timeout_seconds in .relay.yml)";
+      const notice = `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${hugeStdout.length} characters`;
+      expect(buildStep?.output).toContain("[relay] output truncated: showing the last 200000 of");
+      expect(buildStep?.output.endsWith(killLine)).toBe(true);
+      // Pins that the cap is applied to the raw stdout+stderr BEFORE the
+      // kill-reason line is appended (not after): the exact total length
+      // below only holds when `total` in the notice reflects the
+      // pre-truncation combined output length WITHOUT the kill-reason
+      // line. A mutant that appends the kill line first, then caps the
+      // combined string, changes both the notice's `total` figure and the
+      // overall length, so this assertion catches it.
+      expect(buildStep?.output.length).toBe(
+        notice.length + 1 + STEP_OUTPUT_MAX_CHARS + 1 + killLine.length,
+      );
+    });
+
+    it("routes a rejected exec call's Error message through the same truncation cap", async () => {
+      const hugeMessage = "z".repeat(STEP_OUTPUT_MAX_CHARS + 50_000);
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          throw new Error(hugeMessage);
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      const expectedNotice = `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${hugeMessage.length} characters`;
+      const expectedTail = hugeMessage.slice(-STEP_OUTPUT_MAX_CHARS);
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output.startsWith(expectedNotice)).toBe(true);
+      expect(buildStep?.output).toBe(`${expectedNotice}\n${expectedTail}`);
+    });
+
+    it("returns output of exactly STEP_OUTPUT_MAX_CHARS characters verbatim, with no truncation notice", async () => {
+      const exactStdout = "a".repeat(STEP_OUTPUT_MAX_CHARS);
+
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return { stdout: exactStdout, stderr: "", exitCode: 0 };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.output).toBe(exactStdout);
+      expect(buildStep?.output).not.toContain("[relay] output truncated");
+      expect(buildStep?.output.length).toBe(STEP_OUTPUT_MAX_CHARS);
+    });
   });
 });
 

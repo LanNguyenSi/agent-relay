@@ -113,6 +113,93 @@ command: ./deploy.sh --production
     expect(config.command).toBe("./deploy.sh --production");
   });
 
+  describe("step_timeout_seconds", () => {
+    it("is undefined when absent", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+`);
+      expect(config.step_timeout_seconds).toBeUndefined();
+    });
+
+    it("accepts a valid integer value", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 600
+`);
+      expect(config.step_timeout_seconds).toBe(600);
+    });
+
+    it("rejects 0", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 0
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+
+    it("rejects a negative value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: -5
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+
+    it("rejects a float value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 1.5
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+
+    it("rejects a string value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: "600"
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+
+    it("accepts the lower boundary value 1", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 1
+`);
+      expect(config.step_timeout_seconds).toBe(1);
+    });
+
+    it("accepts the upper boundary value 7200", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 7200
+`);
+      expect(config.step_timeout_seconds).toBe(7200);
+    });
+
+    it("rejects 7201, one past the upper boundary", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 7201
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+  });
+
   describe("compose_file shell-injection hardening", () => {
     const validValues = [
       "docker-compose.yml",
