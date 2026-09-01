@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Runtime image ships the docker buildx plugin** (`docker-cli-buildx`, about 90 MB of image size). Compose v5 in the `node:22-alpine` image found no buildx plugin, printed "Docker Compose requires buildx plugin to be installed" and fell back to the legacy builder, which cannot reuse the BuildKit layer cache. App builds that completed in under a minute with cache rebuilt from scratch and hit the 300 s `runExec` step timeout, failing the deploy before `git pull`. CI now asserts the plugin is present in the built image. Existing relays must be recreated from the republished `:latest` image to pick this up (PR #77).
+
 ## [0.4.0] - 2026-06-16
 
 **Minor release: two installer features plus a HIGH-severity security and hardening sweep.** New: a non-root install path and a `TRAEFIK_CA` override for alternative TLS providers. Security: @grpc/grpc-js 1.14.4 closes CVE-2026-48068/48069 (HIGH), esbuild 0.28.1 closes GHSA-gv7w-rqvm-qjhr (HIGH), plus symlink and prefix-escape hardening in the deploy engine.
