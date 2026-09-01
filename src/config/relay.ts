@@ -46,6 +46,12 @@ export const relayConfigSchema = z.object({
   pre_update: z.array(z.string()).default([]),
   post_update: z.array(z.string()).default([]),
   rollback: z.boolean().default(true),
+  step_timeout_seconds: z
+    .number({ invalid_type_error: "step_timeout_seconds must be a number" })
+    .int("step_timeout_seconds must be an integer")
+    .min(1, "step_timeout_seconds must be at least 1")
+    .max(7200, "step_timeout_seconds must be at most 7200")
+    .optional(),
 });
 
 export type RelayConfig = z.infer<typeof relayConfigSchema>;

@@ -549,6 +549,103 @@ describe("deploy — default flow", () => {
     expect(result.success).toBe(false);
     expect(result.steps.find((s) => s.name === "git pull")).toBeUndefined();
   });
+
+  describe("step_timeout_seconds pass-through", () => {
+    it("forwards { timeoutMs } to compose build, compose up, and pre_update runShell when configured", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        pre_update: ["make db-generate"],
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+
+      await deploy({ appDir: "/app", config });
+
+      const buildCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("build"),
+      );
+      expect(buildCall?.[3]).toEqual({ timeoutMs: 900_000 });
+
+      const upCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("up"),
+      );
+      expect(upCall?.[3]).toEqual({ timeoutMs: 900_000 });
+
+      const preUpdateCall = mockRunShell.mock.calls.find(
+        ([cmd]) => cmd === "make db-generate",
+      );
+      expect(preUpdateCall?.[2]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("passes {} (no timeout override) at those same call sites when step_timeout_seconds is absent", async () => {
+      const config: RelayConfig = { ...baseConfig, pre_update: ["make db-generate"] };
+      mockLoadRelayConfig.mockResolvedValue(config);
+
+      await deploy({ appDir: "/app", config });
+
+      const buildCall = mockRunExec.mock.calls.find(
+        ([cmd, args]) => cmd === "docker" && args.includes("build"),
+      );
+      expect(buildCall?.[3]).toEqual({});
+
+      const preUpdateCall = mockRunShell.mock.calls.find(
+        ([cmd]) => cmd === "make db-generate",
+      );
+      expect(preUpdateCall?.[2]).toEqual({});
+    });
+
+    it("forwards { timeoutMs } to the auto-rollback compose build call", async () => {
+      const config: RelayConfig = {
+        ...baseConfig,
+        step_timeout_seconds: 900,
+      };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("node") && args.includes("-e")) {
+          return { stdout: "", stderr: "", exitCode: 1 }; // health fails -> triggers auto-rollback
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+      expect(result.success).toBe(false);
+
+      const rollbackBuildCalls = mockRunExec.mock.calls.filter(
+        ([cmd, args]) => cmd === "docker" && args.includes("build"),
+      );
+      expect(rollbackBuildCalls.length).toBeGreaterThan(0);
+      expect(rollbackBuildCalls.at(-1)?.[3]).toEqual({ timeoutMs: 900_000 });
+    });
+
+    it("annotates a timeout-killed step's output and keeps status failure", async () => {
+      const config: RelayConfig = { ...baseConfig, step_timeout_seconds: 900 };
+      mockLoadRelayConfig.mockResolvedValue(config);
+      mockRunExec.mockImplementation(async (command, args) => {
+        if (command === "git" && args.includes("rev-parse")) {
+          return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+        }
+        if (command === "docker" && args.includes("build")) {
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 1,
+            timeoutMs: 900_000,
+            killReason: "timeout" as const,
+          };
+        }
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      });
+
+      const result = await deploy({ appDir: "/app", config });
+
+      const buildStep = result.steps.find((s) => s.name === "compose build");
+      expect(buildStep?.status).toBe("failure");
+      expect(buildStep?.output).toContain("timed out after 900 s");
+    });
+  });
 });
 
 // Task 1074feb5: the auto-rollback path (rollbackIfEnabled) used to run

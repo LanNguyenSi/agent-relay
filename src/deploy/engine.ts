@@ -1,6 +1,27 @@
 import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "./preflight.js";
-import { runExec, runShell } from "./exec.js";
+import { runExec, runShell, type ExecOptions } from "./exec.js";
+
+// The MB figure named in a step's maxbuffer-kill annotation (see runStep
+// below). No `.relay.yml` field overrides the buffer cap today, so this
+// mirrors exec.ts's DEFAULT_MAX_BUFFER_BYTES (64 * 1024 * 1024) expressed in
+// MB rather than bytes. Kept as a literal rather than an import so mocking
+// "./exec.js" in a test (vi.mock replaces the whole module) doesn't also
+// have to stub this constant.
+const MAX_BUFFER_MB = 64;
+
+/**
+ * Builds the ExecOptions for a long-running deploy step (git pull, compose
+ * build/up, pre_update/post_update/command hooks) from the operator's
+ * `.relay.yml`. `step_timeout_seconds` overrides exec.ts's own default step
+ * timeout; when the field is absent, exec.ts's default (300s) applies
+ * unchanged.
+ */
+export function stepExecOptions(config: RelayConfig): ExecOptions {
+  return config.step_timeout_seconds
+    ? { timeoutMs: config.step_timeout_seconds * 1000 }
+    : {};
+}
 
 export interface DeployStep {
   name: string;
@@ -139,7 +160,7 @@ async function defaultFlowDeploy(
   // runShell: pre_update values are operator-supplied shell commands in .relay.yml
   // (trust boundary — see runShell JSDoc in exec.ts).
   for (const cmd of prePullConfig.pre_update) {
-    const step = await runStep(`pre_update: ${cmd}`, () => runShell(cmd, appDir));
+    const step = await runStep(`pre_update: ${cmd}`, () => runShell(cmd, appDir, stepExecOptions(prePullConfig)));
     emit(step);
     if (step.status === "failure") {
       return result(false, commitBefore, commitBefore, steps, start);
@@ -148,7 +169,7 @@ async function defaultFlowDeploy(
 
   // Git pull
   const pullStep = await runStep("git pull", () =>
-    runExec("git", ["pull", "origin", branch], appDir),
+    runExec("git", ["pull", "origin", branch], appDir, stepExecOptions(prePullConfig)),
   );
   emit(pullStep);
   if (pullStep.status === "failure") {
@@ -221,7 +242,7 @@ async function defaultFlowDeploy(
 
   // Docker compose build
   const buildStep = await runStep("compose build", () =>
-    runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir, stepExecOptions(config)),
   );
   emit(buildStep);
   if (buildStep.status === "failure") {
@@ -231,7 +252,7 @@ async function defaultFlowDeploy(
 
   // Docker compose up
   const upStep = await runStep("compose up", () =>
-    runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir, stepExecOptions(config)),
   );
   emit(upStep);
   if (upStep.status === "failure") {
@@ -243,7 +264,7 @@ async function defaultFlowDeploy(
   // runShell: post_update values are operator-supplied shell commands in .relay.yml
   // (trust boundary — see runShell JSDoc in exec.ts).
   for (const cmd of config.post_update) {
-    const step = await runStep(`post_update: ${cmd}`, () => runShell(cmd, appDir));
+    const step = await runStep(`post_update: ${cmd}`, () => runShell(cmd, appDir, stepExecOptions(config)));
     emit(step);
     if (step.status === "failure") {
       await rollbackIfEnabled(prePullConfig, appDir, commitBefore, steps, onStep);
@@ -307,7 +328,7 @@ async function customCommandDeploy(
   // runShell: command is an operator-supplied shell command in .relay.yml
   // (trust boundary — see runShell JSDoc in exec.ts).
   const cmdStep = await runStep(`command: ${preCommandConfig.command}`, () =>
-    runShell(preCommandConfig.command!, appDir),
+    runShell(preCommandConfig.command!, appDir, stepExecOptions(preCommandConfig)),
   );
   steps.push(cmdStep);
   onStep?.(cmdStep);
@@ -576,28 +597,41 @@ async function rollbackIfEnabled(
   if (!preflight.passed) return;
 
   const rebuildStep = await runStep("rollback: compose build", () =>
-    runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "build"], appDir, stepExecOptions(config)),
   );
   emit(rebuildStep);
   if (rebuildStep.status === "failure") return;
 
   const restartStep = await runStep("rollback: compose up", () =>
-    runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir),
+    runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir, stepExecOptions(config)),
   );
   emit(restartStep);
 }
 
 async function runStep(
   name: string,
-  fn: () => Promise<{ stdout: string; stderr: string; exitCode: number }>,
+  fn: () => Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    timeoutMs?: number;
+    killReason?: "timeout" | "maxbuffer";
+  }>,
 ): Promise<DeployStep> {
   const start = Date.now();
   try {
     const r = await fn();
+    let output = (r.stdout + "\n" + r.stderr).trim();
+    if (r.killReason === "timeout") {
+      const seconds = Math.round((r.timeoutMs ?? 0) / 1000);
+      output += `\n[relay] step timed out after ${seconds} s (raise step_timeout_seconds in .relay.yml)`;
+    } else if (r.killReason === "maxbuffer") {
+      output += `\n[relay] step output exceeded the ${MAX_BUFFER_MB} MB buffer and the process was killed`;
+    }
     return {
       name,
       status: r.exitCode === 0 ? "success" : "failure",
-      output: (r.stdout + "\n" + r.stderr).trim(),
+      output,
       durationMs: Date.now() - start,
     };
   } catch (err) {

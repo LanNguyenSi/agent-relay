@@ -113,6 +113,65 @@ command: ./deploy.sh --production
     expect(config.command).toBe("./deploy.sh --production");
   });
 
+  describe("step_timeout_seconds", () => {
+    it("is undefined when absent", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+`);
+      expect(config.step_timeout_seconds).toBeUndefined();
+    });
+
+    it("accepts a valid integer value", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 600
+`);
+      expect(config.step_timeout_seconds).toBe(600);
+    });
+
+    it("rejects 0", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 0
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+
+    it("rejects a negative value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: -5
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+
+    it("rejects a float value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 1.5
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+
+    it("rejects a string value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: "600"
+`),
+      ).toThrow(/step_timeout_seconds/);
+    });
+  });
+
   describe("compose_file shell-injection hardening", () => {
     const validValues = [
       "docker-compose.yml",

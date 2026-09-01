@@ -470,6 +470,18 @@ describe("rollbackApp — preflight gate", () => {
     expect(upCall).toBeDefined();
   });
 
+  it("forwards { timeoutMs } (derived from step_timeout_seconds) to the compose build and up calls", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+    mockLoadRelayConfig.mockResolvedValue({ ...fakeConfig, step_timeout_seconds: 900 });
+
+    await rollbackApp("myapp");
+
+    const buildCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("build"));
+    expect(buildCall?.[3]).toEqual({ timeoutMs: 900_000 });
+    const upCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("up"));
+    expect(upCall?.[3]).toEqual({ timeoutMs: 900_000 });
+  });
+
   it("runs preflight with phase: 'all', force: true, only: the two critical rollback checks against the app dir before gating", async () => {
     mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
 

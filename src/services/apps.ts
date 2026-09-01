@@ -2,7 +2,7 @@ import { resolve, sep, dirname, basename, isAbsolute } from "node:path";
 import { readdir, stat, lstat, readlink, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
-import { deploy } from "../deploy/engine.js";
+import { deploy, stepExecOptions } from "../deploy/engine.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
 
@@ -386,10 +386,10 @@ export async function rollbackApp(
     return { success: false, blocked: true, preflight, commitBefore, commitAfter };
   }
 
-  const build = await runExec("docker", ["compose", "-f", config.compose_file, "build"], dir);
+  const build = await runExec("docker", ["compose", "-f", config.compose_file, "build"], dir, stepExecOptions(config));
   if (build.exitCode !== 0) throw new Error("Rebuild failed: " + build.stderr);
 
-  const up = await runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], dir);
+  const up = await runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], dir, stepExecOptions(config));
   if (up.exitCode !== 0) throw new Error("Restart failed: " + up.stderr);
 
   const commitAfter = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
