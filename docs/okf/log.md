@@ -2,6 +2,54 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-09-01T06:41:00Z, task dd3cd90d re-anchor pass: re-verified all six
+  content docs against sources at this repo's head (`b7a0f93`). Re-pointed
+  `deploy-phase-model.md`'s three citations-resolve failures the
+  step-timeout PR left stale (the entry below deliberately scoped them
+  out): the `config.rollback` read (previously engine.ts line 408, now
+  blank) resolves at `engine.ts:557`; the auto-rollback
+  `runPreflightChecks({ phase: "all", force: true, only:
+  ROLLBACK_CRITICAL_CHECKS })` call in `rollbackIfEnabled` (previously
+  engine.ts lines 458-464) resolves at `engine.ts:569-575`; and the
+  `only`-gated `tasks` array build in `runPreflightChecks` (previously
+  preflight.ts lines 81-94, one line short of the array's actual start)
+  resolves at `preflight.ts:82-94`. Also re-pointed two `engine.test.ts`
+  citations in the same doc that had drifted without tripping
+  citations-resolve (their old lines happened not to be blank, just
+  content-wrong on re-verification against the test file): "rollback
+  boolean honors pre-pull config, not post-pull" resolves at
+  `engine.test.ts:446`; "rolls back using pre-pull compose_file when
+  reload fails" resolves at `engine.test.ts:417-444`, its rationale
+  comment now given as the full citation `engine.test.ts:433-435`
+  (previously a bare line-range with no repeated filename, which risked
+  being parsed as a continuation of the wrong prior citation). Re-pointed
+  `path-containment-idiom.md`'s `safeAppDir` citations, flagged as a
+  follow-up by the entry below: the function itself resolves at
+  `apps.ts:144-222`; its lexical idiom check resolves at `apps.ts:151`;
+  its post-realpath idiom re-check resolves at `apps.ts:218-220`; noted in
+  prose that `safeAppDir` now routes the not-yet-deployed case through an
+  intermediate dangling-symlink-chain fallback before reaching that
+  re-check, without changing the two-idiom-application shape this doc
+  describes. Also re-pointed the same doc's
+  `checkComposeBindMountSourcesExist` span to `preflight.ts:402-531` (the
+  function grew by eleven lines); its `assertComposeFileContained`
+  citations in `relay.ts` were re-verified and needed no change.
+  `apps-dir-contract.md`, `deploy-failure-surfaces.md`,
+  `exec-trust-boundary.md`, and `health-check-reality.md` were
+  re-verified claim by claim against their current sources (every cited
+  span still contains the code the sentence describes) and needed no
+  citation changes, only the timestamp bump below. Bumped all six docs'
+  `timestamp` to `2026-09-01T06:41:00Z` (past every cited source's own
+  last commit at this repo's head) to clear the `sources-fresh` warnings
+  the CI job had flagged for `apps-dir-contract.md`,
+  `deploy-failure-surfaces.md`, and `health-check-reality.md`, plus the
+  further staleness this pass's own baseline check surfaced for
+  `deploy-phase-model.md`, `exec-trust-boundary.md`, and
+  `path-containment-idiom.md`. Ran `okf-kit@0.3.1 check --json docs/okf`:
+  17 `sources-fresh` warnings / 0 errors before this pass, 0 warnings / 0
+  errors after. Ran `okf-kit@0.8.0 check --json docs/okf`: 9 warnings (6
+  `sources-fresh`, 3 `citations-resolve` blank-start-line) / 0 errors
+  before, 0 warnings / 0 errors after.
 - 2026-09-01T06:10:00Z, task 6dfb5708 review-round-2 fix pass: re-pointed
   `exec-trust-boundary.md`'s three citations that the entry below left
   stale: `runHealthCheck`'s old span now resolves at `engine.ts:384-460`,
