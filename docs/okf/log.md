@@ -2,6 +2,24 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-09-01T05:20:00Z, task 6dfb5708 doc pass: re-anchored citations in
+  `exec-trust-boundary.md`, `deploy-phase-model.md`, and
+  `path-containment-idiom.md` that shifted because of commit `1f58a19`
+  (configurable `step_timeout_seconds` and an explicit `maxBuffer` in
+  `runExec`/`runShell`, `stepExecOptions` in `engine.ts`). Also updated
+  `exec-trust-boundary.md`'s prose for `runExec`/`runShell`'s new optional
+  `opts` parameter. Left two pre-existing baseline citation mismatches in
+  `deploy-phase-model.md` untouched — `engine.ts:408` (actually the
+  `rollback: boolean` read lives further down, at what is now line 563) and
+  `engine.ts:458-464` (now `captureContainerLogsTail`'s body, not
+  `rollbackIfEnabled`'s call site) — both already stale before `1f58a19`
+  from unrelated later commits, out of this task's scope; also left
+  `exec-trust-boundary.md`'s `engine.ts:356-400`/`383-387`/`381` citations
+  (the `runHealthCheck` section) untouched for the same reason, the actual
+  content having moved to roughly lines 390-434/413-417/405 respectively at
+  origin/main before this commit. Ran `okf-kit@0.3.1 check --json docs/okf`
+  against this branch and against a clean `origin/main` checkout; no new
+  finding was introduced by this branch (see task report for the diff).
 - 2026-08-18T17:55:00Z, task 1074feb5 fix-round (MED-1/LOW-8): updated
   `deploy-failure-surfaces.md` — `rollbackApp` now returns the same
   `blocked`-style outcome as a deploy (`RollbackBlockedResult`, HTTP

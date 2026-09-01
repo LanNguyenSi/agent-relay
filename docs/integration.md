@@ -19,6 +19,7 @@ pre_update:                         # commands to run before deploy
 post_update:                        # commands to run after deploy
   - docker compose exec backend npx prisma migrate deploy
 rollback: true                      # auto-rollback on health check failure (default: true)
+# step_timeout_seconds: 600          # per-step exec timeout override (default: 300)
 ```
 
 | Field | Type | Required | Default | Description |
@@ -31,6 +32,7 @@ rollback: true                      # auto-rollback on health check failure (def
 | `post_update` | `string[]` | No | `[]` | Commands to run after compose up. **Arbitrary shell.** |
 | `health_port` | `number` | No | -- | Port for health check requests (if different from Traefik-routed port) |
 | `rollback` | `boolean` | No | `true` | Auto-rollback to previous commit on failure |
+| `step_timeout_seconds` | `integer` | No | `300` | Per-step exec timeout, in seconds (1-7200). Applies to `pre_update`, `git pull`, `compose build`/`up`, `post_update`, `command`, and rollback `compose build`/`up`. A step killed by this timeout, or by the fixed 64 MB combined stdout/stderr buffer cap, carries a `[relay] ...` reason line appended to its output. |
 
 The shell-exec fields (`command`, `pre_update`, `post_update`) cross a real trust boundary: see [docs/security.md](security.md).
 
@@ -106,7 +108,7 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing |
 | `force` (body) | `boolean` | `false` | Skip non-critical preflight checks |
 
-Response: deploy result with step-by-step output, commit before/after, and duration. With `stream=true`, response is `text/event-stream` with one event per step.
+Response: deploy result with step-by-step output, commit before/after, and duration. With `stream=true`, response is `text/event-stream` with one event per step. A step killed by `step_timeout_seconds` or the 64 MB stdout/stderr buffer cap has a `[relay] ...` line appended to its output naming the reason, instead of leaving a bare non-zero exit and truncated output to interpret.
 
 ### `POST /api/apps/:name/rollback`
 

@@ -3,7 +3,7 @@ type: invariant
 title: Path containment idiom — resolve + startsWith(root + sep), with symlink-aware re-verification
 description: Three containment checks (safeAppDir, assertComposeFileContained, checkComposeBindMountSourcesExist) all use resolve()+startsWith(root+sep), never bare startsWith(root), to avoid a sibling-prefix false positive. safeAppDir and assertComposeFileContained re-verify both sides after realpath(); checkComposeBindMountSourcesExist re-verifies only APPS_DIR itself via realpath() (ENOENT fallback) so it compares like with like against the already-real appDir, while the candidate source path stays lexical before stat(). The source-side realpath question remains documented as open.
 tags: [security, path-traversal, symlink, containment, preflight]
-timestamp: 2026-07-16T05:52:00Z
+timestamp: 2026-09-01T05:20:00Z
 sources:
   - src/services/apps.ts
   - src/config/relay.ts
@@ -24,7 +24,7 @@ The `+ sep` is load-bearing. A bare `startsWith(root)` accepts a sibling directo
 ## The three sites
 
 1. **`safeAppDir`** (`src/services/apps.ts:28-47`). Validates an app name against `APP_NAME` regex, resolves it under `env.APPS_DIR`, applies the idiom (`:35`), then calls `realpath()` on both the candidate and `APPS_DIR` and re-applies the **same** idiom against the resolved real paths (`:41-44`) — "a symlink to a sibling-prefixed directory (e.g. `/apps/x -> /appsteak`) cannot escape" per its own comment.
-2. **`assertComposeFileContained`** (`src/config/relay.ts:89-125`). Resolves `compose_file` against `appDir`, applies the idiom lexically first (`:99`, "catches `..` escapes and works before the compose file exists on disk"), then — if the resolved path exists (ENOENT is treated as "not on disk yet, presence is preflight's job" and short-circuits, `:113-117`) — calls `realpath()` on both sides and re-applies the idiom again (`:118-119`), specifically to catch "a symlink inside the app directory [that] can stay lexically contained while pointing outside APPS_DIR" (`:105-107`).
+2. **`assertComposeFileContained`** (`src/config/relay.ts:95-131`). Resolves `compose_file` against `appDir`, applies the idiom lexically first (`:105`, "catches `..` escapes and works before the compose file exists on disk"), then — if the resolved path exists (ENOENT is treated as "not on disk yet, presence is preflight's job" and short-circuits, `:119-123`) — calls `realpath()` on both sides and re-applies the idiom again (`:124-125`), specifically to catch "a symlink inside the app directory [that] can stay lexically contained while pointing outside APPS_DIR" (`:111-113`).
 3. **`checkComposeBindMountSourcesExist`** (`src/deploy/preflight.ts:402-520`). Parses the compose file's bind-mount sources. Since `appDir` is already realpath-ed (from `safeAppDir()`), it resolves `APPS_DIR` with `realpath()` once (with ENOENT fallback to lexical), then applies the idiom against this resolved `APPS_DIR` for both absolute and relative sources. This avoids a lexical-vs-realpath mismatch when `APPS_DIR` itself contains a symlink (e.g., `/apps -> /private/apps` on macOS).
 
 ## Open questions
