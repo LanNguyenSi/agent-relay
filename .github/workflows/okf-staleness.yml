@@ -10,9 +10,6 @@ name: OKF staleness
 # non-blocking. Canonical pattern for the five OKF bundle repos
 # (see the okf-kit initiative memory for the current list):
 # keep them in sync.
-# The okf-kit pin below can lead the other bundle repos' pins for a while:
-# treat a mismatch as expected until a fleet-wide sweep brings every repo
-# back onto the same pinned version, not as drift to fix here.
 
 on:
   pull_request:
@@ -50,7 +47,7 @@ jobs:
         # (exit 0, no output). The output assertion below exists to catch
         # any regression of that failure mode: never assert on exit code
         # alone here.
-        run: npm install -g okf-kit@0.8.0
+        run: npm install -g okf-kit@0.9.0
 
       - name: Assert CLI is alive (output, not exit code)
         shell: bash
