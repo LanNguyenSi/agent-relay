@@ -2,6 +2,13 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-09-02T05:04:08Z, task `44ee799a` fleet pin sweep: the okf-staleness
+  workflow pin moved from okf-kit@0.8.0 to 0.9.0 for parity with the other
+  bundle repos, and the header note that treated a pin mismatch as expected
+  went with the mismatch. Measured on the committed tree before and after:
+  `okf-kit check --json docs/okf` reports 0 errors, 0 warnings, 0 notices
+  at 0.8.0 and at 0.9.0, so no doc needed a re-point or a re-stamp.
+
 - 2026-09-01T06:56:00Z, task dd3cd90d review round 2 fix pass: reviewer
   hand-audited all 70 citation tokens across the six content docs (not just
   `citations-resolve`'s blank/non-blank check) and found four citations in
