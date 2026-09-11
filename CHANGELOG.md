@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **js-yaml, hono, vitest/@vitest/mocker lockfile bumps** (CVE sweep 2026-09-11). js-yaml 4.3.1 -> 4.3.2 closes GHSA-2883-xcg3-v3hh (HIGH). hono 4.13.0 -> 4.13.7 closes GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc, GHSA-crvj-82cr-hjcx (moderate). vitest/@vitest/mocker/@vitest/coverage-v8 4.1.9 -> 4.1.11 closes GHSA-82fw-gwwq-j7x9 (moderate, dev dependency).
+
 ### Added
 
 - **Configurable per-step exec timeout, an explicit 16 MiB per-stream `maxBuffer`, and a stored-output cap** (task 6dfb5708). `.relay.yml` gains an optional `step_timeout_seconds` (1-7200) that overrides the deploy engine's per-step timeout for `pre_update`, `git pull`, `compose build`/`up`, `post_update`, `command`, and rollback `compose build`/`up`; the default timeout is unchanged (300 s) when the field is absent. Separately, `runExec`'s stdout/stderr buffer cap is now explicit at 16 MiB per stream instead of relying on Node's own 1 MB default, after a deploy build hit the 300 s cap without enough diagnostic signal in the truncated output. A step killed by either limit now appends a `[relay] ...` line to its output naming the reason (timeout or buffer overrun) instead of leaving a bare non-zero exit for the operator to interpret. A step's stored output (what the deploy API's JSON response, the SSE stream, and the MCP `relay_deploy` result all carry) is separately capped at 200,000 characters, keeping the last 200,000 with a truncation notice, since the per-stream buffer cap alone does not bound the combined stdout+stderr text kept on a `DeployStep`.
