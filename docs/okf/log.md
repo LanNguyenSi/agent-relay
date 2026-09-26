@@ -2,16 +2,13 @@
 
 <!-- Add new entries at the top, newest first. -->
 
-- 2026-09-26T04:51:10Z, README restructure per the shared README standard
-  (docs pass, fix round): the deploy lifecycle section (numbered flow plus
+- 2026-09-26T04:51:10Z, README restructure: the deploy lifecycle section (numbered flow plus
   the `mermaid` diagram) moved from `README.md` to a new `## Deploy
   lifecycle` section in `docs/operations.md`, with `README.md` keeping
   only a one-line pointer to it. Re-verified against `src/deploy/engine.ts`
   (unchanged) and re-pointed `health-check-reality.md`'s citation
-  (`sources`: `README.md` -> `docs/operations.md`); the body sentence
-  naming the section ("`README.md`'s deploy-lifecycle section describes
-  exactly this behavior") had been left unchanged after the move in an
-  earlier pass and is now retargeted to `docs/operations.md`. Also updated
+  (`sources`: `README.md` -> `docs/operations.md`), including the body
+  sentence naming that section. Also updated
   `index.md`'s one-line pointer and `docs/operations.md`'s own intro line
   to name the new Deploy lifecycle section. Re-stamped
   `health-check-reality.md` (content changed) and `apps-dir-contract.md`
