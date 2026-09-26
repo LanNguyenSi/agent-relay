@@ -8,12 +8,14 @@ description: >-
   documented divergence — a fully tested but never-imported
   exponential-backoff module in src/deploy/health.ts — was resolved on
   2026-08-10 by operator decision, deleting health.ts and its test as dead
-  code; README.md now describes the wired behavior.
+  code. The behavior is now described in docs/operations.md's Deploy
+  lifecycle section (moved there from README.md 2026-09-26; README.md keeps
+  only a one-line pointer).
 tags: [health-check, dead-code, docs-drift, deploy]
-timestamp: 2026-09-01T06:41:00Z
+timestamp: 2026-09-26T04:51:10Z
 sources:
   - src/deploy/engine.ts
-  - README.md
+  - docs/operations.md
 ---
 
 # Health check reality — the wired inline check (divergence resolved)
@@ -35,7 +37,7 @@ sources:
   exhausting every service/port combination `maxRetries` times, it reports
   failure.
 
-`README.md`'s deploy-lifecycle section describes exactly this behavior.
+`docs/operations.md`'s Deploy lifecycle section describes exactly this behavior.
 
 ## Resolved divergence (history)
 

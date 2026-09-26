@@ -2,6 +2,26 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-09-26T04:51:10Z, README restructure: the deploy lifecycle section (numbered flow plus
+  the `mermaid` diagram) moved from `README.md` to a new `## Deploy
+  lifecycle` section in `docs/operations.md`, with `README.md` keeping
+  only a one-line pointer to it. Re-verified against `src/deploy/engine.ts`
+  (unchanged) and re-pointed `health-check-reality.md`'s citation
+  (`sources`: `README.md` -> `docs/operations.md`), including the body
+  sentence naming that section. Also updated
+  `index.md`'s one-line pointer and `docs/operations.md`'s own intro line
+  to name the new Deploy lifecycle section. Re-stamped
+  `health-check-reality.md` (content changed) and `apps-dir-contract.md`
+  (the other bundle doc naming the touched source `docs/operations.md`;
+  its citations -- `../operations.md#apps_dir-hostcontainer-contract` and
+  `install.sh:573-621` -- resolve to unchanged content since neither the
+  anchor nor the `install.sh` lines moved, but the source-freshness check
+  compares timestamps, not content, so it still needed re-stamping to
+  clear against the newly touched `docs/operations.md`).
+  `okf-kit check docs/okf` reports no new finding introduced by this
+  change (a pre-existing warning on `deploy-failure-surfaces.md` against
+  `CHANGELOG.md` is unrelated and unchanged).
+
 - 2026-09-02T05:04:08Z, task `44ee799a` fleet pin sweep: the okf-staleness
   workflow pin moved from okf-kit@0.8.0 to 0.9.0 for parity with the other
   bundle repos, and the header note that treated a pin mismatch as expected
