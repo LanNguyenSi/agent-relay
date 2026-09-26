@@ -2,21 +2,26 @@
 
 <!-- Add new entries at the top, newest first. -->
 
-- 2026-09-26T04:40:15Z, README restructure per the shared README standard
-  (docs pass): the deploy lifecycle section (numbered flow plus the
-  `mermaid` diagram) moved from `README.md` to a new `## Deploy lifecycle`
-  section in `docs/operations.md`, with `README.md` keeping only a
-  one-line pointer to it. Re-verified against `src/deploy/engine.ts`
+- 2026-09-26T05:20:00Z, README restructure per the shared README standard
+  (docs pass, fix round): the deploy lifecycle section (numbered flow plus
+  the `mermaid` diagram) moved from `README.md` to a new `## Deploy
+  lifecycle` section in `docs/operations.md`, with `README.md` keeping
+  only a one-line pointer to it. Re-verified against `src/deploy/engine.ts`
   (unchanged) and re-pointed `health-check-reality.md`'s citation
-  (`sources`: `README.md` -> `docs/operations.md`) and body text to name
-  the new location; also updated `index.md`'s one-line pointer. Re-stamped
+  (`sources`: `README.md` -> `docs/operations.md`); the body sentence
+  naming the section ("`README.md`'s deploy-lifecycle section describes
+  exactly this behavior") had been left unchanged after the move in an
+  earlier pass and is now retargeted to `docs/operations.md`. Also updated
+  `index.md`'s one-line pointer and `docs/operations.md`'s own intro line
+  to name the new Deploy lifecycle section. Re-stamped
   `health-check-reality.md` and `apps-dir-contract.md` (the other bundle
   doc naming a touched source, `docs/operations.md`; its citations --
   `../operations.md#apps_dir-hostcontainer-contract` and
   `install.sh:573-621` -- are unaffected since the anchor and the
-  `install.sh` lines were not moved). `okf-kit check docs/okf` reports the
-  same 1 pre-existing warning (`deploy-failure-surfaces.md` stale against
-  `CHANGELOG.md`, unrelated to this change) at base and at head.
+  `install.sh` lines were not moved). `okf-kit check docs/okf` reports no
+  new finding introduced by this change (a pre-existing warning on
+  `deploy-failure-surfaces.md` against `CHANGELOG.md` is unrelated and
+  unchanged).
 
 - 2026-09-02T05:04:08Z, task `44ee799a` fleet pin sweep: the okf-staleness
   workflow pin moved from okf-kit@0.8.0 to 0.9.0 for parity with the other

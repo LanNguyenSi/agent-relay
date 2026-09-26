@@ -28,7 +28,7 @@ AI-driven VPS deployment relay: an MCP server and HTTP API that lets Claude Code
 
 ## Quick start
 
-On a fresh Ubuntu/Debian VPS (root, or a user in the `docker` group; the installer installs Docker/Compose if either is missing):
+On a fresh Ubuntu/Debian VPS, as root via sudo (the installer installs Docker if missing; it needs the Compose v2 plugin):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
@@ -39,13 +39,14 @@ sudo RELAY_DOMAIN=relay.example.com \
 
 > Env vars must be set on the `sudo` line, not before `curl`: the pipe binds them to the download, not to the `bash` that runs the script. If your sudoers strips command-line variables, `export` them and use `sudo -E`, or run as root directly.
 
-Without a domain, drop `RELAY_DOMAIN` for a loopback, no-TLS `port-only` install:
+For a loopback, no-TLS install without a domain, set `RELAY_MODE=port-only`:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
+sudo RELAY_MODE=port-only bash /tmp/agent-relay-install.sh
 ```
 
-The installer prints a generated `AUTH_TOKEN` on success. It also supports a non-root install for users in the `docker` group; see [docs/operations.md](docs/operations.md#non-root-install) for the requirements, and [docs/operations.md](docs/operations.md#apps_dir-hostcontainer-contract) for the `APPS_DIR` host/container contract the installer enforces (the docker daemon runs `docker compose` for deployed apps against the host's own `/apps`, so it must be the same directory as `APPS_DIR`).
+The installer prints a generated `AUTH_TOKEN` on success. It also supports a non-root install for users in the `docker` group; see [docs/operations.md](docs/operations.md#non-root-install) for the requirements, and [docs/operations.md](docs/operations.md#apps_dir-hostcontainer-contract) for the `APPS_DIR` host/container contract the installer enforces (the relay runs `docker compose` from inside its container, and the docker daemon resolves bind mounts against the host's `/apps`, so it must be the same directory as `APPS_DIR`).
 
 ## Usage
 
@@ -67,6 +68,8 @@ That call runs `git pull`, pre-flight checks, `docker compose build`/`up`, and t
 - [deploy-panel](https://github.com/LanNguyenSi/deploy-panel): web UI for managing servers and deployments.
 
 ## Development and contributing
+
+Requires Node.js 20+.
 
 ```bash
 npm install

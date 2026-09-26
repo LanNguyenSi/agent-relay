@@ -1,6 +1,6 @@
 # Operations
 
-Installing the relay on a VPS, running it locally for development, and the runtime env vars it cares about.
+Installing the relay on a VPS, running it locally for development, the runtime env vars it cares about, and the [Deploy lifecycle](#deploy-lifecycle) it runs on every deploy.
 
 ## VPS installer
 
@@ -14,7 +14,7 @@ The installer pulls the published Docker image from `ghcr.io/lannguyensi/agent-r
 
 The installer:
 
-1. Installs Docker and Docker Compose (if missing).
+1. Installs Docker if missing; fails if the Compose v2 plugin is not already available.
 2. Detects what's on port 80 and picks an install mode (see below).
 3. In `greenfield` mode: creates `traefik-public` network + starts Traefik.
 4. Pulls and starts the agent-relay container (with mode-appropriate network and labels).

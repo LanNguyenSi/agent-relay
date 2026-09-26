@@ -37,7 +37,7 @@ sources:
   exhausting every service/port combination `maxRetries` times, it reports
   failure.
 
-`README.md`'s deploy-lifecycle section describes exactly this behavior.
+`docs/operations.md`'s Deploy lifecycle section describes exactly this behavior.
 
 ## Resolved divergence (history)
 
