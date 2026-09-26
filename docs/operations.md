@@ -170,3 +170,55 @@ The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management
 | `AUTH_TOKEN` | Yes | -- | Bearer token for API and MCP authentication |
 | `PORT` | No | `8222` | HTTP server port |
 | `APPS_DIR` | No | `/apps` | Directory containing app directories, as seen by the relay process. The installer bind-mounts the host's `/home/deploy/apps` (root) onto `/apps` inside the container, so this rarely needs overriding |
+
+## Deploy lifecycle
+
+Each app on the VPS is a git repo with a `docker-compose.yml` and a `.relay.yml`. The default flow:
+
+1. **Deploy.** `pre_update` commands -> `git pull` -> re-read `.relay.yml` -> pre-flight checks -> `docker compose build` -> `docker compose up -d` -> `post_update` commands.
+2. **Health check.** In-container probe: for each running compose service, `docker compose exec` runs a `node -e` fetch against `http://localhost:<port><health>` -- the port comes from `health_port`, or a fixed candidate list (3000, 3001, 4000, 5000, 8000, 8080). Up to 5 attempts, 5 seconds apart; the first service/port that responds OK passes. On final failure, the step's `output` carries the last probe's HTTP status (or fetch error) and a capped tail of `docker compose logs` from the running service(s) -- operators should be aware that runtime app-container log content lands in the deploy record's step output, not just a pass/fail summary. No redaction is applied to that log tail.
+3. **Auto-rollback.** On health failure, `git reset --hard` to the previous commit, rebuild, restart.
+
+`.relay.yml` is re-read **after** `git pull` on purpose: a commit that *fixes* a broken `.relay.yml` lets the deploy through, instead of pre-flight gating on the stale pre-pull copy. Full rationale in [docs/security.md](security.md#why-relayyml-is-re-read-after-git-pull).
+
+The diagram traces the default deploy path through `src/deploy/engine.ts`, from pre-pull preflight checks to health verification and auto-rollback.
+
+```mermaid
+flowchart TD
+    A["deploy()<br/>engine.ts"] --> B
+
+    subgraph PRE["Pre-pull - preflight.ts"]
+        B["git_clean, git_remote_reachable"]
+    end
+
+    B -- "fail" --> BLK["DeployBlockedResult<br/>engine.ts"]
+    B -- "pass" --> D
+
+    subgraph UPD["Update - exec.ts, config/relay.ts"]
+        D["pre_update commands<br/>exec.ts runShell"]
+        D --> E["git pull<br/>exec.ts runExec"]
+        E --> F[("reload .relay.yml<br/>config/relay.ts")]
+    end
+
+    F --> G
+
+    subgraph POST["Post-pull - preflight.ts"]
+        G["compose_file_exists, health_defined<br/>containers_running, traefik_labels"]
+    end
+
+    G -- "fail" --> BLK2["DeployBlockedResult<br/>engine.ts"]
+    G -- "pass" --> H
+
+    subgraph BUILD["Build and run - exec.ts"]
+        H["compose build + up -d<br/>exec.ts runExec"]
+        H --> P["post_update commands<br/>exec.ts runShell"]
+    end
+
+    P --> J["runHealthCheck<br/>engine.ts, 5 retries"]
+    J -- "pass" --> SUC["deploy succeeded"]
+    J -- "fail" --> RBK
+
+    subgraph ROLL["Auto-rollback - exec.ts"]
+        RBK["git reset --hard commitBefore<br/>compose build + up"]
+    end
+```

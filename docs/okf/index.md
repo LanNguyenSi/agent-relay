@@ -18,8 +18,8 @@ deliberately do not duplicate them.
 - [Health check reality](health-check-reality.md), the wired inline health
   check in `engine.ts` (fixed retries, docker-compose-exec probing).
   Resolved 2026-08-10: the unimported exponential-backoff module
-  `health.ts` was deleted as dead code and `README.md` now describes the
-  wired behavior.
+  `health.ts` was deleted as dead code; `docs/operations.md`'s Deploy
+  lifecycle section now describes the wired behavior.
 
 ## Invariants
 
