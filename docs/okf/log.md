@@ -2,6 +2,9 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-03T12:51:16Z, merged main (release.yml env change) into the rollback-phase branch; the
+  merge touched `CHANGELOG.md`, a source of `deploy-failure-surfaces.md`. Claims and
+  citations unchanged; re-stamped.
 - 2026-10-03T12:31:33Z, rollback verify failure now names the ref (`Rollback failed: unknown
   commit '<ref>'`), which adds two lines in `apps.ts`. Re-pointed the shifted
   citations in `deploy-failure-surfaces.md` (362-446, 391-394, markReset at 399)
