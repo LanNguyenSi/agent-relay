@@ -23,6 +23,10 @@
   `runPreflight`). Re-stamped both. `path-containment-idiom.md` (also sourced on `apps.ts`) was re-verified: its citations (`apps.ts:144-222`, `:151`, `:203-205`, `:218-220`) sit above the edit and are unmoved; re-stamped only. `okf-kit check docs/okf` was run after the
   source commit.
 
+- 2026-10-03T12:22:27Z, the root `CHANGELOG.md` gained one `[Unreleased]` CI line
+  (release.yml passes step values through `env:`). Re-verified
+  `deploy-failure-surfaces.md`: its CHANGELOG citations still resolve and none of its
+  claims concerns that entry. Re-stamped; no body text changed.
 - 2026-09-26T04:51:10Z, README restructure: the deploy lifecycle section (numbered flow plus
   the `mermaid` diagram) moved from `README.md` to a new `## Deploy
   lifecycle` section in `docs/operations.md`, with `README.md` keeping

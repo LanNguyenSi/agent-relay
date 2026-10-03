@@ -84,8 +84,10 @@ jobs:
         # Surface what we published in the action summary so operators
         # can see at a glance which tags are live without opening
         # packages UI.
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           echo "## Published tags" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "$TAGS" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
