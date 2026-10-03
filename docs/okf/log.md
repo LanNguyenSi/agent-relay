@@ -2,6 +2,15 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-03T12:06:26Z, task 994f6c81 rollback error phase: `rollbackApp` now tags thrown
+  errors with `before_reset`/`after_reset` (surfaced as an additive `phase` field on
+  the rollback HTTP error body). Re-verified `deploy-failure-surfaces.md` against the
+  changed `apps.ts`/`routes.ts` (new paragraph on the phase field; `rollbackApp` span
+  re-pointed to `apps.ts:361-435`) and re-pointed `deploy-phase-model.md`'s two
+  `apps.ts` citations that shifted (`:415-421` preflight call, `:453-457`
+  `runPreflight`). Re-stamped both. `path-containment-idiom.md` (also sourced on `apps.ts`) was re-verified: its citations (`apps.ts:144-222`, `:151`, `:203-205`, `:218-220`) sit above the edit and are unmoved; re-stamped only. `okf-kit check docs/okf` was run after the
+  source commit.
+
 - 2026-09-26T04:51:10Z, README restructure: the deploy lifecycle section (numbered flow plus
   the `mermaid` diagram) moved from `README.md` to a new `## Deploy
   lifecycle` section in `docs/operations.md`, with `README.md` keeping
