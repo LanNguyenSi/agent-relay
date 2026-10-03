@@ -480,9 +480,13 @@ describe("rollbackApp — preflight gate", () => {
 
     const err = await rollbackApp("myapp", "abc1234").catch((e: unknown) => e);
 
-    expect((err as Error).message).toContain("Rollback failed");
+    expect((err as Error).message).toContain("Rollback failed: unknown commit 'abc1234'");
     expect(rollbackPhaseOf(err)).toBe("before_reset");
     expect(mockRunExec.mock.calls.find(([cmd, args]) => cmd === "git" && args[0] === "reset")).toBeUndefined();
+    // The verify must peel to a commit: without ^{commit} a blob or tree SHA
+    // would pass, the reset would then fail, and the error would be after_reset.
+    const verifyCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "git" && args[1] === "--verify");
+    expect(verifyCall?.[1]).toEqual(["rev-parse", "--verify", "abc1234^{commit}"]);
   });
 
   it("tags an unknown app (before any git call) as phase before_reset", async () => {

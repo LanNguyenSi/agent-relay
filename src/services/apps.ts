@@ -389,7 +389,9 @@ async function rollbackAppInner(
   // Verify the target resolves to a commit BEFORE touching the tree, so an
   // unknown ref fails as before_reset with nothing modified.
   const verify = await runExec("git", ["rev-parse", "--verify", `${target}^{commit}`], dir);
-  if (verify.exitCode !== 0) throw new Error("Rollback failed: " + verify.stderr);
+  if (verify.exitCode !== 0) {
+    throw new Error(`Rollback failed: unknown commit '${target}': ` + verify.stderr);
+  }
 
   // Mark the phase BEFORE the reset runs: a `git reset --hard` that exits
   // non-zero (or is killed by the step timeout) can already have rewritten

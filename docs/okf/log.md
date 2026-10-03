@@ -2,6 +2,10 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-03T12:31:33Z, rollback verify failure now names the ref (`Rollback failed: unknown
+  commit '<ref>'`), which adds two lines in `apps.ts`. Re-pointed the shifted
+  citations in `deploy-failure-surfaces.md` (362-446, 391-394, markReset at 399)
+  and `deploy-phase-model.md` (426-432, 464-468); claims unchanged. Re-stamped.
 - 2026-10-03T12:20:00Z, task 994f6c81 review fix: `rollbackAppInner` now verifies the
   target with `git rev-parse --verify` and calls `markReset()` immediately before
   `git reset --hard`, so a reset that fails part-way is `after_reset`. Re-verified
