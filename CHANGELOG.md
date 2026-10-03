@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **@grpc/grpc-js lockfile bump** (task 2342ef4f). @grpc/grpc-js 1.14.4 -> 1.14.5 (transitive via dockerode) closes GHSA-m9gg-hp2v-232j and GHSA-f596-whhp-79r4 (HIGH). Lockfile-only change, no `overrides` entry needed.
 - **js-yaml, hono, vitest/@vitest/mocker lockfile bumps** (CVE sweep 2026-09-11). js-yaml 4.3.1 -> 4.3.2 closes GHSA-2883-xcg3-v3hh (HIGH). hono 4.13.0 -> 4.13.7 closes GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc, GHSA-crvj-82cr-hjcx (moderate). vitest/@vitest/mocker/@vitest/coverage-v8 4.1.9 -> 4.1.11 closes GHSA-82fw-gwwq-j7x9 (moderate, dev dependency).
 
 ### Added
