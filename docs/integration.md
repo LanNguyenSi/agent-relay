@@ -123,7 +123,7 @@ Response is one of two `200` shapes:
 - Success: `{ "deploy": { "...": "..." }, "success": true, "commitBefore": "abc1234", "commitAfter": "def5678" }` — `deploy` is the recorded history entry (same shape as `GET /api/deploys` entries).
 - Blocked (a critical preflight check rejected the rollback): `{ "result": { "success": false, "blocked": true, "preflight": { "passed": false, "checks": [ "..." ] }, "commitBefore": "abc1234", "commitAfter": "def5678" } }`. The working tree has already been reset to the target commit at this point (`commitAfter` reflects that), but `compose build`/`up` never ran, so the running containers are unchanged. No `deploy` history entry is recorded for a blocked rollback, same as a blocked deploy.
 
-A rollback failure that isn't a blocked preflight (bad commit ref, `compose build`/`up` failure, …) still returns `400 { "error": "..." }`, not either shape above.
+A rollback failure that isn't a blocked preflight (bad commit ref, `compose build`/`up` failure, …) still returns `400 { "error": "..." }`, not either shape above. The error body additionally carries `"phase": "before_reset" | "after_reset"`: `before_reset` means HEAD did not move and the working tree was not touched (unknown app, a commit ref that fails `git rev-parse --verify`); `after_reset` means a `git reset --hard` was attempted or succeeded, so a failure (the reset failing part-way, invalid `.relay.yml` at the target, `compose build`/`up` failure) can leave the working tree or the running app broken. The field is additive (also present on the `404` for a `.relay.yml` error); older relays omit it, and clients should treat a missing phase as `before_reset`.
 
 ### `GET /api/apps/:name/logs`
 
