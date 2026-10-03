@@ -2,6 +2,11 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-03T18:53:40Z, deploy-failure-surfaces.md re-stamped after a CHANGELOG entry
+  (@grpc/grpc-js 1.14.4 to 1.14.5, task 2342ef4f). Re-verified the doc's
+  CHANGELOG-derived claim (blocked deploy response wrapped under `result`,
+  v0.4.0): unaffected by this entry.
+
 - 2026-10-03T12:12:29Z, okf-staleness workflow re-synced from the okf-kit
   workflow template (fleet convergence ticket fdc01728): the workflow header
   now names the template as its source instead of calling the file a pattern
