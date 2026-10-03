@@ -3,7 +3,7 @@ type: invariant
 title: Path containment idiom — resolve + startsWith(root + sep), with symlink-aware re-verification
 description: Three containment checks (safeAppDir, assertComposeFileContained, checkComposeBindMountSourcesExist) all use resolve()+startsWith(root+sep), never bare startsWith(root), to avoid a sibling-prefix false positive. safeAppDir and assertComposeFileContained re-verify both sides after realpath(); checkComposeBindMountSourcesExist re-verifies only APPS_DIR itself via realpath() (ENOENT fallback) so it compares like with like against the already-real appDir, while the candidate source path stays lexical before stat(). The source-side realpath question remains documented as open.
 tags: [security, path-traversal, symlink, containment, preflight]
-timestamp: 2026-10-03T12:06:26Z
+timestamp: 2026-10-03T12:20:00Z
 sources:
   - src/services/apps.ts
   - src/config/relay.ts

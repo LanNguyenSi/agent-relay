@@ -3,7 +3,7 @@ type: invariant
 title: Deploy preflight phase model — which checks run when, and rollback's config source
 description: runPreflightChecks splits its 8 checks across pre-pull/post-pull/all phases by when each check has signal; force bypasses only non-critical checks; only (task 1074feb5) restricts the battery to named checks regardless of phase, skipping the excluded checks' runExec calls entirely rather than just discarding their results — both rollback gates use it to run only the two critical checks; rollback always reruns against prePullConfig/preCommandConfig, never the post-pull reloaded config, even when the new commit disabled rollback.
 tags: [deploy, preflight, phases, rollback, force, only]
-timestamp: 2026-10-03T12:06:26Z
+timestamp: 2026-10-03T12:20:00Z
 sources:
   - src/deploy/preflight.ts
   - src/deploy/engine.ts
@@ -54,7 +54,7 @@ This is deliberate, not an oversight: `rollback: boolean` is read from whichever
 
 ## Rollback gates on `only` two checks, not `phase`'s whole battery
 
-Both rollback call sites — `rollbackApp` (`services/apps.ts:415-421`) and
+Both rollback call sites — `rollbackApp` (`services/apps.ts:424-430`) and
 the auto-rollback path `rollbackIfEnabled` (`engine.ts:569-575`) — pass
 `phase: "all", force: true` **and** `only: ROLLBACK_CRITICAL_CHECKS`
 (`preflight.ts:72-76`), where `ROLLBACK_CRITICAL_CHECKS` is exactly
@@ -87,7 +87,7 @@ report) and by the `only` assertions in both `apps.test.ts`'s and
 
 ## Command-mode deploys and the standalone/MCP preflight view
 
-Command-mode (`.relay.yml` with a `command:` field) has no natural pre/post-pull split — the command is opaque, so `customCommandDeploy` runs preflight once, pre-command, with no `phase` argument (`engine.ts:299`), which defaults to `"all"`. The same default applies to the two read-only entry points that inspect current disk state without deploying: `runPreflight` in `src/services/apps.ts:453-457` (backing both the standalone `GET /api/apps/:name/preflight` HTTP route and the MCP `relay_preflight` tool) calls `runPreflightChecks({ appDir, config })` with no `phase`, so it always runs the full 8-check battery against whatever is on disk right now.
+Command-mode (`.relay.yml` with a `command:` field) has no natural pre/post-pull split — the command is opaque, so `customCommandDeploy` runs preflight once, pre-command, with no `phase` argument (`engine.ts:299`), which defaults to `"all"`. The same default applies to the two read-only entry points that inspect current disk state without deploying: `runPreflight` in `src/services/apps.ts:462-466` (backing both the standalone `GET /api/apps/:name/preflight` HTTP route and the MCP `relay_preflight` tool) calls `runPreflightChecks({ appDir, config })` with no `phase`, so it always runs the full 8-check battery against whatever is on disk right now.
 
 ## What this doc does not restate
 
