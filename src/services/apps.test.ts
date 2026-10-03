@@ -457,9 +457,9 @@ describe("rollbackApp — preflight gate", () => {
     expect(upCall).toBeUndefined();
   });
 
-  it("tags a failed git reset --hard as phase before_reset", async () => {
+  it("tags a git reset --hard that exits non-zero as phase after_reset (the tree may be partly rewritten)", async () => {
     mockRunExec.mockImplementation(async (cmd, args) => {
-      if (cmd === "git" && args[0] === "reset") return { stdout: "", stderr: "bad revision", exitCode: 128 };
+      if (cmd === "git" && args[0] === "reset") return { stdout: "", stderr: "unable to unlink", exitCode: 128 };
       return { stdout: "abc123\n", stderr: "", exitCode: 0 };
     });
 
@@ -467,7 +467,22 @@ describe("rollbackApp — preflight gate", () => {
 
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toContain("Rollback failed");
+    expect(rollbackPhaseOf(err)).toBe("after_reset");
+  });
+
+  it("tags a target that fails git rev-parse --verify as phase before_reset and never runs the reset", async () => {
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "git" && args[0] === "rev-parse" && args[1] === "--verify") {
+        return { stdout: "", stderr: "bad revision", exitCode: 128 };
+      }
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp", "abc1234").catch((e: unknown) => e);
+
+    expect((err as Error).message).toContain("Rollback failed");
     expect(rollbackPhaseOf(err)).toBe("before_reset");
+    expect(mockRunExec.mock.calls.find(([cmd, args]) => cmd === "git" && args[0] === "reset")).toBeUndefined();
   });
 
   it("tags an unknown app (before any git call) as phase before_reset", async () => {

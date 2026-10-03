@@ -340,11 +340,12 @@ export interface RollbackResult {
 }
 
 /**
- * Where a rollback failed relative to `git reset --hard`. `before_reset`: the
- * working tree is untouched (bad ref, unknown app, reset itself failed).
- * `after_reset`: the tree already moved to the target, so a failure after this
- * point (invalid .relay.yml at the target, compose build/up) can leave the
- * running app broken. Surfaced as an additive `phase` field on the HTTP error
+ * Where a rollback failed relative to `git reset --hard`. `before_reset`: HEAD
+ * did not move and the working tree was not touched (unknown app, bad ref
+ * that fails `git rev-parse --verify`). `after_reset`: a reset was attempted
+ * or succeeded, so any failure from that point (the reset itself failing
+ * part-way, invalid .relay.yml at the target, compose build/up) can leave the
+ * working tree or the running app broken. Surfaced as an additive `phase` field on the HTTP error
  * body so callers (deploy-panel) can tell the two apart.
  */
 export type RollbackPhase = "before_reset" | "after_reset";
@@ -385,9 +386,17 @@ async function rollbackAppInner(
 
   const commitBefore = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
 
+  // Verify the target resolves to a commit BEFORE touching the tree, so an
+  // unknown ref fails as before_reset with nothing modified.
+  const verify = await runExec("git", ["rev-parse", "--verify", `${target}^{commit}`], dir);
+  if (verify.exitCode !== 0) throw new Error("Rollback failed: " + verify.stderr);
+
+  // Mark the phase BEFORE the reset runs: a `git reset --hard` that exits
+  // non-zero (or is killed by the step timeout) can already have rewritten
+  // part of the working tree, so any failure from here on is after_reset.
+  markReset();
   const checkout = await runExec("git", ["reset", "--hard", target], dir);
   if (checkout.exitCode !== 0) throw new Error("Rollback failed: " + checkout.stderr);
-  markReset();
 
   // Reload .relay.yml against the tree `git reset --hard` just moved to —
   // same rationale as deploy/engine.ts's "reload .relay.yml" step: the
