@@ -11,7 +11,7 @@
   `git reset --hard`, so a reset that fails part-way is `after_reset`. Re-verified
   `deploy-failure-surfaces.md` (phase paragraph reworded; citations re-pointed to
   `apps.ts:362-444`, `:362-377`, `:354-360`, `:391-392`, `:397`) and
-  `deploy-phase-model.md` (`apps.ts:424-430`, `:462-466`), re-stamped both plus
+  `deploy-phase-model.md` (`apps.ts:426-432`, `:464-468`), re-stamped both plus
   `path-containment-idiom.md` (citations above the edit, unmoved). `okf-kit check
   docs/okf` was run after the source commit.
 - 2026-10-03T12:06:26Z, task 994f6c81 rollback error phase: `rollbackApp` now tags thrown
@@ -19,7 +19,7 @@
   the rollback HTTP error body). Re-verified `deploy-failure-surfaces.md` against the
   changed `apps.ts`/`routes.ts` (new paragraph on the phase field; `rollbackApp` span
   re-pointed to `apps.ts:362-444`) and re-pointed `deploy-phase-model.md`'s two
-  `apps.ts` citations that shifted (`:424-430` preflight call, `:462-466`
+  `apps.ts` citations that shifted (`:426-432` preflight call, `:464-468`
   `runPreflight`). Re-stamped both. `path-containment-idiom.md` (also sourced on `apps.ts`) was re-verified: its citations (`apps.ts:144-222`, `:151`, `:203-205`, `:218-220`) sit above the edit and are unmoved; re-stamped only. `okf-kit check docs/okf` was run after the
   source commit.
 
