@@ -2,6 +2,20 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-03T12:12:29Z, okf-staleness workflow re-synced from the okf-kit
+  workflow template (fleet convergence ticket fdc01728): the workflow header
+  now names the template as its source instead of calling the file a pattern
+  to keep in sync, the pin moved from okf-kit@0.10.0 to okf-kit@0.16.0,
+  `--require-anchors` joined the invocation, and the job stays warn-only.
+  Measured on the tree before the change with `okf-kit check --json <bundle>`:
+  at okf-kit@0.10.0, 0 errors, 1 warnings, 0 notices (exit 0) plain and 0
+  errors, 72 warnings, 0 notices (exit 0) with `--require-anchors`; at
+  okf-kit@0.16.0, 0 errors, 1 warnings, 0 notices (exit 0) plain and 0 errors,
+  72 warnings, 0 notices (exit 0) with `--require-anchors`. Of the
+  anchored-run warnings, 71 are anchor-required findings (full citations
+  without an anchor); anchoring them is separate work and none of them blocks
+  anything.
+
 - 2026-09-26T04:51:10Z, README restructure: the deploy lifecycle section (numbered flow plus
   the `mermaid` diagram) moved from `README.md` to a new `## Deploy
   lifecycle` section in `docs/operations.md`, with `README.md` keeping
