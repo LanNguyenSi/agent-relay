@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- CI: `release.yml` and `publish.yml` now pass step values (release version, matrix entries, image tags) into `run:` scripts through `env:` and shell variables instead of interpolating `${{ }}` expressions into the script text. No behavior change for normal tags and versions.
+- CI: `release.yml` and `publish.yml` now pass step values into `run:` scripts through `env:` and shell variables instead of interpolating `${{ }}` expressions into the script text. No behavior change for normal tags and versions.
 
 ## [0.4.0] - 2026-06-16
 
