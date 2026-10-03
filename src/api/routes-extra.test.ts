@@ -279,6 +279,58 @@ describe("POST /api/apps/:name/rollback — error mapping", () => {
     expect(body.error).toContain("Rollback failed");
   });
 
+  it("includes phase: after_reset on the 400 body when the service tags the error after_reset", async () => {
+    mockRollbackApp.mockRejectedValue(
+      Object.assign(new Error("Rebuild failed: boom"), { rollbackPhase: "after_reset" }),
+    );
+
+    const res = await request("/apps/myapp/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Rebuild failed: boom", phase: "after_reset" });
+  });
+
+  it("includes phase: before_reset on the 400 body when the service tags the error before_reset", async () => {
+    mockRollbackApp.mockRejectedValue(
+      Object.assign(new Error("Rollback failed: bad ref"), { rollbackPhase: "before_reset" }),
+    );
+
+    const res = await request("/apps/myapp/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Rollback failed: bad ref", phase: "before_reset" });
+  });
+
+  it("carries the phase on a 404 RelayConfigError too, and omits the field when untagged", async () => {
+    mockRollbackApp.mockRejectedValueOnce(
+      Object.assign(new RelayConfigError("bad config at target"), { rollbackPhase: "after_reset" }),
+    );
+    const tagged = await request("/apps/myapp/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(tagged.status).toBe(404);
+    expect(await tagged.json()).toEqual({ error: "bad config at target", phase: "after_reset" });
+
+    mockRollbackApp.mockRejectedValueOnce(new Error("plain failure"));
+    const untagged = await request("/apps/myapp/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(untagged.status).toBe(400);
+    expect(await untagged.json()).toEqual({ error: "plain failure" });
+  });
+
   it("calls recordDeploy and returns 200 on success", async () => {
     const rollbackResult = { success: true, commitBefore: "old", commitAfter: "new" };
     mockRollbackApp.mockResolvedValue(rollbackResult as never);

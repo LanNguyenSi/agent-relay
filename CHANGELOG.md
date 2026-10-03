@@ -13,11 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Rollback error bodies carry a `phase`** (task 994f6c81). `POST /api/apps/:name/rollback` error responses (400, and the 404 for a `.relay.yml` error) gain an additive `phase: "before_reset" | "after_reset"` field telling callers whether the rollback had reached `git reset --hard` (`after_reset`: a reset was attempted or succeeded, including one that failed part-way) or failed before touching the working tree (`before_reset`: unknown app, or a ref that fails `git rev-parse --verify`). Status codes and every other field are unchanged; a ref that fails the verify now reports `Rollback failed: unknown commit '<ref>': <git stderr>`.
 - **Configurable per-step exec timeout, an explicit 16 MiB per-stream `maxBuffer`, and a stored-output cap** (task 6dfb5708). `.relay.yml` gains an optional `step_timeout_seconds` (1-7200) that overrides the deploy engine's per-step timeout for `pre_update`, `git pull`, `compose build`/`up`, `post_update`, `command`, and rollback `compose build`/`up`; the default timeout is unchanged (300 s) when the field is absent. Separately, `runExec`'s stdout/stderr buffer cap is now explicit at 16 MiB per stream instead of relying on Node's own 1 MB default, after a deploy build hit the 300 s cap without enough diagnostic signal in the truncated output. A step killed by either limit now appends a `[relay] ...` line to its output naming the reason (timeout or buffer overrun) instead of leaving a bare non-zero exit for the operator to interpret. A step's stored output (what the deploy API's JSON response, the SSE stream, and the MCP `relay_deploy` result all carry) is separately capped at 200,000 characters, keeping the last 200,000 with a truncation notice, since the per-stream buffer cap alone does not bound the combined stdout+stderr text kept on a `DeployStep`.
 
 ### Fixed
 
 - **Runtime image ships the docker buildx plugin** (`docker-cli-buildx`, about 90 MB of image size). Compose v5 in the `node:22-alpine` image found no buildx plugin, printed "Docker Compose requires buildx plugin to be installed" and fell back to the legacy builder, which cannot reuse the BuildKit layer cache. App builds that completed in under a minute with cache rebuilt from scratch and hit the 300 s `runExec` step timeout, failing the deploy before `git pull`. CI now asserts the plugin is present in the built image. Existing relays must be recreated from the republished `:latest` image to pick this up (PR #77).
+
+### Changed
+
+- CI: `release.yml` and `publish.yml` now pass step values into `run:` scripts through `env:` and shell variables instead of interpolating `${{ }}` expressions into the script text. No behavior change for normal tags and versions.
 
 ## [0.4.0] - 2026-06-16
 

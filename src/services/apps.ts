@@ -339,15 +339,64 @@ export interface RollbackResult {
   commitAfter: string;
 }
 
+/**
+ * Where a rollback failed relative to `git reset --hard`. `before_reset`: HEAD
+ * did not move and the working tree was not touched (unknown app, bad ref
+ * that fails `git rev-parse --verify`). `after_reset`: a reset was attempted
+ * or succeeded, so any failure from that point (the reset itself failing
+ * part-way, invalid .relay.yml at the target, compose build/up) can leave the
+ * working tree or the running app broken. Surfaced as an additive `phase` field on the HTTP error
+ * body so callers (deploy-panel) can tell the two apart.
+ */
+export type RollbackPhase = "before_reset" | "after_reset";
+
+/** Read the rollback phase tagged onto a thrown error, if any. */
+export function rollbackPhaseOf(err: unknown): RollbackPhase | undefined {
+  if (err instanceof Error) {
+    const phase = (err as Error & { rollbackPhase?: unknown }).rollbackPhase;
+    if (phase === "before_reset" || phase === "after_reset") return phase;
+  }
+  return undefined;
+}
+
 export async function rollbackApp(
   name: string,
   toCommit?: string,
+): Promise<RollbackResult | RollbackBlockedResult> {
+  let phase: RollbackPhase = "before_reset";
+  try {
+    return await rollbackAppInner(name, toCommit, () => {
+      phase = "after_reset";
+    });
+  } catch (err) {
+    // The error class (RelayConfigError vs Error) and message stay untouched,
+    // so the HTTP status mapping is unchanged; only the phase tag is added.
+    if (err instanceof Error) (err as Error & { rollbackPhase?: RollbackPhase }).rollbackPhase = phase;
+    throw err;
+  }
+}
+
+async function rollbackAppInner(
+  name: string,
+  toCommit: string | undefined,
+  markReset: () => void,
 ): Promise<RollbackResult | RollbackBlockedResult> {
   const dir = await safeAppDir(name);
   const target = toCommit ? validateCommitRef(toCommit) : "HEAD~1";
 
   const commitBefore = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
 
+  // Verify the target resolves to a commit BEFORE touching the tree, so an
+  // unknown ref fails as before_reset with nothing modified.
+  const verify = await runExec("git", ["rev-parse", "--verify", `${target}^{commit}`], dir);
+  if (verify.exitCode !== 0) {
+    throw new Error(`Rollback failed: unknown commit '${target}': ` + verify.stderr);
+  }
+
+  // Mark the phase BEFORE the reset runs: a `git reset --hard` that exits
+  // non-zero (or is killed by the step timeout) can already have rewritten
+  // part of the working tree, so any failure from here on is after_reset.
+  markReset();
   const checkout = await runExec("git", ["reset", "--hard", target], dir);
   if (checkout.exitCode !== 0) throw new Error("Rollback failed: " + checkout.stderr);
 
