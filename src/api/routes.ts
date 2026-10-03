@@ -156,8 +156,11 @@ api.post("/apps/:name/rollback", async (c) => {
     const record = await recordDeploy(name, result, "api");
     return c.json({ deploy: record, ...result });
   } catch (err) {
-    if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
-    if (err instanceof Error) return c.json({ error: err.message }, 400);
+    // `phase` is additive: absent when the service did not tag the error.
+    const phase = apps.rollbackPhaseOf(err);
+    const extra = phase ? { phase } : {};
+    if (err instanceof RelayConfigError) return c.json({ error: err.message, ...extra }, 404);
+    if (err instanceof Error) return c.json({ error: err.message, ...extra }, 400);
     throw err;
   }
 });

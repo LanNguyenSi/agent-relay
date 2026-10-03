@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { safeAppDir, validateBranch, fetchLogs, rollbackApp } from "./apps.js";
+import { safeAppDir, validateBranch, fetchLogs, rollbackApp, rollbackPhaseOf } from "./apps.js";
 import { env } from "../config/env.js";
 import type { RelayConfig } from "../config/relay.js";
 
@@ -455,6 +455,62 @@ describe("rollbackApp — preflight gate", () => {
     expect(buildCall).toBeUndefined();
     const upCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("up"));
     expect(upCall).toBeUndefined();
+  });
+
+  it("tags a failed git reset --hard as phase before_reset", async () => {
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "git" && args[0] === "reset") return { stdout: "", stderr: "bad revision", exitCode: 128 };
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp", "abc1234").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("Rollback failed");
+    expect(rollbackPhaseOf(err)).toBe("before_reset");
+  });
+
+  it("tags an unknown app (before any git call) as phase before_reset", async () => {
+    const err = await rollbackApp("../escape").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(rollbackPhaseOf(err)).toBe("before_reset");
+  });
+
+  it("tags a compose build failure after the reset as phase after_reset", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "docker" && args.includes("build")) return { stdout: "", stderr: "boom", exitCode: 1 };
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp").catch((e: unknown) => e);
+
+    expect((err as Error).message).toContain("Rebuild failed");
+    expect(rollbackPhaseOf(err)).toBe("after_reset");
+  });
+
+  it("tags a compose up failure after the reset as phase after_reset", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "docker" && args.includes("up")) return { stdout: "", stderr: "boom", exitCode: 1 };
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp").catch((e: unknown) => e);
+
+    expect((err as Error).message).toContain("Restart failed");
+    expect(rollbackPhaseOf(err)).toBe("after_reset");
+  });
+
+  it("tags an invalid .relay.yml at the rollback target (loaded after the reset) as phase after_reset", async () => {
+    const { RelayConfigError } = await import("../config/relay.js");
+    mockLoadRelayConfig.mockRejectedValue(new RelayConfigError("bad config at target"));
+
+    const err = await rollbackApp("myapp").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RelayConfigError);
+    expect(rollbackPhaseOf(err)).toBe("after_reset");
   });
 
   it("proceeds through compose build/up and returns success when preflight passes", async () => {
