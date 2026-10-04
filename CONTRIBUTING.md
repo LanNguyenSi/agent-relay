@@ -4,7 +4,7 @@ Thanks for your interest. agent-relay is a VPS deployment relay for AI agents, r
 
 ## Issues
 
-- Bug reports: include repro steps, expected vs. actual, the relay command path (HTTP API, MCP, GitHub Action), and Docker / Node version where relevant.
+- Bug reports: include repro steps, expected vs. actual, the relay command path (HTTP API or MCP), and Docker / Node version where relevant.
 - Feature requests: describe the use case before the proposed shape.
 
 ## Pull Requests

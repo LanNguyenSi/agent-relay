@@ -25,4 +25,4 @@ docker-build:
 	docker build -t agent-relay .
 
 clean:
-	rm -rf node_modules dist .next
+	rm -rf node_modules dist
