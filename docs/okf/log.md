@@ -2,6 +2,11 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-04T13:51:39Z, apps-dir-contract.md and health-check-reality.md re-stamped after the
+  Deploy lifecycle flowchart in docs/operations.md gained the two mount
+  preflight checks. Re-verified both docs: they point to operations.md and
+  restate none of the changed diagram nodes; no claim affected.
+
 - 2026-10-03T18:53:40Z, deploy-failure-surfaces.md re-stamped after a CHANGELOG entry
   (@grpc/grpc-js 1.14.4 to 1.14.5, task 2342ef4f). Re-verified the doc's
   CHANGELOG-derived claim (blocked deploy response wrapped under `result`,

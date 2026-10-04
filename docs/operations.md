@@ -188,7 +188,7 @@ flowchart TD
     A["deploy()<br/>engine.ts"] --> B
 
     subgraph PRE["Pre-pull - preflight.ts"]
-        B["git_clean, git_remote_reachable"]
+        B["git_clean, git_remote_reachable<br/>apps_root_mount_congruence"]
     end
 
     B -- "fail" --> BLK["DeployBlockedResult<br/>engine.ts"]
@@ -203,7 +203,7 @@ flowchart TD
     F --> G
 
     subgraph POST["Post-pull - preflight.ts"]
-        G["compose_file_exists, health_defined<br/>containers_running, traefik_labels"]
+        G["compose_file_exists, health_defined<br/>containers_running, traefik_labels<br/>compose_bind_mount_sources_exist"]
     end
 
     G -- "fail" --> BLK2["DeployBlockedResult<br/>engine.ts"]

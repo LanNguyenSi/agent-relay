@@ -20,7 +20,7 @@ AI-driven VPS deployment relay: an MCP server and HTTP API that lets Claude Code
 
 ## Key features
 
-- Pre-flight checks before `git pull` (working tree clean, remote reachable) and after (compose file exists, containers running, Traefik labels present, health endpoint defined).
+- Pre-flight checks before `git pull` (working tree clean, remote reachable, apps root mount congruent) and after (compose file exists, containers running, Traefik labels present, health endpoint defined, compose bind mount sources exist).
 - Automatic rollback to the previous commit when the post-deploy health check fails; see [Deploy lifecycle](docs/operations.md#deploy-lifecycle) for the full flow and diagram.
 - Deploy history: the last 100 deploys (across all apps), with commit before/after, status, duration, and trigger source.
 - One bearer token secures both the HTTP API and the 5 MCP tools.
