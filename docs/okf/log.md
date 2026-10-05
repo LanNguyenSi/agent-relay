@@ -2,6 +2,12 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-05T12:57:33Z, deploy-failure-surfaces.md re-stamped after the 0.5.0 release cut
+  moved the `[Unreleased]` section of `CHANGELOG.md` under `[0.5.0]`.
+  Re-verified the doc's CHANGELOG-derived claim (blocked deploy response
+  wrapped under `result`, PR #45, `[0.4.0]` section): the entry is unchanged
+  and still resolves; no claim affected.
+
 - 2026-10-04T13:51:39Z, apps-dir-contract.md and health-check-reality.md re-stamped after the
   Deploy lifecycle flowchart in docs/operations.md gained the two mount
   preflight checks. Re-verified both docs: they point to operations.md and
