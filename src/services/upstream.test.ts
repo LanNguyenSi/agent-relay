@@ -47,6 +47,20 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
+// The shipped defaults are documented in docs/integration.md and CHANGELOG;
+// pin them so code and docs cannot drift apart.
+describe("upstream tuning defaults", () => {
+  it("ships the documented TTL, timeouts, concurrency and budgets", () => {
+    expect(defaults).toMatchObject({
+      cacheTtlMs: 60_000,
+      lsRemoteTimeoutMs: 5_000,
+      maxConcurrentLsRemote: 4,
+      listBudgetMs: 6_000,
+      detailBudgetMs: 3_000,
+    });
+  });
+});
+
 describe("getUpstream state decision", () => {
   it("is current when the remote head equals the deployed commit", async () => {
     stubGit();
