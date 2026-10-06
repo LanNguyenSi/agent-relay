@@ -5,6 +5,7 @@ import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy, stepExecOptions } from "../deploy/engine.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
+import { getUpstream, getUpstreamWithin, type UpstreamInfo } from "./upstream.js";
 
 // Preflight used to run here before git pull. That meant a commit that
 // *fixed* a broken .relay.yml (wrong compose_file, missing `command:`,
@@ -240,7 +241,7 @@ export function clampLogLines(lines?: number): number {
   return Math.min(lines ?? 50, MAX_LOG_LINES);
 }
 
-export async function listApps(): Promise<Array<{ name: string; configured: boolean; health?: string; commit?: string }>> {
+export async function listApps(): Promise<Array<{ name: string; configured: boolean; health?: string; commit?: string; upstream?: UpstreamInfo }>> {
   try {
     const entries = await readdir(env.APPS_DIR, { withFileTypes: true });
     // Follow symlinks: isDirectory() returns false for symlinks, so stat() to resolve
@@ -263,8 +264,11 @@ export async function listApps(): Promise<Array<{ name: string; configured: bool
       const dir = resolve(env.APPS_DIR, name);
       try {
         const config = await loadRelayConfig(dir);
-        const commit = await runExec("git", ["rev-parse", "--short", "HEAD"], dir);
-        return { name, configured: true, health: config.health, commit: commit.stdout.trim() || "unknown" };
+        const [commit, upstream] = await Promise.all([
+          runExec("git", ["rev-parse", "--short", "HEAD"], dir),
+          getUpstreamWithin(dir),
+        ]);
+        return { name, configured: true, health: config.health, commit: commit.stdout.trim() || "unknown", upstream };
       } catch {
         return { name, configured: false };
       }
@@ -279,11 +283,13 @@ export async function getAppDetail(name: string) {
   const config = await loadRelayConfig(dir);
   const commit = await runExec("git", ["rev-parse", "--short", "HEAD"], dir);
   const ps = await runExec("docker", ["compose", "-f", config.compose_file, "ps", "--format", "json"], dir);
+  const upstream = await getUpstream(dir);
 
   return {
     name,
     config,
     commit: commit.stdout.trim(),
+    upstream,
     containers: ps.exitCode === 0 ? ps.stdout.trim() : null,
   };
 }
