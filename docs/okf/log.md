@@ -2,6 +2,19 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-06T14:17:01Z, path-containment-idiom.md, deploy-phase-model.md and deploy-failure-surfaces.md
+  re-stamped after the per-app upstream info landed in `src/services/apps.ts`
+  (task 1aa41129: one import line, a widened `listApps` and an `upstream` field in
+  `getAppDetail`, logic in the new `src/services/upstream.ts`). Every `apps.ts`
+  citation shifted down (+1 above `listApps`, +6 below `getAppDetail`) and was
+  re-pointed; the claims were re-read against the changed code and are unchanged.
+  Older entries below keep their citations as originally recorded; where an `apps.ts`
+  line there no longer resolves, read it against the re-pointed lines in the docs
+  themselves. `exec-trust-boundary.md` was re-verified and re-stamped: its `runExec`
+  call-site list now also covers `src/services/upstream.ts` (git rev-parse, ls-remote).
+  `okf-kit check --require-anchors docs/okf` finding set compared against the
+  pre-change baseline: only anchor-required warnings already present, no new rule.
+
 - 2026-10-06T04:07:51Z, deploy-failure-surfaces.md re-stamped after the optional deploy id landed in
   `src/api/routes.ts` and `src/services/history.ts` (task d25161da). Re-pointed the
   `routes.ts` line citations that moved and added a short section on the id; the
