@@ -3,7 +3,7 @@
 <!-- Add new entries at the top, newest first. -->
 
 - 2026-10-06T04:07:51Z, deploy-failure-surfaces.md re-stamped after the optional deploy id landed in
-  `src/api/routes.ts` and `src/services/history.ts` (tasks d25161da). Re-pointed the
+  `src/api/routes.ts` and `src/services/history.ts` (task d25161da). Re-pointed the
   `routes.ts` line citations that moved and added a short section on the id; the
   blocked-never-recorded invariant is unchanged.
 
