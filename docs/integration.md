@@ -76,11 +76,37 @@ List all apps in `APPS_DIR` with config status and current commit.
 ```json
 {
   "apps": [
-    { "name": "my-app", "configured": true, "health": "/api/health", "commit": "abc1234" },
+    {
+      "name": "my-app", "configured": true, "health": "/api/health", "commit": "abc1234",
+      "upstream": {
+        "branch": "main",
+        "deployedCommit": "<40-hex sha>",
+        "remoteHead": "<40-hex sha>",
+        "checkedAt": "2026-10-06T12:00:00.000Z",
+        "state": "behind"
+      }
+    },
     { "name": "other-app", "configured": false }
   ]
 }
 ```
+
+Each configured app carries an `upstream` object (see [Upstream info](#upstream-info)). The list never waits on a slow remote: after 6 s it reports `state: "unknown"` with reason `upstream check still pending, retry shortly` for apps whose lookup has not finished; the lookup keeps running and fills the cache for the next request.
+
+#### Upstream info
+
+`upstream` tells a client whether the deployed checkout differs from the head of the branch a deploy would pull, without comparing SHAs by hand. It also appears on `GET /api/apps/:name` as `app.upstream`. A relay older than this field omits it; treat a missing field as `unknown`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `branch` | `string \| null` | The branch a deploy pulls: the checkout's current branch (`git rev-parse --abbrev-ref HEAD`, `main` when that is empty). `null` on a detached HEAD |
+| `deployedCommit` | `string \| null` | Full sha of the checkout's `HEAD` (`git rev-parse HEAD`) |
+| `remoteHead` | `string \| null` | Full sha of `refs/heads/<branch>` on `origin`, from `git ls-remote origin refs/heads/<branch>` |
+| `checkedAt` | `string \| null` | ISO-8601 UTC time `remoteHead` was obtained (cached results keep their original time) |
+| `state` | `"current" \| "behind" \| "unknown"` | `current`: `remoteHead` equals `deployedCommit`. `behind`: both known and different (the deployed commit differs from the remote branch head; without a fetch the relay cannot tell ahead from behind). `unknown`: anything else, never `current` on doubt |
+| `reason` | `string` | Present only when `state` is `unknown`: remote unreachable or timed out, branch not on the remote, detached HEAD, unreadable checkout, or lookup still pending |
+
+Behaviour: only `git rev-parse` and `git ls-remote` run, so the checkout is never changed (no fetch or pull). `ls-remote` has a 5 s timeout, at most 4 run at once across apps, and each outcome (including a failure) is cached in memory per app and branch for 60 s. `deployedCommit` is read fresh on every request, so a deploy shows as `current` at once.
 
 ### `GET /api/apps/:name`
 
