@@ -216,3 +216,32 @@ describe("recordDeploy return value", () => {
     expect(record.status).toBe("failed");
   });
 });
+
+// ── caller-supplied deploy id ────────────────────────────────────────────────
+
+describe("recordDeploy — deployId", () => {
+  it("persists and returns the id via getHistory", async () => {
+    const { recordDeploy, getHistory } = await freshHistory();
+    const rec = await recordDeploy("myapp", { success: true }, "api", "panel-1");
+    expect(rec.deployId).toBe("panel-1");
+    expect((await getHistory("myapp"))[0]!.deployId).toBe("panel-1");
+  });
+
+  it("omits the field entirely when no id is given", async () => {
+    const { recordDeploy } = await freshHistory();
+    const rec = await recordDeploy("myapp", { success: true }, "api");
+    expect("deployId" in rec).toBe(false);
+  });
+
+  it("still loads a legacy history file without the field", async () => {
+    const legacy = [
+      { id: "d-7", app: "a", status: "success", commitBefore: "", commitAfter: "", durationMs: 1, triggeredBy: "api", createdAt: "2026-01-01T00:00:00.000Z" },
+    ];
+    await writeFile(join(tmpDir, ".relay-history.json"), JSON.stringify(legacy));
+    const { recordDeploy, getHistory } = await freshHistory();
+    await recordDeploy("a", { success: true }, "api", "new-id");
+    const list = await getHistory();
+    expect(list.map((r) => r.id)).toEqual(["d-8", "d-7"]);
+    expect("deployId" in list[1]!).toBe(false);
+  });
+});

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `POST /api/apps/:name/deploy` (plain and `?stream=true`) and `POST /api/apps/:name/rollback` accept an optional caller-supplied deploy id via the `X-Deploy-Id` header or the `deployId` body field (1-128 chars of `[A-Za-z0-9._:-]`; header and body must match if both are sent). It is stored in the history entry and returned in `GET /api/deploys` and `recentDeploys`, so a client such as deploy-panel can tie an entry to its own deploy unambiguously. An invalid or mismatched id returns 400 before anything is deployed. Absent id: records are unchanged (no `deployId` field), and existing history files load as before. The MCP tools do not take an id.
+
 ## [0.5.0] - 2026-10-05
 
 **Minor release: new APPS_DIR preflight checks, a per-step timeout, rollback gating and a rollback error phase, plus a symlink-containment hardening and CVE sweep.**
