@@ -107,6 +107,7 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | `stream` (query) | `boolean` | `false` | When `true`, returns an SSE (Server-Sent Events) stream of deploy steps instead of a single JSON response |
 | `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing |
 | `force` (body) | `boolean` | `false` | Skip non-critical preflight checks |
+| `X-Deploy-Id` (header) or `deployId` (body) | `string` | none | Optional caller-supplied correlation id, stored in the history entry as `deployId` and returned in `GET /api/deploys` and `recentDeploys`. 1-128 characters from `[A-Za-z0-9._:-]`. If both header and body carry one they must match. An invalid or mismatched id returns `400 { "error": "..." }` before anything is deployed (also in `stream=true` mode, as a plain JSON 400 and not an SSE stream). When absent, the history entry has no `deployId` field. A blocked deploy records no entry, so no `deployId` is stored for it |
 
 Response: deploy result with step-by-step output, commit before/after, and duration. With `stream=true`, response is `text/event-stream` with one event per step. A step killed by `step_timeout_seconds` or the 16 MiB per-stream (stdout and stderr each) buffer cap has a `[relay] ...` line appended to its output naming the reason, instead of leaving a bare non-zero exit and truncated output to interpret. Independently, each step's stored output is capped at 200,000 characters (the last 200,000 are kept, with a truncation notice), so a chatty step cannot bloat the deploy API response, SSE stream, or MCP `relay_deploy` result without bound.
 
@@ -117,6 +118,7 @@ Rollback an app to a previous commit, rebuild, and restart. Runs `git reset --ha
 | Body field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `to_commit` | `string` | `HEAD~1` | Target commit SHA (hex, 4-40 chars) or `HEAD~N` |
+| `deployId` (body) or `X-Deploy-Id` (header) | `string` | none | Optional correlation id, same rules and 400 behaviour as on `POST /api/apps/:name/deploy`; stored on the rollback's history entry |
 
 Response is one of two `200` shapes:
 
@@ -178,11 +180,14 @@ List deploy history across all apps or filtered by app.
       "commitAfter": "def5678",
       "durationMs": 12345,
       "triggeredBy": "api",
-      "createdAt": "2026-01-01T00:00:00.000Z"
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "deployId": "panel-42"
     }
   ]
 }
 ```
+
+`deployId` is present only when the caller supplied one (see `POST /api/apps/:name/deploy`); entries without it, including those written by older relay versions, have no such field.
 
 ### `GET /api/apps/:name/env`
 

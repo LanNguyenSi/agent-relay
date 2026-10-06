@@ -5,8 +5,33 @@ import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import * as apps from "../services/apps.js";
 import * as appEnv from "../services/env.js";
 import { recordDeploy, getHistory } from "../services/history.js";
+import { isValidDeployId } from "../services/deploy-id.js";
 
 export const api = new Hono();
+
+const DEPLOY_ID_RULE = "deployId must be 1-128 characters from [A-Za-z0-9._:-]";
+
+type DeployIdResult = { ok: true; deployId: string | undefined } | { ok: false; error: string };
+
+/**
+ * Read the optional caller-supplied deploy id from the X-Deploy-Id header and
+ * the `deployId` body field. Either may be given; if both are, they must match.
+ * Runs before anything is deployed, so an invalid id is a 400 with no side effect.
+ */
+function resolveDeployId(headerValue: string | undefined, body: unknown): DeployIdResult {
+  const bodyValue =
+    body !== null && typeof body === "object" ? (body as Record<string, unknown>).deployId : undefined;
+  if (headerValue !== undefined && !isValidDeployId(headerValue)) {
+    return { ok: false, error: `Invalid X-Deploy-Id header: ${DEPLOY_ID_RULE}` };
+  }
+  if (bodyValue !== undefined && !isValidDeployId(bodyValue)) {
+    return { ok: false, error: `Invalid deployId in body: ${DEPLOY_ID_RULE}` };
+  }
+  if (headerValue !== undefined && bodyValue !== undefined && headerValue !== bodyValue) {
+    return { ok: false, error: "X-Deploy-Id header and body deployId differ; send one or make them match" };
+  }
+  return { ok: true, deployId: headerValue ?? (bodyValue as string | undefined) };
+}
 
 // ── Auth middleware ─────────────────────────────────────────────────────────
 api.use("*", async (c, next) => {
@@ -63,6 +88,10 @@ api.post("/apps/:name/deploy", async (c) => {
   const name = c.req.param("name");
   const body = await c.req.json().catch(() => ({}));
   const stream = c.req.query("stream") === "true";
+  const idResult = resolveDeployId(c.req.header("X-Deploy-Id"), body);
+  if (!idResult.ok) return c.json({ error: idResult.error }, 400);
+  // Pass the id only when one was supplied, so records without it stay unchanged.
+  const deployIdArg = idResult.deployId === undefined ? [] : [idResult.deployId];
 
   // SSE streaming mode
   if (stream) {
@@ -101,7 +130,7 @@ api.post("/apps/:name/deploy", async (c) => {
             if ("blocked" in result && result.blocked) {
               send("blocked", result.preflight);
             } else {
-              await recordDeploy(name, result, "api");
+              await recordDeploy(name, result, "api", ...deployIdArg);
               send("done", result);
             }
           } catch (err) {
@@ -130,7 +159,7 @@ api.post("/apps/:name/deploy", async (c) => {
       // on `body.result.blocked` instead of two divergent top-level shapes.
       return c.json({ result });
     }
-    const record = await recordDeploy(name, result, "api");
+    const record = await recordDeploy(name, result, "api", ...deployIdArg);
     return c.json({ deploy: record, result });
   } catch (err) {
     if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
@@ -142,6 +171,10 @@ api.post("/apps/:name/deploy", async (c) => {
 api.post("/apps/:name/rollback", async (c) => {
   const name = c.req.param("name");
   const body = await c.req.json().catch(() => ({}));
+  const idResult = resolveDeployId(c.req.header("X-Deploy-Id"), body);
+  if (!idResult.ok) return c.json({ error: idResult.error }, 400);
+  // Pass the id only when one was supplied, so records without it stay unchanged.
+  const deployIdArg = idResult.deployId === undefined ? [] : [idResult.deployId];
 
   try {
     const result = await apps.rollbackApp(name, body.to_commit);
@@ -153,7 +186,7 @@ api.post("/apps/:name/rollback", async (c) => {
       // {error, 400} shape a build/up/git failure below still throws into.
       return c.json({ result });
     }
-    const record = await recordDeploy(name, result, "api");
+    const record = await recordDeploy(name, result, "api", ...deployIdArg);
     return c.json({ deploy: record, ...result });
   } catch (err) {
     // `phase` is additive: absent when the service did not tag the error.

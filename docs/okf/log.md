@@ -2,6 +2,11 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-06T04:07:51Z, deploy-failure-surfaces.md re-stamped after the optional deploy id landed in
+  `src/api/routes.ts` and `src/services/history.ts` (task d25161da). Re-pointed the
+  `routes.ts` line citations that moved and added a short section on the id; the
+  blocked-never-recorded invariant is unchanged.
+
 - 2026-10-05T12:57:33Z, deploy-failure-surfaces.md re-stamped after the 0.5.0 release cut
   moved the `[Unreleased]` section of `CHANGELOG.md` under `[0.5.0]`.
   Re-verified the doc's CHANGELOG-derived claim (blocked deploy response

@@ -26,6 +26,12 @@ export interface DeployRecord {
   durationMs: number;
   triggeredBy: string;
   createdAt: string;
+  /**
+   * Optional caller-supplied correlation id (X-Deploy-Id header or `deployId`
+   * body field on the HTTP API). Absent on records created without one and on
+   * history files written before the field existed.
+   */
+  deployId?: string;
 }
 
 const MAX_RECORDS = 100;
@@ -60,7 +66,11 @@ async function save(): Promise<void> {
   await writeFile(path, JSON.stringify(records, null, 2));
 }
 
-export async function recordDeploy(app: string, result: DeployOutcome, triggeredBy: string): Promise<DeployRecord> {
+export async function recordDeploy(
+  app: string,
+  result: DeployOutcome, triggeredBy: string,
+  deployId?: string,
+): Promise<DeployRecord> {
   const list = await load();
 
   const record: DeployRecord = {
@@ -72,6 +82,7 @@ export async function recordDeploy(app: string, result: DeployOutcome, triggered
     durationMs: result.durationMs ?? 0,
     triggeredBy,
     createdAt: new Date().toISOString(),
+    ...(deployId !== undefined ? { deployId } : {}),
   };
 
   list.unshift(record);
