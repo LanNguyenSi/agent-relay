@@ -33,6 +33,8 @@ export const upstreamTuning = {
   maxConcurrentLsRemote: 4,
   /** Max time a list request waits for upstream info before reporting "pending". */
   listBudgetMs: 6_000,
+  /** Max time a single-app detail request waits before reporting "pending". */
+  detailBudgetMs: 3_000,
 };
 
 const BRANCH_NAME = /^[a-zA-Z0-9._/-]+$/;
@@ -150,17 +152,17 @@ export async function getUpstream(appDir: string): Promise<UpstreamInfo> {
 }
 
 /**
- * Like getUpstream, but gives up waiting after `listBudgetMs` and reports
+ * Like getUpstream, but gives up waiting after `budgetMs` (default `listBudgetMs`) and reports
  * "unknown" (check pending). The underlying ls-remote keeps running and fills
  * the cache, so the next request is fast. Keeps the app list latency bounded
  * regardless of remote latency or app count.
  */
-export async function getUpstreamWithin(appDir: string): Promise<UpstreamInfo> {
+export async function getUpstreamWithin(appDir: string, budgetMs: number = upstreamTuning.listBudgetMs): Promise<UpstreamInfo> {
   let timer: NodeJS.Timeout | undefined;
   const budget = new Promise<UpstreamInfo>((res) => {
     timer = setTimeout(
       () => res(unknown({ branch: null, deployedCommit: null }, "upstream check still pending, retry shortly")),
-      upstreamTuning.listBudgetMs,
+      budgetMs,
     );
   });
   try {

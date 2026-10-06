@@ -13,7 +13,7 @@ import { runExec } from "../deploy/exec.js";
 import { loadRelayConfig } from "../config/relay.js";
 import { env } from "../config/env.js";
 import { getUpstream, clearUpstreamCache, upstreamTuning } from "./upstream.js";
-import { listApps } from "./apps.js";
+import { listApps, getAppDetail } from "./apps.js";
 
 const mockRunExec = vi.mocked(runExec);
 const A = "a".repeat(40);
@@ -102,6 +102,14 @@ describe("getUpstream state decision", () => {
     expect(u).toMatchObject({ state: "unknown", deployedCommit: null });
   });
 
+  it("is unknown when rev-parse HEAD does not print a full 40-hex sha", async () => {
+    const calls = stubGit({ head: "not-a-sha" });
+    const u = await getUpstream("/apps/x");
+    expect(u).toMatchObject({ state: "unknown", deployedCommit: null });
+    expect(u.reason).toMatch(/deployed commit/);
+    expect(calls.filter((c) => c[1] === "ls-remote")).toHaveLength(0);
+  });
+
   it("uses the checkout branch, not a fixed main", async () => {
     const calls = stubGit({ branch: "release/1.x" });
     await getUpstream("/apps/x");
@@ -146,6 +154,22 @@ describe("getUpstream is read-only and cached", () => {
     expect((await getUpstream("/apps/x")).state).toBe("current");
     stubGit({ head: B });
     expect((await getUpstream("/apps/x")).state).toBe("behind");
+  });
+
+  it("runs exactly one ls-remote for concurrent lookups of one app while the first is pending", async () => {
+    const calls = stubGit({ delayMs: 50 });
+    const results = await Promise.all([getUpstream("/apps/x"), getUpstream("/apps/x"), getUpstream("/apps/x")]);
+    expect(results.map((r) => r.state)).toEqual(["current", "current", "current"]);
+    expect(calls.filter((c) => c[1] === "ls-remote")).toHaveLength(1);
+  });
+
+  it("looks up the new branch after a branch switch within the TTL", async () => {
+    stubGit({ branch: "main" });
+    await getUpstream("/apps/x");
+    const calls = stubGit({ branch: "release" });
+    const u = await getUpstream("/apps/x");
+    expect(u.branch).toBe("release");
+    expect(calls).toContainEqual(["git", "ls-remote", "origin", "refs/heads/release"]);
   });
 
   it("caches a failed lookup too, so a dead remote is not re-probed per request", async () => {
@@ -209,5 +233,42 @@ describe("listApps upstream", () => {
     await listApps();
     expect(peak).toBeLessThanOrEqual(3);
     expect(peak).toBeGreaterThan(1);
+  });
+
+  it("getAppDetail carries upstream in the contract shape", async () => {
+    stubGit();
+    vi.mocked(loadRelayConfig).mockResolvedValue({ name: "x", health: "/h", compose_file: "docker-compose.yml" } as never);
+    const d = await getAppDetail("app0");
+    expect(d.upstream).toEqual({
+      branch: "main",
+      deployedCommit: A,
+      remoteHead: A,
+      checkedAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT.*Z$/),
+      state: "current",
+    });
+  });
+
+  it("getAppDetail does not wait for a slow or dead remote beyond the detail budget", async () => {
+    upstreamTuning.detailBudgetMs = 100;
+    stubGit({ delayMs: 1500 });
+    vi.mocked(loadRelayConfig).mockResolvedValue({ name: "x", health: "/h", compose_file: "docker-compose.yml" } as never);
+    const t0 = Date.now();
+    const d = await getAppDetail("app0");
+    expect(Date.now() - t0).toBeLessThan(900);
+    expect(d.upstream).toMatchObject({ state: "unknown" });
+    expect(d.upstream.reason).toMatch(/pending/);
+  });
+
+  it("getAppDetail is not held up by a full ls-remote queue", async () => {
+    upstreamTuning.detailBudgetMs = 100;
+    upstreamTuning.maxConcurrentLsRemote = 1;
+    stubGit({ delayMs: 1500 });
+    vi.mocked(loadRelayConfig).mockResolvedValue({ name: "x", health: "/h", compose_file: "docker-compose.yml" } as never);
+    void listApps();
+    await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    const d = await getAppDetail("app0");
+    expect(Date.now() - t0).toBeLessThan(900);
+    expect(d.upstream.state).toBe("unknown");
   });
 });

@@ -5,7 +5,7 @@ import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy, stepExecOptions } from "../deploy/engine.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
-import { getUpstream, getUpstreamWithin, type UpstreamInfo } from "./upstream.js";
+import { getUpstreamWithin, upstreamTuning, type UpstreamInfo } from "./upstream.js";
 
 // Preflight used to run here before git pull. That meant a commit that
 // *fixed* a broken .relay.yml (wrong compose_file, missing `command:`,
@@ -283,7 +283,7 @@ export async function getAppDetail(name: string) {
   const config = await loadRelayConfig(dir);
   const commit = await runExec("git", ["rev-parse", "--short", "HEAD"], dir);
   const ps = await runExec("docker", ["compose", "-f", config.compose_file, "ps", "--format", "json"], dir);
-  const upstream = await getUpstream(dir);
+  const upstream = await getUpstreamWithin(dir, upstreamTuning.detailBudgetMs);
 
   return {
     name,

@@ -99,14 +99,14 @@ Each configured app carries an `upstream` object (see [Upstream info](#upstream-
 
 | Field | Type | Meaning |
 |---|---|---|
-| `branch` | `string \| null` | The branch a deploy pulls: the checkout's current branch (`git rev-parse --abbrev-ref HEAD`, `main` when that is empty). `null` on a detached HEAD |
+| `branch` | `string \| null` | The default deploy branch, i.e. the one a deploy without an explicit `branch` pulls (a caller-supplied `body.branch` on `POST /api/apps/:name/deploy` pulls another branch, which this field does not follow): the checkout's current branch (`git rev-parse --abbrev-ref HEAD`, `main` when that is empty). `null` on a detached HEAD |
 | `deployedCommit` | `string \| null` | Full sha of the checkout's `HEAD` (`git rev-parse HEAD`) |
 | `remoteHead` | `string \| null` | Full sha of `refs/heads/<branch>` on `origin`, from `git ls-remote origin refs/heads/<branch>` |
 | `checkedAt` | `string \| null` | ISO-8601 UTC time `remoteHead` was obtained (cached results keep their original time) |
 | `state` | `"current" \| "behind" \| "unknown"` | `current`: `remoteHead` equals `deployedCommit`. `behind`: both known and different (the deployed commit differs from the remote branch head; without a fetch the relay cannot tell ahead from behind). `unknown`: anything else, never `current` on doubt |
 | `reason` | `string` | Present only when `state` is `unknown`: remote unreachable or timed out, branch not on the remote, detached HEAD, unreadable checkout, or lookup still pending |
 
-Behaviour: only `git rev-parse` and `git ls-remote` run, so the checkout is never changed (no fetch or pull). `ls-remote` has a 5 s timeout, at most 4 run at once across apps, and each outcome (including a failure) is cached in memory per app and branch for 60 s. `deployedCommit` is read fresh on every request, so a deploy shows as `current` at once.
+Behaviour: only `git rev-parse` and `git ls-remote` run, so the checkout is never changed (no fetch or pull). `ls-remote` has a 5 s timeout, at most 4 run at once across apps, and each outcome (including a failure) is cached in memory per app and branch for 60 s. `deployedCommit` is read fresh on every request, but `remoteHead` comes from the cache, so a result can lag the remote by up to the 60 s TTL in either direction: a deploy may keep showing `behind` until the cached `remoteHead` refreshes, and a new remote commit may not show as `behind` until then. The list waits at most 6 s and the single-app endpoint at most 3 s for a lookup before reporting `unknown` (pending).
 
 ### `GET /api/apps/:name`
 
@@ -118,11 +118,20 @@ Detailed status for a single app: config, containers, recent deploys.
     "name": "my-app",
     "config": { "name": "my-app", "health": "/api/health", "..." : "..." },
     "commit": "abc1234",
+    "upstream": {
+      "branch": "main",
+      "deployedCommit": "<40-hex sha>",
+      "remoteHead": "<40-hex sha>",
+      "checkedAt": "2026-10-06T12:00:00.000Z",
+      "state": "current"
+    },
     "containers": "...",
     "recentDeploys": []
   }
 }
 ```
+
+`upstream` is described under [Upstream info](#upstream-info). This endpoint waits at most 3 s for it and otherwise reports `state: "unknown"` (check pending, retry shortly).
 
 ### `POST /api/apps/:name/deploy`
 
@@ -254,6 +263,8 @@ Get status of an app or all apps: container state, health, current commit.
 | Input | Type | Required | Description |
 |-------|------|----------|-------------|
 | `app` | `string` | No | App name (lists all apps if omitted) |
+
+Both forms include the per-app `upstream` object (see [Upstream info](#upstream-info)): the single-app form returns it as `upstream` next to `commit`, the list form on each configured app. The single-app form waits at most 3 s for it.
 
 ### `relay_rollback`
 

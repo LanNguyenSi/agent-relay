@@ -8,8 +8,9 @@
   `getAppDetail`, logic in the new `src/services/upstream.ts`). Every `apps.ts`
   citation shifted down (+1 above `listApps`, +6 below `getAppDetail`) and was
   re-pointed; the claims were re-read against the changed code and are unchanged.
-  Three `apps.ts` citations in older entries below that went blank were re-pointed the
-  same way. `exec-trust-boundary.md` was re-verified and re-stamped: its `runExec`
+  Older entries below keep their citations as originally recorded; where an `apps.ts`
+  line there no longer resolves, read it against the re-pointed lines in the docs
+  themselves. `exec-trust-boundary.md` was re-verified and re-stamped: its `runExec`
   call-site list now also covers `src/services/upstream.ts` (git rev-parse, ls-remote).
   `okf-kit check --require-anchors docs/okf` finding set compared against the
   pre-change baseline: only anchor-required warnings already present, no new rule.
@@ -61,7 +62,7 @@
   `git reset --hard`, so a reset that fails part-way is `after_reset`. Re-verified
   `deploy-failure-surfaces.md` (phase paragraph reworded; citations re-pointed to
   `apps.ts:362-444`, `:362-377`, `:354-360`, `:391-392`, `:397`) and
-  `deploy-phase-model.md` (`apps.ts:426-432`, `:470-474`), re-stamped both plus
+  `deploy-phase-model.md` (`apps.ts:426-432`, `:464-468`), re-stamped both plus
   `path-containment-idiom.md` (citations above the edit, unmoved). `okf-kit check
   docs/okf` was run after the source commit.
 - 2026-10-03T12:06:26Z, task 994f6c81 rollback error phase: `rollbackApp` now tags thrown
@@ -69,8 +70,8 @@
   the rollback HTTP error body). Re-verified `deploy-failure-surfaces.md` against the
   changed `apps.ts`/`routes.ts` (new paragraph on the phase field; `rollbackApp` span
   re-pointed to `apps.ts:362-444`) and re-pointed `deploy-phase-model.md`'s two
-  `apps.ts` citations that shifted (`:426-432` preflight call, `:470-474`
-  `runPreflight`). Re-stamped both. `path-containment-idiom.md` (also sourced on `apps.ts`) was re-verified: its citations (`apps.ts:145-223`, `:151`, `:203-205`, `:218-220`) sit above the edit and are unmoved; re-stamped only. `okf-kit check docs/okf` was run after the
+  `apps.ts` citations that shifted (`:426-432` preflight call, `:464-468`
+  `runPreflight`). Re-stamped both. `path-containment-idiom.md` (also sourced on `apps.ts`) was re-verified: its citations (`apps.ts:144-222`, `:151`, `:203-205`, `:218-220`) sit above the edit and are unmoved; re-stamped only. `okf-kit check docs/okf` was run after the
   source commit.
 
 - 2026-10-03T12:22:27Z, the root `CHANGELOG.md` gained one `[Unreleased]` CI line
@@ -195,7 +196,7 @@
   being parsed as a continuation of the wrong prior citation). Re-pointed
   `path-containment-idiom.md`'s `safeAppDir` citations, flagged as a
   follow-up by the entry below: the function itself resolves at
-  `apps.ts:145-223`; its lexical idiom check resolves at `apps.ts:151`;
+  `apps.ts:144-222`; its lexical idiom check resolves at `apps.ts:151`;
   its post-realpath idiom re-check resolves at `apps.ts:218-220`; noted in
   prose that `safeAppDir` now routes the not-yet-deployed case through an
   intermediate dangling-symlink-chain fallback before reaching that
@@ -248,7 +249,7 @@
   but left untouched for the same reason (predates this task, `apps.ts` is
   not part of this change): `path-containment-idiom.md`'s citation for
   `safeAppDir` no longer resolves either (`safeAppDir` is now at
-  `apps.ts:145`); flagged to the operator as a separate follow-up. Ran
+  `apps.ts:144`); flagged to the operator as a separate follow-up. Ran
   `okf-kit@0.3.1 check --json docs/okf` against three states of this repo:
   `origin/main` (1277ddb), baseline 14 `sources-fresh` warnings, 0 errors;
   a83e802 (previous commit on this branch, entry below), 8 warnings, 0
