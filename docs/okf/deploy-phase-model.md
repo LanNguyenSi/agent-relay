@@ -3,7 +3,7 @@ type: invariant
 title: Deploy preflight phase model — which checks run when, and rollback's config source
 description: runPreflightChecks splits its 8 checks across pre-pull/post-pull/all phases by when each check has signal; force bypasses only non-critical checks; only (task 1074feb5) restricts the battery to named checks regardless of phase, skipping the excluded checks' runExec calls entirely rather than just discarding their results — both rollback gates use it to run only the two critical checks; rollback always reruns against prePullConfig/preCommandConfig, never the post-pull reloaded config, even when the new commit disabled rollback.
 tags: [deploy, preflight, phases, rollback, force, only]
-timestamp: 2026-10-06T14:06:41Z
+timestamp: 2026-10-06T14:17:01Z
 sources:
   - src/deploy/preflight.ts
   - src/deploy/engine.ts
