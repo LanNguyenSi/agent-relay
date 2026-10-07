@@ -12,3 +12,7 @@ services:
       - ${APPS_DIR:-./apps}:/apps
       - ${SSH_DIR:-/root/.ssh}:/root/.ssh:ro
     restart: unless-stopped
+    # Reap orphaned git/docker grandchildren (see docs/operations.md). The image
+    # already runs tini as its entrypoint; this keeps compose installs covered
+    # if the entrypoint is ever overridden.
+    init: true

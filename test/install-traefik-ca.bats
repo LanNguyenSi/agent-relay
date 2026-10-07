@@ -183,6 +183,29 @@ DOCKER_SHIM
   [[ "$output" =~ "routers.relay.tls=true" ]]
 }
 
+@test "relay compose sets init: true in every mode" {
+  for mode in greenfield existing-traefik port-only; do
+    _run_sourced "
+      RELAY_MODE=${mode}
+      TRAEFIK_CA=letsencrypt
+      TRAEFIK_EMAIL=admin@example.com
+      RELAY_DOMAIN=relay.example.com
+      APPS_DIR=/home/deploy/apps
+      RELAY_PORT=8222
+      PEBBLE_URL=
+      TRAEFIK_NETWORK=traefik-public
+      TRAEFIK_CERTRESOLVER=letsencrypt
+      RELAY_BIND=127.0.0.1
+      agent_relay_write_relay_compose '${COMPOSE_DIR}'
+      cat '${COMPOSE_DIR}/docker-compose.yml'
+    "
+    # `|| return 1`: under bash < 4.1 a failing test inside a loop does not
+    # trip errexit, so without it only the last mode would be checked.
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" =~ $'\n    init: true\n' ]] || return 1
+  done
+}
+
 # ─── validate_value PEBBLE_URL injection guard ───────────────────────────────
 
 @test "validate_value: PEBBLE_URL with double-quote rejected" {

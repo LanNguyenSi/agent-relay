@@ -150,6 +150,25 @@ docker compose up --build
 
 The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management), the apps directory, and `/root/.ssh` read-only (so `git pull` can authenticate to private remotes over SSH). Override the SSH source path with `SSH_DIR` in the dev `docker-compose.yml`; the production `docker-compose.prod.example.yml` mounts it the same way. If your apps only use public or HTTPS git remotes, the SSH mount is harmless but unused.
 
+### Zombie processes (defunct `[git]` entries)
+
+The relay runs `git`, `docker` and `/bin/sh` steps as child processes. Git itself detaches its own housekeeping after commands such as commit, push, fetch and pull (`git maintenance run --auto --detach`, formerly `gc --auto`): that background process outlives the git the relay spawned and is reparented to the container's PID 1 when it exits. A step killed by its timeout, or one that leaves a grandchild behind (a git transport helper, a backgrounded command), produces the same kind of orphan. Node as PID 1 only reaps children it spawned itself, so those orphans stay defunct (`Z` in `ps`) until the container restarts. This was seen on a long-running relay as dozens of defunct `[git]` entries.
+
+The image therefore runs `tini` as its entrypoint (`ENTRYPOINT ["/sbin/tini", "-s", "--"]`), and the compose files set `init: true` (the two shipped compose files and every variant `install.sh` generates). `-s` makes tini a subreaper, so the two layers stack safely.
+
+Shutdown behaviour changed with the init: `docker stop` and container recreation now deliver SIGTERM to node directly, and the relay ends immediately (exit 143) with no graceful drain. Before the change node ran as PID 1 without a SIGTERM handler, so the signal was ignored and Docker escalated to SIGKILL after about 10 s.
+
+Applying the fix to an existing install depends on how it was created:
+
+- Compose file built from source (`build: .`, the repository's `docker-compose.yml` and `docker-compose.prod.example.yml`): `docker compose up -d --build`.
+- Install created by `install.sh` (the generated compose uses `image: ghcr.io/lannguyensi/agent-relay:latest` and has no `build:`): once the image is republished, run `docker compose pull && docker compose up -d`. Compose files generated before this change also lack `init: true`; the tini entrypoint in the image covers that case.
+
+Check a running relay (expect `tini` as PID 1 and no `Z` rows):
+
+```bash
+docker exec agent-relay ps -o pid,ppid,stat,comm
+```
+
 ### Scripts
 
 | Script | Command | Description |

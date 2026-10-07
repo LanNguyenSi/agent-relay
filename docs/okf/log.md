@@ -2,6 +2,20 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-07T04:38:28Z, apps-dir-contract.md, health-check-reality.md and deploy-failure-surfaces.md
+  re-stamped after install.sh gained `init: true` in its generated relay compose
+  files (three lines, shifting the install-time symlink block) and
+  docs/operations.md and CHANGELOG.md were corrected (task 3713d624). The
+  `install.sh` citation in apps-dir-contract.md moved from 573-621 to 576-624 and
+  was re-checked against the block's first and last lines; the Deploy lifecycle
+  section and blocked-deploy CHANGELOG entry are unchanged.
+
+- 2026-10-07T04:23:11Z, apps-dir-contract.md, health-check-reality.md and deploy-failure-surfaces.md
+  re-stamped after docs/operations.md gained a "Zombie processes" section and
+  CHANGELOG.md gained a Fixed entry (task 3713d624). Re-read the APPS_DIR contract
+  section, the Deploy lifecycle section and the blocked-deploy CHANGELOG entry
+  the docs cite: unchanged, no claim affected.
+
 - 2026-10-06T14:17:01Z, path-containment-idiom.md, deploy-phase-model.md and deploy-failure-surfaces.md
   re-stamped after the per-app upstream info landed in `src/services/apps.ts`
   (task 1aa41129: one import line, a widened `listApps` and an `upstream` field in
