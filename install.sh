@@ -207,6 +207,7 @@ services:
   relay:
     image: ghcr.io/lannguyensi/agent-relay:latest
     container_name: agent-relay
+    init: true
     restart: unless-stopped
     env_file: .env
     ports:
@@ -238,6 +239,7 @@ services:
   relay:
     image: ghcr.io/lannguyensi/agent-relay:latest
     container_name: agent-relay
+    init: true
     restart: unless-stopped
     env_file: .env
     expose:
@@ -262,6 +264,7 @@ services:
   relay:
     image: ghcr.io/lannguyensi/agent-relay:latest
     container_name: agent-relay
+    init: true
     restart: unless-stopped
     env_file: .env
     ports:

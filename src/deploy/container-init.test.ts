@@ -17,10 +17,12 @@ describe("container init (zombie reaping)", () => {
     expect(runtimeStage).toMatch(/apk add[^\n]*\btini\b/);
   });
 
-  it("starts node under tini as a subreaper, in exec form", () => {
-    const df = read("Dockerfile");
-    expect(df).toMatch(/^ENTRYPOINT \["\/sbin\/tini", "-s", "--"\]$/m);
-    expect(df).toMatch(/^CMD \["node", "dist\/index\.js"\]$/m);
+  it("starts node under tini as a subreaper, in exec form, in the runtime stage", () => {
+    const runtimeStage = read("Dockerfile").split("FROM ").pop() ?? "";
+    expect(runtimeStage).toMatch(/^ENTRYPOINT \["\/sbin\/tini", "-s", "--"\]$/m);
+    expect(runtimeStage).toMatch(/^CMD \["node", "dist\/index\.js"\]$/m);
+    const entrypoints = runtimeStage.match(/^ENTRYPOINT .*$/gm) ?? [];
+    expect(entrypoints.at(-1)).toBe('ENTRYPOINT ["/sbin/tini", "-s", "--"]');
   });
 
   it.each(["docker-compose.yml", "docker-compose.prod.example.yml"])(
