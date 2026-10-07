@@ -11,18 +11,30 @@ import { describe, expect, it } from "vitest";
 const root = resolve(__dirname, "../..");
 const read = (f: string) => readFileSync(resolve(root, f), "utf8");
 
+// Stages split on FROM in any letter case; the runtime stage is the last one.
+const runtimeStage = () => read("Dockerfile").split(/^FROM /im).pop() ?? "";
+
+// Every `<keyword> ...` line of a stage, in order, with the keyword upper-cased
+// and the separating whitespace collapsed to one space.
+const instructions = (stage: string, keyword: string) =>
+  (stage.match(new RegExp(`^${keyword}\\s.*$`, "gim")) ?? []).map((line) =>
+    line.trim().replace(/^(\S+)\s+/, (_m, k: string) => `${k.toUpperCase()} `),
+  );
+
 describe("container init (zombie reaping)", () => {
   it("installs tini in the runtime image", () => {
-    const runtimeStage = read("Dockerfile").split(/^FROM /m).pop() ?? "";
-    expect(runtimeStage).toMatch(/apk add[^\n]*\btini\b/);
+    expect(runtimeStage()).toMatch(/^RUN [^\n]*apk add[^\n]*\btini\b/im);
   });
 
   it("starts node under tini as a subreaper, in exec form, in the runtime stage", () => {
-    const runtimeStage = read("Dockerfile").split("FROM ").pop() ?? "";
-    expect(runtimeStage).toMatch(/^ENTRYPOINT \["\/sbin\/tini", "-s", "--"\]$/m);
-    expect(runtimeStage).toMatch(/^CMD \["node", "dist\/index\.js"\]$/m);
-    const entrypoints = runtimeStage.match(/^ENTRYPOINT .*$/gm) ?? [];
+    const stage = runtimeStage();
+    // Docker instruction keywords are case-insensitive: a lowercase
+    // `entrypoint`/`cmd` line still takes effect, so collect every spelling
+    // and compare the last one after normalising the keyword.
+    const entrypoints = instructions(stage, "ENTRYPOINT");
+    const cmds = instructions(stage, "CMD");
     expect(entrypoints.at(-1)).toBe('ENTRYPOINT ["/sbin/tini", "-s", "--"]');
+    expect(cmds.at(-1)).toBe('CMD ["node", "dist/index.js"]');
   });
 
   it.each(["docker-compose.yml", "docker-compose.prod.example.yml"])(
