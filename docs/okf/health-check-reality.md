@@ -12,7 +12,7 @@ description: >-
   lifecycle section (moved there from README.md 2026-09-26; README.md keeps
   only a one-line pointer).
 tags: [health-check, dead-code, docs-drift, deploy]
-timestamp: 2026-10-04T13:51:39Z
+timestamp: 2026-10-07T04:23:11Z
 sources:
   - src/deploy/engine.ts
   - docs/operations.md
