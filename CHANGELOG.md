@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **`@modelcontextprotocol/sdk` 1.32.1** (GHSA-6qxp-vccf-f47h, task aff72e2b): the lockfile resolves 1.32.1 and the dependency range is now `^1.32.1`, so consumers cannot resolve an affected version. Since 1.30.1 the SDK's HTTP server transports apply a 4 MiB default request-body limit and a 100-message batch cap.
+
 ### Fixed
 
 - **The relay container no longer accumulates defunct `[git]` processes** (task 3713d624). Root cause: `node dist/index.js` ran as PID 1 with no init. Git's own detached auto-maintenance (`git maintenance run --auto --detach` after commit, push, fetch, pull) is the main source of the orphans, next to steps killed by their timeout. They are reparented to PID 1, and Node only reaps children it spawned itself, so they stayed defunct until the container restarted. The image now installs `tini` and runs it as the entrypoint (`-s`, subreaper), and `docker-compose.yml`, `docker-compose.prod.example.yml` and every compose variant `install.sh` generates set `init: true`. A 20-cycle container soak left 60 defunct processes before and 0 after; static tests pin the Dockerfile and compose settings. Upgrade: source-built compose files need `docker compose up -d --build`; installs created by `install.sh` need `docker compose pull && docker compose up -d` once the image is republished. Verify with `docker exec agent-relay ps -o pid,ppid,stat,comm`. Behaviour change: stop and recreate now end the relay immediately (SIGTERM reaches node, exit 143, no graceful drain); before, SIGTERM was ignored and Docker sent SIGKILL after about 10 s. See `docs/operations.md`.
