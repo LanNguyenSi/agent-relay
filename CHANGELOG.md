@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The relay container no longer accumulates defunct `[git]` processes** (task 3713d624). Root cause: `node dist/index.js` ran as PID 1 with no init. Grandchildren orphaned by a killed or exited git/docker/sh step are reparented to PID 1, and Node only reaps children it spawned itself, so they stayed defunct until the container restarted. The image now installs `tini` and runs it as the entrypoint (`-s`, subreaper), and `docker-compose.yml` and `docker-compose.prod.example.yml` set `init: true`. A 20-cycle container soak left 60 defunct processes before and 0 after; a static test pins the Dockerfile and compose settings. Existing installs need `docker compose up -d --build`. See `docs/operations.md`.
+
 ### Added
 
 - **Per-app `upstream` info on `GET /api/apps` and `GET /api/apps/:name`** (task 1aa41129). Each app reports `{ branch, deployedCommit, remoteHead, checkedAt, state, reason? }`, where `state` is `current`, `behind` (the deployed commit differs from the remote branch head) or `unknown` (remote unreachable, timed out, branch missing on the remote, detached HEAD; never `current` on doubt), so deploy-panel can flag stale apps without a manual SHA comparison. Read-only: only `git rev-parse` and `git ls-remote origin refs/heads/<branch>` run, never fetch or pull. The branch is the one a deploy pulls (the checkout's current branch). `ls-remote` has a 5 s timeout, at most 4 run at once, results (failures too) are cached in memory for 60 s, the app list waits at most 6 s and the single-app detail (also MCP `relay_status` with an app) at most 3 s before reporting `unknown` (check pending) for a slow remote or a full lookup queue. A result can lag the remote by up to the 60 s TTL in either direction. The field is additive; see `docs/integration.md`.

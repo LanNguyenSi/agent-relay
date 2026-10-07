@@ -150,6 +150,18 @@ docker compose up --build
 
 The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management), the apps directory, and `/root/.ssh` read-only (so `git pull` can authenticate to private remotes over SSH). Override the SSH source path with `SSH_DIR` in the dev `docker-compose.yml`; the production `docker-compose.prod.example.yml` mounts it the same way. If your apps only use public or HTTPS git remotes, the SSH mount is harmless but unused.
 
+### Zombie processes (defunct `[git]` entries)
+
+The relay runs `git`, `docker` and `/bin/sh` steps as child processes. When a step is killed by its timeout, or a step leaves a grandchild behind (a git transport helper, a backgrounded command), the orphan is reparented to the container's PID 1. Node as PID 1 only reaps children it spawned itself, so those orphans stay defunct (`Z` in `ps`) until the container restarts. This was seen on a long-running relay as dozens of defunct `[git]` entries.
+
+The image therefore runs `tini` as its entrypoint (`ENTRYPOINT ["/sbin/tini", "-s", "--"]`), and both compose files set `init: true`. `-s` makes tini a subreaper, so the two layers stack safely. After updating an existing install, rebuild and recreate the container (`docker compose up -d --build`) for the fix to apply.
+
+Check a running relay (expect `tini` as PID 1 and no `Z` rows):
+
+```bash
+docker exec agent-relay ps -o pid,ppid,stat,comm
+```
+
 ### Scripts
 
 | Script | Command | Description |
