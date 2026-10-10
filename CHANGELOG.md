@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-10
+
+**Minor release: caller-supplied deploy id recorded in deploy history, per-app upstream info, tini as the container init, the server/app factory split and an MCP SDK security bump.**
+
 ### Security
 
 - **`@modelcontextprotocol/sdk` 1.32.1** (GHSA-6qxp-vccf-f47h, task aff72e2b): the lockfile resolves 1.32.1 and the dependency range is now `^1.32.1`, so consumers cannot resolve an affected version. Since 1.30.1 the SDK's HTTP server transports apply a 4 MiB default request-body limit and a 100-message batch cap.
+- **proxy-addr and source-map-js lockfile bumps** (CVE sweep 2026-10-06, PR #98): proxy-addr 2.0.7 -> 2.0.8 closes GHSA-jqcg-44mw-7w3h (runtime transitive); source-map-js 1.2.1 -> 1.2.2 closes GHSA-68fv-2mgg-jv7q (dev only).
 
 ### Changed
 
