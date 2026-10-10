@@ -107,6 +107,8 @@ describe("relay server over a real socket: routing", () => {
     const url = await listen();
     const res = await fetch(`${url}/api/apps`);
     expect(res.status).toBe(401);
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    expect(await res.json()).toEqual({ error: "unauthorized" });
   });
 
   it("/mcp is routed past Hono and rejects a missing token with the server's own 401", async () => {
@@ -114,6 +116,49 @@ describe("relay server over a real socket: routing", () => {
     const res = await fetch(`${url}/mcp`, { method: "POST", body: "{}" });
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: "unauthorized" });
+  });
+
+  it("/mcp with a valid token answers an MCP initialize round trip over the socket", async () => {
+    const url = await listen();
+    const res = await withDeadline(
+      fetch(`${url}/mcp`, {
+        method: "POST",
+        headers: {
+          Authorization: AUTH,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "server-test", version: "0.0.0" },
+          },
+        }),
+      }),
+      "mcp response headers",
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/text\/event-stream/);
+
+    const reader = res.body!.getReader();
+    const frame = await withDeadline(readFrame(reader, { buf: "" }), "mcp initialize frame");
+    await reader.cancel();
+    expect(frame?.event).toBe("message");
+    const msg = frame?.data as {
+      jsonrpc: string;
+      id: number;
+      result?: { protocolVersion: string; serverInfo: { name: string; version: string } };
+      error?: unknown;
+    };
+    expect(msg.jsonrpc).toBe("2.0");
+    expect(msg.id).toBe(1);
+    expect(msg.error).toBeUndefined();
+    expect(msg.result?.serverInfo).toEqual({ name: "agent-relay", version: RELAY_VERSION });
+    expect(typeof msg.result?.protocolVersion).toBe("string");
   });
 });
 
