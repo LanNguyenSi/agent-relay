@@ -2,6 +2,12 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-10T06:31:59Z, deploy-failure-surfaces.md re-stamped after the 0.6.0 release cut
+  moved the `[Unreleased]` section of `CHANGELOG.md` under `[0.6.0]`.
+  Re-verified the doc's CHANGELOG-derived claim (blocked deploy response
+  wrapped under `result`, PR #45, `[0.4.0]` section): the entry is unchanged
+  and still resolves; no claim affected.
+
 - 2026-10-07T04:38:28Z, apps-dir-contract.md, health-check-reality.md and deploy-failure-surfaces.md
   re-stamped after install.sh gained `init: true` in its generated relay compose
   files (three lines, shifting the install-time symlink block) and
