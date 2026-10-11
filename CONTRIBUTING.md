@@ -56,6 +56,8 @@ flowchart TD
     ROUTES --> APPS["services/apps.ts"]
     ROUTES --> ENVSVC["services/env.ts"]
     ROUTES --> HIST["services/history.ts"]
+    ENVSVC --> EF[("app .env")]
+    HIST --> HF[("APPS_DIR/.relay-history.json")]
     MCP --> APPS
     MCP --> HIST
     ENVSVC -->|"safeAppDir"| APPS
@@ -68,8 +70,6 @@ flowchart TD
     PRE --> EXEC
     UP --> EXEC
     EXEC --> SUB["git, docker, /bin/sh"]
-    HIST --> HF[("APPS_DIR/.relay-history.json")]
-    ENVSVC --> EF[("app .env")]
 ```
 
 ## Style
