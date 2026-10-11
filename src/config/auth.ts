@@ -16,7 +16,7 @@ export function safeEqual(a: string, b: string): boolean {
 /**
  * Validates an `Authorization: Bearer <token>` header against AUTH_TOKEN using
  * a constant-time comparison. Shared by the HTTP API (src/api/routes.ts) and
- * the MCP endpoint (src/index.ts) so the "constant-time compared" guarantee in
+ * the MCP endpoint (src/server.ts) so the "constant-time compared" guarantee in
  * docs/security.md holds at every call site.
  */
 export function isAuthorized(authHeader: string | undefined): boolean {

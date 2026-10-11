@@ -8,9 +8,13 @@ All `/api` endpoints require `Authorization: Bearer <AUTH_TOKEN>`. The exception
 
 The auth model is intentionally minimal: one bearer token, constant-time compared. No rate limits, no TLS termination, no mTLS. TLS is the responsibility of whatever sits in front of the relay (Traefik in `greenfield` / `existing-traefik` modes; nginx or Caddy in `port-only`). See [docs/operations.md](operations.md) for install modes.
 
+In `greenfield` mode, the compose file written by `install.sh` also publishes `RELAY_PORT` (default 8222) on all host interfaces over plain HTTP, next to the Traefik route. Traefik routes to the relay only when `RELAY_DOMAIN` is set together with `TRAEFIK_EMAIL` or `TRAEFIK_CA=self-signed`. Otherwise the relay is reachable only over plain HTTP on that port. Block the port with a firewall rule that also applies to Docker-published ports, or use `existing-traefik`, or `port-only` with the default loopback bind.
+
 ## `.relay.yml` shell-exec trust boundary
 
 The `command`, `pre_update`, and `post_update` fields in `.relay.yml` execute as **arbitrary shell** on the deploy host, as the relay user, with access to the Docker socket. The implicit trust boundary is therefore **push access to the deployed branch**: anyone who can land a commit that edits `.relay.yml` can run anything the relay user can run.
+
+`health` is a fourth executable input, through a different mechanism: the relay embeds the value without escaping in a `node -e` fetch snippet that runs inside each running app container through `docker compose exec`, so a crafted `health` value runs arbitrary JavaScript in that container. It sits behind the same trust boundary (push access to the deploy branch).
 
 Treat the deploy branch like a deploy key:
 
@@ -18,7 +22,7 @@ Treat the deploy branch like a deploy key:
 - Require code review for `.relay.yml` changes.
 - Don't deploy from forks or unreviewed branches.
 
-`compose_file` is the one exception. It is never shell-interpolated: it is passed as a literal argument to `docker compose` via an `execFile` arg array, so the charset regex (`[A-Za-z0-9._/-]+`) is path hygiene, not a shell-escape guard. Path traversal is contained separately by resolving the path and rejecting anything that lands outside `APPS_DIR`; `..` segments are therefore allowed as long as they stay under `APPS_DIR` (the legitimate sibling-app case `../other-app/docker-compose.yml`), while deeper escapes like `../../etc/passwd` are rejected.
+`compose_file` is the one exception. It is never shell-interpolated: it is passed as a literal argument to `docker compose` via an `execFile` arg array, so the charset regex (`[A-Za-z0-9._/-]+`) is path hygiene, not a shell-escape guard. Path traversal is contained separately by resolving the path and rejecting anything that lands outside `APPS_DIR`; `..` segments are therefore allowed as long as they stay under `APPS_DIR` (the legitimate sibling-app case `../other-app/docker-compose.yml`), while deeper escapes like `../../etc/passwd` are rejected. Absolute paths are rejected outright, and so is a symlink that resolves outside `APPS_DIR`.
 
 `step_timeout_seconds` is read from the same post-pull `.relay.yml`, so a pushed commit can also raise its own deploy's per-step exec timeout up to the 7200 s ceiling (`build`/`up`/`post_update`). This sits inside the trust boundary above rather than outside it: raising your own timeout is a strictly smaller capability than the arbitrary shell already granted by `command`/`pre_update`/`post_update`.
 
