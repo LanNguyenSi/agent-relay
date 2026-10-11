@@ -18,7 +18,7 @@ pre_update:                         # commands to run before deploy
   - make db-generate
 post_update:                        # commands to run after deploy
   - docker compose exec backend npx prisma migrate deploy
-rollback: true                      # auto-rollback when a step after git pull fails (default: true)
+rollback: true                      # auto-rollback when the re-read .relay.yml is invalid or build, up, post_update or the health check fails (default: true)
 # step_timeout_seconds: 600          # per-step exec timeout override (default: 300)
 ```
 
@@ -26,7 +26,7 @@ rollback: true                      # auto-rollback when a step after git pull f
 |-------|------|----------|---------|-------------|
 | `name` | `string` | Yes | -- | Echoed back in the app's `config`; the relay addresses the app by its directory name under `APPS_DIR`, not by this field |
 | `health` | `string` | Yes | -- | Path the health probe requests, starting with `/` (e.g. `/api/health`). The probe runs inside the app's own containers, see the note below the table |
-| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name. Must match `[A-Za-z0-9._/-]+`. Passed as a literal `docker compose` argument (never shell-interpolated); Must be a relative path. Absolute paths are rejected, and so is any path that resolves outside `APPS_DIR`, lexically or through a symlink. Sibling-app paths like `../other-app/docker-compose.yml` are allowed. |
+| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name. Must match `[A-Za-z0-9._/-]+`. Passed as a literal `docker compose` argument (never shell-interpolated). It must be a relative path. Absolute paths are rejected, and so is any path that resolves outside `APPS_DIR`, lexically or through a symlink. Sibling-app paths like `../other-app/docker-compose.yml` are allowed. |
 | `command` | `string` | No | -- | Custom deploy command (replaces default git+compose flow). **Arbitrary shell.** |
 | `pre_update` | `string[]` | No | `[]` | Commands to run before the deploy. **Arbitrary shell.** |
 | `post_update` | `string[]` | No | `[]` | Commands to run after compose up. **Arbitrary shell.** |

@@ -16,7 +16,7 @@ AI-driven VPS deployment relay: an MCP server and HTTP API that lets Claude Code
 
 ## Overview
 
-`ssh root@vps && docker compose up -d` has no place for an AI agent: `ssh` needs a private key and a TTY, and it validates nothing before or after the deploy. agent-relay replaces it with a single daemon, one auth token, and one HTTP/MCP surface: pre-flight checks before and after `git pull`, an automatic rollback when a deploy step after `git pull` fails, and a deploy history. It runs on the VPS itself, alongside the apps it deploys.
+`ssh root@vps && docker compose up -d` has no place for an AI agent: `ssh` needs a private key and a TTY, and it validates nothing before or after the deploy. agent-relay replaces it with a single daemon, one auth token, and one HTTP/MCP surface: pre-flight checks before and after `git pull`, an automatic rollback when the re-read `.relay.yml` is invalid or the build, start, a `post_update` command or the health check fails after `git pull`, and a deploy history. It runs on the VPS itself, alongside the apps it deploys.
 
 ## Key features
 

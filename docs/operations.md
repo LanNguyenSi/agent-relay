@@ -270,8 +270,10 @@ flowchart TD
     RB["auto-rollback<br/>pre-pull .relay.yml"] --> Q{"rollback: true?"}
     Q -- "no" --> SKIP["rollback skipped"]
     Q -- "yes" --> R1["git reset --hard commitBefore"]
-    R1 -- "fail" --> STOP["rollback stopped<br/>containers unchanged"]
+    R1 -- "fail" --> STOP["rollback stopped<br/>running containers left as they are"]
     R1 -- "ok" --> R2["rollback pre-flight<br/>apps_root_mount_congruence,<br/>compose_bind_mount_sources_exist"]
-    R2 -- "fail" --> RBLK["rollback blocked<br/>containers unchanged"]
-    R2 -- "pass" --> R3["compose build,<br/>compose up -d"]
+    R2 -- "fail" --> RBLK["rollback blocked<br/>running containers left as they are"]
+    R2 -- "pass" --> R3["compose build"]
+    R3 -- "fail" --> STOP
+    R3 -- "ok" --> R4["compose up -d"]
 ```
