@@ -2,8 +2,8 @@ name: Publish
 
 # Publishes the agent-relay Docker image to GHCR so `install.sh`'s
 # pinned `image: ghcr.io/lannguyensi/agent-relay:latest` reference
-# actually resolves. Triggered on every merge to `main` and on tag
-# pushes.
+# actually resolves. Triggered on merges to `main` that change more
+# than documentation (see paths-ignore below) and on tag pushes.
 #
 # One-time operator step after the first run: flip the package
 # visibility to Public in GitHub UI → Your Profile → Packages →
@@ -15,6 +15,14 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # A push to main whose changed files ALL match these patterns does not
+    # publish, so :latest only moves for changes that can reach the image
+    # (Dockerfile, package files, tsconfig.json, src/). GitHub does not apply
+    # path filters to tag pushes, so v* releases always publish.
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
   workflow_dispatch:
 
 concurrency:
