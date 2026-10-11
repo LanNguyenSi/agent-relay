@@ -1,16 +1,15 @@
 ---
 type: module
-title: Health check reality — the wired inline check (divergence resolved 2026-08-10)
+title: Health check reality — the wired inline check (divergence resolved)
 description: >-
   The deploy path runs engine.ts's inline runHealthCheck (fixed 5 retries /
   5000ms delay, docker compose exec + node -e fetch inside each service
   container, hardcoded ports unless health_port is set). The formerly
-  documented divergence — a fully tested but never-imported
-  exponential-backoff module in src/deploy/health.ts — was resolved on
-  2026-08-10 by operator decision, deleting health.ts and its test as dead
-  code. The behavior is now described in docs/operations.md's Deploy
-  lifecycle section (moved there from README.md 2026-09-26; README.md keeps
-  only a one-line pointer).
+  documented divergence, a fully tested but never-imported
+  exponential-backoff module in src/deploy/health.ts, was resolved in PR #71
+  by deleting health.ts and its test as dead code. The behavior is described
+  in docs/operations.md's Deploy lifecycle section; README.md keeps only a
+  pointer to it.
 tags: [health-check, dead-code, docs-drift, deploy]
 timestamp: 2026-10-07T04:38:28Z
 sources:
@@ -41,15 +40,13 @@ sources:
 
 ## Resolved divergence (history)
 
-Until 2026-08-10 the repo also carried `src/deploy/health.ts`, a fully
-tested `checkHealth` implementation (direct `fetch` with exponential
-backoff, 5-second per-attempt timeout) that was imported only by its own
-test — dead code from the deploy path's perspective — while `README.md`
-described that dead implementation ("exponential backoff") instead of the
-wired one. The maintainer decision (operator, 2026-08-10, quickwin batch
-run `2026-08-10-quickwin-batch6`) resolved it as option (b) of the tracked
-follow-up: delete `health.ts` and `health.test.ts` as dead code, keep the
-wired in-container probe unchanged, and correct `README.md` to describe
-the shipped behavior. If exponential backoff or relay-side direct HTTP
-probing is ever wanted, it should be designed against `runHealthCheck`,
-not resurrected from the deleted module.
+The repo formerly carried `src/deploy/health.ts`, a fully tested
+`checkHealth` implementation (direct `fetch` with exponential backoff,
+5-second per-attempt timeout) that was imported only by its own test, dead
+code from the deploy path's perspective, while `README.md` described that
+dead implementation ("exponential backoff") instead of the wired one. PR #71
+deleted `health.ts` and `health.test.ts` as dead code, kept the wired
+in-container probe unchanged, and corrected the docs to describe the shipped
+behavior. If exponential backoff or relay-side direct HTTP probing is ever
+wanted, it should be designed against `runHealthCheck`, not resurrected from
+the deleted module.

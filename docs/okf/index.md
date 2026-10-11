@@ -17,22 +17,19 @@ deliberately do not duplicate them.
 
 - [Health check reality](health-check-reality.md), the wired inline health
   check in `engine.ts` (fixed retries, docker-compose-exec probing).
-  Resolved 2026-08-10: the unimported exponential-backoff module
-  `health.ts` was deleted as dead code; `docs/operations.md`'s Deploy
-  lifecycle section now describes the wired behavior.
 
 ## Invariants
 
 - [Deploy preflight phase model](deploy-phase-model.md), which of the 8
   preflight checks run pre-pull vs post-pull vs both, why `force` cannot
-  bypass the two APPS_DIR-congruence checks, and why rollback always
+  bypass the two APPS_DIR-congruence checks, and why auto-rollback always
   reruns against the pre-pull (or pre-command) config, never the reloaded
   one.
 - [Exec trust boundary](exec-trust-boundary.md), the `runExec`
-  (execFile-argv) vs `runShell` (`/bin/sh -c`) split, and a residual not
-  covered by `docs/security.md`: `config.health` string-interpolated into
-  a `node -e` snippet, same trust tier as the documented shell fields but
-  a different injection mechanism.
+  (execFile-argv) vs `runShell` (`/bin/sh -c`) split, and where the
+  `config.health` residual sits in the code: string-interpolated into a
+  `node -e` snippet, same trust tier as the shell fields but a different
+  injection mechanism.
 - [Path containment idiom](path-containment-idiom.md), the
   `resolve()` + `startsWith(root + sep)` pattern used at three call sites
   to avoid a sibling-prefix false positive, and an open question: two of
