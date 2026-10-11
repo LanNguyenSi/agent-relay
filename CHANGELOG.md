@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Documentation-only pushes to `main` no longer publish a new image** (task 7c011beb). The Publish workflow's push trigger ignores `docs/**`, root-level `*.md` and `LICENSE`, so `:latest` and `:main-<sha>` move only for pushes that change something else (the image inputs are `Dockerfile`, the package files, `tsconfig.json` and `src/`). Tag releases and manual runs are unchanged. A static test pins the filter.
+
 ## [0.6.0] - 2026-10-10
 
 **Minor release: caller-supplied deploy id recorded in deploy history, per-app upstream info, tini as the container init, the server/app factory split and an MCP SDK security bump.**
