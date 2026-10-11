@@ -662,7 +662,8 @@ fi
 # field, so a failed pull is terminal — we surface the docker error and
 # bail rather than pretending it can "build locally". The publish
 # workflow in .github/workflows/publish.yml keeps ghcr.io/lannguyensi/
-# agent-relay:latest current on every merge to main; if the pull is
+# agent-relay:latest current on every merge to main that changes more
+# than documentation, and on every v* tag; if the pull is
 # still denied, the package visibility is likely still set to Private
 # — see CHANGELOG entry 2026-04-24 for the one-time flip.
 if ! docker compose -f "$RELAY_DIR/docker-compose.yml" pull; then
