@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Active development is on `main`. The supported distribution is the `ghcr.io/lannguyensi/agent-relay:latest` Docker image (published from `main` and on `v*` tags). Older tags and SHAs are not patched.
+Active development is on `main`. The supported distribution is the `ghcr.io/lannguyensi/agent-relay:latest` Docker image for `linux/amd64` (published from `main` and on `v*` tags). Older tags and SHAs are not patched.
 
 agent-relay sits on the network path between deployer and VPS targets, so vulnerabilities are treated as serious by default.
 
@@ -12,7 +12,7 @@ Please **do not** open a public GitHub issue for security reports.
 
 Email **contact@lan-nguyen-si.de** with:
 
-- Affected version (npm / Docker tag / commit SHA)
+- Affected version (Docker image tag or digest, release version, or commit SHA)
 - Reproduction steps or proof-of-concept
 - Impact assessment (especially: command injection, auth bypass, secret leak)
 

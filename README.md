@@ -16,19 +16,19 @@ AI-driven VPS deployment relay: an MCP server and HTTP API that lets Claude Code
 
 ## Overview
 
-`ssh root@vps && docker compose up -d` has no place for an AI agent: `ssh` needs a private key and a TTY, and it validates nothing before or after the deploy. agent-relay replaces it with a single daemon, one auth token, and one HTTP/MCP surface: pre-flight checks before and after `git pull`, an automatic rollback on a failed health check, and a deploy history. It runs on the VPS itself, alongside the apps it deploys.
+`ssh root@vps && docker compose up -d` has no place for an AI agent: `ssh` needs a private key and a TTY, and it validates nothing before or after the deploy. agent-relay replaces it with a single daemon, one auth token, and one HTTP/MCP surface: pre-flight checks before and after `git pull`, an automatic rollback when the re-read `.relay.yml` is invalid or the build, start, a `post_update` command or the health check fails after `git pull`, and a deploy history. It runs on the VPS itself, alongside the apps it deploys.
 
 ## Key features
 
 - Pre-flight checks before `git pull` (working tree clean, remote reachable, apps root mount congruent) and after (compose file exists, containers running, Traefik labels present, health endpoint defined, compose bind mount sources exist).
-- Automatic rollback to the previous commit when the post-deploy health check fails; see [Deploy lifecycle](docs/operations.md#deploy-lifecycle) for the full flow and diagram.
+- Automatic rollback to the previous commit when the re-read `.relay.yml` is invalid or `docker compose build`, `docker compose up`, a `post_update` command or the post-deploy health check fails; see [Deploy lifecycle](docs/operations.md#deploy-lifecycle) for the full flow and diagram.
 - Deploy history: the last 100 deploys (across all apps), with commit before/after, status, duration, and trigger source.
 - One bearer token secures both the HTTP API and the 5 MCP tools.
 - Centralized management of multiple VPS targets from [deploy-panel](https://github.com/LanNguyenSi/deploy-panel).
 
 ## Quick start
 
-On a fresh Ubuntu/Debian VPS, as root via sudo (the installer installs Docker if missing; it needs the Compose v2 plugin):
+On a fresh x86_64 (amd64) Ubuntu/Debian VPS, as root via sudo (the installer installs Docker if missing; it needs the Compose v2 plugin):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh -o /tmp/agent-relay-install.sh
@@ -36,6 +36,8 @@ sudo RELAY_DOMAIN=relay.example.com \
      TRAEFIK_EMAIL=you@example.com \
      bash /tmp/agent-relay-install.sh
 ```
+
+When this resolves to `greenfield` (port 80 free), the relay port (8222) is also published on all host interfaces as plain HTTP, next to the TLS route; see [docs/security.md](docs/security.md#api-authentication).
 
 > Env vars must be set on the `sudo` line, not before `curl`: the pipe binds them to the download, not to the `bash` that runs the script. If your sudoers strips command-line variables, `export` them and use `sudo -E`, or run as root directly.
 
@@ -69,11 +71,12 @@ That call runs `git pull`, pre-flight checks, `docker compose build`/`up`, and t
 
 ## Development and contributing
 
-Requires Node.js 20+.
+Requires Node.js 20.19+ or 22.13+ for development (CI uses Node 22).
 
 ```bash
 npm install
 npm run build
+npm run lint
 npm test
 ```
 

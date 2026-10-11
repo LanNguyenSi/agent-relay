@@ -18,23 +18,25 @@ pre_update:                         # commands to run before deploy
   - make db-generate
 post_update:                        # commands to run after deploy
   - docker compose exec backend npx prisma migrate deploy
-rollback: true                      # auto-rollback on health check failure (default: true)
+rollback: true                      # auto-rollback when the re-read .relay.yml is invalid or build, up, post_update or the health check fails (default: true)
 # step_timeout_seconds: 600          # per-step exec timeout override (default: 300)
 ```
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `name` | `string` | Yes | -- | App identifier |
-| `health` | `string` | Yes | -- | Health check endpoint path (e.g. `/api/health`) |
-| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name. Must match `[A-Za-z0-9._/-]+`. Passed as a literal `docker compose` argument (never shell-interpolated); rejected only if it resolves outside `APPS_DIR`, so sibling-app paths like `../other-app/docker-compose.yml` are allowed. |
+| `name` | `string` | Yes | -- | Echoed back in the app's `config`; the relay addresses the app by its directory name under `APPS_DIR`, not by this field |
+| `health` | `string` | Yes | -- | Path the health probe requests, starting with `/` (e.g. `/api/health`). The probe runs inside the app's own containers, see the note below the table |
+| `compose_file` | `string` | No | `docker-compose.yml` | Docker Compose file name. Must match `[A-Za-z0-9._/-]+`. Passed as a literal `docker compose` argument (never shell-interpolated). It must be a relative path. Absolute paths are rejected, and so is any path that resolves outside `APPS_DIR`, lexically or through a symlink. Sibling-app paths like `../other-app/docker-compose.yml` are allowed. |
 | `command` | `string` | No | -- | Custom deploy command (replaces default git+compose flow). **Arbitrary shell.** |
 | `pre_update` | `string[]` | No | `[]` | Commands to run before the deploy. **Arbitrary shell.** |
 | `post_update` | `string[]` | No | `[]` | Commands to run after compose up. **Arbitrary shell.** |
-| `health_port` | `number` | No | -- | Port for health check requests (if different from Traefik-routed port) |
+| `health_port` | `number` | No | `3000, 3001, 4000, 5000, 8000, 8080` (tried in turn) | Container-internal port the probe requests on `localhost` |
 | `rollback` | `boolean` | No | `true` | Auto-rollback to previous commit on failure |
 | `step_timeout_seconds` | `integer` | No | `300` | Per-step exec timeout, in seconds (1-7200). Applies to `pre_update`, `git pull`, `compose build`/`up`, `post_update`, `command`, and rollback `compose build`/`up`. A step killed by this timeout, or by the fixed 16 MiB per-stream (stdout and stderr each) buffer cap, carries a `[relay] ...` reason line appended to its output. The stored step output itself is separately capped at 200,000 characters; a step that exceeds it keeps only the last 200,000 characters, with a `[relay] output truncated: ...` notice line prepended. |
 
-The shell-exec fields (`command`, `pre_update`, `post_update`) cross a real trust boundary: see [docs/security.md](security.md).
+Health check requirement: for each running compose service the relay runs `docker compose exec -T <service> node -e "fetch('http://localhost:<port><health>')"`, up to 5 attempts 5 s apart. At least one running service image must include Node.js 18 or later (global `fetch`) and answer `health` with a 2xx on `localhost`. An app without Node.js in any service fails every health check and is rolled back when `rollback` is true.
+
+The shell-exec fields (`command`, `pre_update`, `post_update`) and `health`, which is interpolated into an in-container `node -e` snippet, cross a real trust boundary: see [docs/security.md](security.md).
 
 ## HTTP API
 
@@ -58,7 +60,9 @@ Authenticated relay health check. Same as `/health` but includes server uptime.
 
 ### `GET /api/system`
 
-Server resource metrics (CPU, memory, disk). `cpu.usage` and `memory.*Mb` are numbers; the `disk` fields are the raw `df -h` strings (size/used carry unit suffixes, `percent` includes the `%`).
+Server resource metrics (CPU, memory, disk). `cpu.usage` and `memory.*Mb` are numbers; the `disk` fields are the raw `df -h` strings (size/used carry unit suffixes, `percent` includes the `%`). `disk` describes the filesystem that holds the relay container's root (`df -h /`), and `uptime` is the relay process uptime in seconds.
+
+`cpu.usage` is not reliable in the published image: it is parsed from a `top -bn1 | grep 'Cpu(s)'` line, and the BusyBox `top` in the `node:22-alpine` runtime image prints no such line, so the value is not a CPU percentage there.
 
 ```json
 {
@@ -100,7 +104,7 @@ Each configured app carries an `upstream` object (see [Upstream info](#upstream-
 | Field | Type | Meaning |
 |---|---|---|
 | `branch` | `string \| null` | The default deploy branch, i.e. the one a deploy without an explicit `branch` pulls (a caller-supplied `body.branch` on `POST /api/apps/:name/deploy` pulls another branch, which this field does not follow): the checkout's current branch (`git rev-parse --abbrev-ref HEAD`, `main` when that is empty). `null` on a detached HEAD |
-| `deployedCommit` | `string \| null` | Full sha of the checkout's `HEAD` (`git rev-parse HEAD`) |
+| `deployedCommit` | `string \| null` | Full sha of the checkout's `HEAD` (`git rev-parse HEAD`). This is the checkout, and the running containers can differ from it, so `state` describes only the checkout. For example, after a deploy blocked by the post-pull pre-flight, a deploy with `rollback: false` that failed before `compose up` ran (`.relay.yml` reload or `compose build`), or a blocked rollback, the checkout has moved while the running containers have not; a failed `compose up` can leave them partly updated |
 | `remoteHead` | `string \| null` | Full sha of `refs/heads/<branch>` on `origin`, from `git ls-remote origin refs/heads/<branch>` |
 | `checkedAt` | `string \| null` | ISO-8601 UTC time `remoteHead` was obtained (cached results keep their original time) |
 | `state` | `"current" \| "behind" \| "unknown"` | `current`: `remoteHead` equals `deployedCommit`. `behind`: both known and different (the deployed commit differs from the remote branch head; without a fetch the relay cannot tell ahead from behind). `unknown`: anything else, never `current` on doubt |
@@ -140,11 +144,13 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `stream` (query) | `boolean` | `false` | When `true`, returns an SSE (Server-Sent Events) stream of deploy steps instead of a single JSON response |
-| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing |
+| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing. Must match `[a-zA-Z0-9._/-]+`; any other value fails the request with a plain `500` (or an `error` event with `stream=true`) |
 | `force` (body) | `boolean` | `false` | Skip non-critical preflight checks |
 | `X-Deploy-Id` (header) or `deployId` (body) | `string` | none | Optional caller-supplied correlation id, stored in the history entry as `deployId` and returned in `GET /api/deploys` and `recentDeploys`. 1-128 characters from `[A-Za-z0-9._:-]`. If both header and body carry one they must match. An invalid or mismatched id returns `400 { "error": "..." }` before anything is deployed (also in `stream=true` mode, as a plain JSON 400 and not an SSE stream). When absent, the history entry has no `deployId` field. A blocked deploy records no entry, so no `deployId` is stored for it |
 
-Response: deploy result with step-by-step output, commit before/after, and duration. With `stream=true`, response is `text/event-stream` with one event per step. A step killed by `step_timeout_seconds` or the 16 MiB per-stream (stdout and stderr each) buffer cap has a `[relay] ...` line appended to its output naming the reason, instead of leaving a bare non-zero exit and truncated output to interpret. Independently, each step's stored output is capped at 200,000 characters (the last 200,000 are kept, with a truncation notice), so a chatty step cannot bloat the deploy API response, SSE stream, or MCP `relay_deploy` result without bound.
+Response, non-streaming: `200 { "deploy": <history entry>, "result": { "success", "durationMs", "commitBefore", "commitAfter", "steps": [ { "name", "status", "output", "durationMs" } ] } }` for both a successful and a failed deploy (check `result.success`). A deploy blocked by pre-flight returns `200 { "result": { "success": false, "blocked": true, "preflight": { "passed", "checks" }, "durationMs", "commitBefore", "commitAfter", "steps" } }` and records no history entry. An invalid app name, unknown app or invalid `.relay.yml` returns `404 { "error" }`, also with `stream=true` (before the stream opens). With `stream=true` the response is `text/event-stream` with named events: `step` (one per step, rollback steps included), then exactly one of `done` (the full result, recorded in history), `blocked` (the pre-flight report `{ passed, checks }` only) or `error` (`{ message }`).
+
+A step killed by `step_timeout_seconds` or the 16 MiB per-stream (stdout and stderr each) buffer cap has a `[relay] ...` line appended to its output naming the reason, instead of leaving a bare non-zero exit and truncated output to interpret. Independently, each step's stored output is capped at 200,000 characters (the last 200,000 are kept, with a truncation notice), so a chatty step cannot bloat the deploy API response, SSE stream, or MCP `relay_deploy` result without bound.
 
 ### `POST /api/apps/:name/rollback`
 
@@ -226,7 +232,7 @@ List deploy history across all apps or filtered by app.
 
 ### `GET /api/apps/:name/env`
 
-Read an app's `.env` as a flat list of key/value entries. Returns an empty list if the app has no `.env`. Values are returned **raw and unmasked**: the relay is already behind the bearer token, and any caller with that token has full VPS access, so masking is left to the consuming UI (the consent boundary is the panel, not the relay).
+Read an app's `.env` as a flat list of key/value entries. Returns an empty list if the app has no `.env`. Only lines of the form `KEY=VALUE` with a key matching `[A-Za-z_][A-Za-z0-9_]*` are returned. Blank lines, comments, `export KEY=...` lines and lines without `=` (for example continuation lines of a multi-line value) are skipped. One pair of surrounding quotes is stripped from a value. Values are returned **raw and unmasked**: the relay is already behind the bearer token, and any caller with that token has full VPS access, so masking is left to the consuming UI (the consent boundary is the panel, not the relay).
 
 ```json
 { "entries": [ { "key": "AUTH_TOKEN", "value": "s3cr3t" } ] }
@@ -234,9 +240,9 @@ Read an app's `.env` as a flat list of key/value entries. Returns an empty list 
 
 ### `PUT /api/apps/:name/env`
 
-Replace an app's `.env` with the supplied entries (full overwrite, written atomically at mode `0600`). The body must be `{ "entries": [ { "key", "value" } ] }`; both `key` and `value` must be strings. Validation limits: at most 500 entries, key length 1..128, value length up to 32768 characters, and duplicate keys are rejected (`400` on any violation). Returns the written entries.
+Replace an app's `.env` with the supplied entries (full overwrite, written atomically at mode `0600`). The body must be `{ "entries": [ { "key", "value" } ] }`; both `key` and `value` must be strings. Validation limits: at most 500 entries, key length 1..128, value length up to 32768 characters, keys must match `[A-Za-z_][A-Za-z0-9_]*`, and duplicate keys are rejected (`400` on any violation). Returns the written entries.
 
-Comments in the existing `.env` are **not** preserved across a read/write round-trip; keep canonical comments in `.env.example` instead.
+Comments and every line that `GET` skips are removed on write, so a `GET` followed by a `PUT` drops them; keep canonical comments in `.env.example` instead.
 
 ```json
 { "entries": [ { "key": "AUTH_TOKEN", "value": "s3cr3t" } ] }
@@ -245,6 +251,8 @@ Comments in the existing `.env` are **not** preserved across a read/write round-
 ## MCP tools
 
 The MCP server exposes 5 tools at `/mcp`. Same `AUTH_TOKEN` as the HTTP API.
+
+Transport: Streamable HTTP in stateless mode (no session id). Every request needs `Authorization: Bearer <AUTH_TOKEN>`; without it the relay answers `401 {"error":"unauthorized"}`. Register `/mcp` in an MCP client as a remote HTTP server with that header.
 
 ### `relay_deploy`
 

@@ -9,6 +9,7 @@
 ## Test plan
 
 - [ ] `npm run build`
+- [ ] `npm run lint`
 - [ ] `npm test`
 - [ ] For deployment-path changes: dogfood against `docker-compose.prod.example.yml` or a real VPS target
 - [ ] Manual smoke check: <!-- command or scenario -->
