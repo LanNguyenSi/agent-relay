@@ -3,7 +3,7 @@ type: overview
 title: APPS_DIR host/container contract — where the rule is documented
 description: Pointer doc — the authoritative reference for the APPS_DIR host/container symlink contract is docs/operations.md; this entry only adds that install.sh's install-time symlink enforcement is a separate layer from the every-deploy preflight checks, and cross-refs which phase each check runs in.
 tags: [apps-dir, install, preflight, pointer]
-timestamp: 2026-10-11T12:51:43Z
+timestamp: 2026-10-11T16:13:50Z
 sources:
   - docs/operations.md
   - src/deploy/preflight.ts

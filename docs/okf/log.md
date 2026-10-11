@@ -2,6 +2,15 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-11T16:13:50Z, apps-dir-contract.md and health-check-reality.md re-stamped after
+  docs/operations.md changed again (rollback diagram: a failed rollback
+  `compose build` now stops before `compose up`, and the stop and block
+  terminals say the running containers are left as they are). Re-verified
+  both docs against it: the APPS_DIR host/container contract section and
+  the Deploy lifecycle health-check description are unchanged, so no doc
+  text changed. `okf-kit check --json docs/okf` and `okf-kit check --json
+  --require-anchors docs/okf` (okf-kit 0.16.0) compared against the tree
+  before this entry: no new finding.
 - 2026-10-11T12:51:43Z, apps-dir-contract.md, deploy-failure-surfaces.md,
   deploy-phase-model.md, exec-trust-boundary.md and health-check-reality.md
   re-stamped after a docs pass changed docs/operations.md (installer steps,
