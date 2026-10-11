@@ -3,7 +3,7 @@ type: invariant
 title: Deploy preflight phase model — which checks run when, and rollback's config source
 description: runPreflightChecks splits its 8 checks across pre-pull/post-pull/all phases by when each check has signal; force bypasses only non-critical checks; only (PR #73) restricts the battery to named checks regardless of phase, skipping the excluded checks' runExec calls entirely rather than just discarding their results — both rollback gates use it to run only the two critical checks; auto-rollback always reruns against prePullConfig/preCommandConfig, never the post-pull reloaded config, even when the new commit disabled rollback, while the standalone rollbackApp re-reads .relay.yml from the commit it resets to.
 tags: [deploy, preflight, phases, rollback, force, only]
-timestamp: 2026-10-06T14:17:01Z
+timestamp: 2026-10-11T12:51:43Z
 sources:
   - src/deploy/preflight.ts
   - src/deploy/engine.ts
@@ -52,7 +52,7 @@ Every `rollbackIfEnabled` call site passes the config captured **before** the mu
 
 This is deliberate, not an oversight: `rollback: boolean` is read from whichever config is passed to `rollbackIfEnabled` (`engine.ts:557`), and the engine always passes the pre-mutation one on purpose. A commit that ships a broken app **and** flips `rollback: false` in the same commit does not get to disable its own safety net — the pre-pull value of `rollback` (from the last-known-good commit) governs whether the *current* deploy's rollback fires; the new `rollback: false` only takes effect starting with the *next* deploy. Regression-pinned by `src/deploy/engine.test.ts` "rollback boolean honors pre-pull config, not post-pull" (`engine.test.ts:446`). The same reasoning is why `rollbackIfEnabled`'s rebuild/restart steps use the pre-pull `compose_file` too: `git reset --hard` restores the OLD tree, where the OLD `compose_file` is the one on disk — regression-pinned by a separate test, "rolls back using pre-pull compose_file when reload fails" (`engine.test.ts:417-444`, rationale comment at `engine.test.ts:433-435`).
 
-The standalone rollback (`rollbackApp`, `src/services/apps.ts:368-452`, behind `POST /api/apps/:name/rollback` and the MCP `relay_rollback` tool) works the other way: after `git reset --hard` it re-reads `.relay.yml` from the target commit (`apps.ts:409-417`) and uses that config for its preflight gate and for `compose build`/`up` (`apps.ts:432-448`).
+The standalone rollback (`rollbackApp`, `src/services/apps.ts:368-452#"return { success: true, commitBefore, commitAfter }"`, behind `POST /api/apps/:name/rollback` and the MCP `relay_rollback` tool) works the other way: after `git reset --hard` it re-reads `.relay.yml` from the target commit (`apps.ts:409-417#"const config = await loadRelayConfig(dir)"`) and uses that config for its preflight gate and for `compose build`/`up` (`apps.ts:432-448#"up.exitCode !== 0"`).
 
 ## Rollback gates on `only` two checks, not `phase`'s whole battery
 

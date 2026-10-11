@@ -2,6 +2,33 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-11T12:51:43Z, apps-dir-contract.md, deploy-failure-surfaces.md,
+  deploy-phase-model.md, exec-trust-boundary.md and health-check-reality.md
+  re-stamped after a docs pass changed docs/operations.md (installer steps,
+  install-mode exposure, runtime state, Deploy lifecycle text and diagrams)
+  and docs/security.md (greenfield plain-HTTP port, `health` documented as a
+  fourth executable input, absolute `compose_file` paths rejected).
+  Re-verified each doc against the changed sources and the code:
+  deploy-phase-model.md scoped its rollback-config invariant to auto-rollback
+  (`rollbackIfEnabled`) and now describes the standalone `rollbackApp`, which
+  re-reads `.relay.yml` after `git reset --hard` (index.md entry adjusted);
+  exec-trust-boundary.md no longer calls the `config.health` residual
+  undocumented in docs/security.md (title, description and index.md entry
+  adjusted); apps-dir-contract.md names `main` as the default branch;
+  deploy-failure-surfaces.md cites `src/mcp/server.test.ts:81` instead of a
+  bare test-file name that matched two files. Internal task ids and a run name were
+  replaced with public PR numbers (#71, #73, #91), and the dated resolution
+  note left health-check-reality.md and index.md. That history, for the
+  record: on 2026-08-10 the maintainer resolved the health-check divergence
+  by deleting the unimported exponential-backoff module `src/deploy/health.ts`
+  and its test as dead code and correcting README.md to describe the wired
+  in-container probe (PR #71). The new citations carry string anchors, so
+  `--require-anchors` gains no anchor-required warning. `okf-kit check --json docs/okf`
+  and `okf-kit check --json --require-anchors docs/okf` (okf-kit 0.16.0)
+  compared against the tree before this entry: no new finding; the four
+  `sources-fresh` STALE warnings and the `unresolved-ambiguous` notice are
+  gone, the historical log.md warnings are unchanged.
+
 - 2026-10-10T06:31:59Z, deploy-failure-surfaces.md re-stamped after the 0.6.0 release cut
   moved the `[Unreleased]` section of `CHANGELOG.md` under `[0.6.0]`.
   Re-verified the doc's CHANGELOG-derived claim (blocked deploy response
