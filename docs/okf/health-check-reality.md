@@ -11,7 +11,7 @@ description: >-
   in docs/operations.md's Deploy lifecycle section; README.md keeps only a
   pointer to it.
 tags: [health-check, dead-code, docs-drift, deploy]
-timestamp: 2026-10-11T16:13:50Z
+timestamp: 2026-10-12T15:48:06Z
 sources:
   - src/deploy/engine.ts
   - docs/operations.md

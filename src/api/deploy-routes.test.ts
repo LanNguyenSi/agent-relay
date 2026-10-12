@@ -49,3 +49,50 @@ describe("POST /api/apps/:name/deploy — blocked response shape", () => {
     expect("blocked" in body).toBe(false);
   });
 });
+
+describe("POST /api/apps/:name/deploy — invalid branch", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  for (const [label, query] of [
+    ["non-streaming", ""],
+    ["streaming", "?stream=true"],
+  ] as const) {
+    it(`returns 400 before deploying (${label})`, async () => {
+      const deploy = vi.spyOn(apps, "deployApp");
+      const deployStreaming = vi.spyOn(apps, "deployAppStreaming");
+
+      const res = await request(`/apps/demo/deploy${query}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: "main;rm -rf /" }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toEqual({ error: "Invalid branch name" });
+      expect(deploy).not.toHaveBeenCalled();
+      expect(deployStreaming).not.toHaveBeenCalled();
+    });
+
+    it(`rejects a non-string branch with 400 (${label})`, async () => {
+      const res = await request(`/apps/demo/deploy${query}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: 123 }),
+      });
+      expect(res.status).toBe(400);
+    });
+  }
+
+  it("still deploys with a valid branch", async () => {
+    const ok = { success: true, steps: [], durationMs: 1, commitBefore: "a", commitAfter: "b" };
+    const deploy = vi.spyOn(apps, "deployApp").mockResolvedValue(ok as never);
+    const res = await request("/apps/demo/deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch: "feat/x" }),
+    });
+    expect(res.status).not.toBe(400);
+    expect(deploy).toHaveBeenCalledWith("demo", { branch: "feat/x", force: undefined });
+  });
+});

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # agent-relay VPS bootstrap installer — v0.2.0 adaptive modes
-# Usage (non-root, no env vars):
+# Usage (non-root, no env vars; /apps must already be a root-created symlink to APPS_DIR,
+# see the APPS_DIR host/container contract in docs/operations.md):
 #   curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install.sh | bash
 #
 # Usage (root with env vars — download first so vars reach the elevated shell, not curl):
@@ -33,6 +34,7 @@
 #   PEBBLE_URL             Pebble CA server URL; required when TRAEFIK_CA=pebble
 #   RELAY_BIND             Host bind IP for port-only mode (default 127.0.0.1; use 0.0.0.0 to expose)
 #   SKIP_TRAEFIK=1         Back-compat alias for RELAY_MODE=port-only
+#   RELAY_FORCE_RECREATE=1 Remove an existing agent-relay container before `docker compose up` (use after a failed or conflicting earlier install)
 
 set -euo pipefail
 

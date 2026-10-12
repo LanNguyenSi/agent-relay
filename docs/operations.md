@@ -168,7 +168,7 @@ export AUTH_TOKEN=change-me APPS_DIR="$PWD/apps"
 npm run dev            # starts on port 8222 with hot reload (tsx watch)
 ```
 
-`npm run dev` (and `make dev`) reads its configuration from the shell environment only; it does not load a `.env` file. Without `AUTH_TOKEN` the process exits at startup. `APPS_DIR` defaults to `/apps` (as in `.env.example`), which usually does not exist on a development machine, so point it at a local directory; the relay lists no apps when that directory does not exist.
+`npm run dev` (and `make dev`) loads a `.env` file from the working directory when one exists (`tsx watch --env-file-if-exists=.env`) and otherwise uses the shell environment alone; values already set in the shell take precedence over the file. Without `AUTH_TOKEN` the process exits at startup. `APPS_DIR` defaults to `/apps`, which usually does not exist on a development machine, so point it at a local directory (`.env.example` sets the container path `/apps`; use `APPS_DIR=./apps` for `npm run dev`); the relay lists no apps when that directory does not exist.
 
 ### Docker
 
@@ -206,7 +206,7 @@ For the repository's dev `docker-compose.yml` (no `container_name`), run `docker
 
 | Script | Command | Description |
 |--------|---------|-------------|
-| `dev` | `tsx watch src/index.ts` | Dev server with hot reload |
+| `dev` | `tsx watch --env-file-if-exists=.env src/index.ts` | Dev server with hot reload |
 | `build` | `tsc` | Compile TypeScript |
 | `start` | `node dist/index.js` | Run production build |
 | `lint` | `eslint src/` | Lint source code |

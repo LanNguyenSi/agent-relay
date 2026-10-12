@@ -19,5 +19,7 @@ health: /api/health
 # build/up.
 # step_timeout_seconds: 600
 
-# Auto-rollback on health check failure (default: true)
+# Auto-rollback (default: true). Runs when the health check fails, when the
+# re-read .relay.yml after the pull is invalid, or when compose build, compose
+# up or post_update fails.
 rollback: true

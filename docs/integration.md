@@ -62,7 +62,7 @@ Authenticated relay health check. Same as `/health` but includes server uptime.
 
 Server resource metrics (CPU, memory, disk). `cpu.usage` and `memory.*Mb` are numbers; the `disk` fields are the raw `df -h` strings (size/used carry unit suffixes, `percent` includes the `%`). `disk` describes the filesystem that holds the relay container's root (`df -h /`), and `uptime` is the relay process uptime in seconds.
 
-`cpu.usage` is not reliable in the published image: it is parsed from a `top -bn1 | grep 'Cpu(s)'` line, and the BusyBox `top` in the `node:22-alpine` runtime image prints no such line, so the value is not a CPU percentage there.
+`cpu.usage` is the host CPU busy percentage (0-100) over a roughly 200 ms window, computed from two reads of `/proc/stat`. It reports `0` when `/proc/stat` is unreadable.
 
 ```json
 {
@@ -144,7 +144,7 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `stream` (query) | `boolean` | `false` | When `true`, returns an SSE (Server-Sent Events) stream of deploy steps instead of a single JSON response |
-| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing. Must match `[a-zA-Z0-9._/-]+`; any other value fails the request with a plain `500` (or an `error` event with `stream=true`) |
+| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing. Must match `[a-zA-Z0-9._/-]+`; any other value (or a non-string) is rejected with `400` before the deploy starts, on both the regular and the `stream=true` path |
 | `force` (body) | `boolean` | `false` | Skip non-critical preflight checks |
 | `X-Deploy-Id` (header) or `deployId` (body) | `string` | none | Optional caller-supplied correlation id, stored in the history entry as `deployId` and returned in `GET /api/deploys` and `recentDeploys`. 1-128 characters from `[A-Za-z0-9._:-]`. If both header and body carry one they must match. An invalid or mismatched id returns `400 { "error": "..." }` before anything is deployed (also in `stream=true` mode, as a plain JSON 400 and not an SSE stream). When absent, the history entry has no `deployId` field. A blocked deploy records no entry, so no `deployId` is stored for it |
 
@@ -266,7 +266,7 @@ Deploy an app: git pull, compose build, compose up, health check. Auto-rollback 
 
 ### `relay_status`
 
-Get status of an app or all apps: container state, health, current commit.
+Get status of an app or all apps: container state, configured health path, current commit and upstream info.
 
 | Input | Type | Required | Description |
 |-------|------|----------|-------------|

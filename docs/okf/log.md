@@ -2,6 +2,22 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-12T15:48:06Z, apps-dir-contract.md, deploy-failure-surfaces.md,
+  deploy-phase-model.md, exec-trust-boundary.md and health-check-reality.md
+  re-stamped after the engine comments lost their internal ids (three lines
+  removed from `src/deploy/engine.ts`), `src/api/routes.ts` gained the
+  up-front `branch` check and a `/proc/stat` CPU read, and
+  `docs/operations.md` and `install.sh` changed. Re-verified the citations
+  that moved: `engine.ts:384-459`, `:427-431`, `:419`, `:554` and
+  `:566-572` in exec-trust-boundary.md and deploy-phase-model.md (the one
+  older entry that cited the old rollback-flag line was re-pointed to `:554`
+  so it keeps resolving to a non-brace line), and
+  `routes.ts:152-153`, `:178-183`, `:182`, `:202-211`, `:214-218` and
+  `:129-135` in deploy-failure-surfaces.md; each resolves to the same
+  statement as before. deploy-phase-model.md names the APPS_DIR mismatch
+  failure class instead of a dated incident, matching the reworded
+  `DeployOptions.force` comment. The older entries below stay as recorded
+  history.
 - 2026-10-11T16:13:50Z, apps-dir-contract.md and health-check-reality.md re-stamped after
   docs/operations.md changed again (rollback diagram: a failed rollback
   `compose build` now stops before `compose up`, and the stop and block
@@ -234,7 +250,7 @@
   `deploy-phase-model.md`'s three citations-resolve failures the
   step-timeout PR left stale (the entry below deliberately scoped them
   out): the `config.rollback` read (previously engine.ts line 408, now
-  blank) resolves at `engine.ts:557`; the auto-rollback
+  blank) resolves at `engine.ts:554`; the auto-rollback
   `runPreflightChecks({ phase: "all", force: true, only:
   ROLLBACK_CRITICAL_CHECKS })` call in `rollbackIfEnabled` (previously
   engine.ts lines 458-464) resolves at `engine.ts:569-575`; and the

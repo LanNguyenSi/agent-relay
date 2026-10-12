@@ -6,8 +6,9 @@
  * the panel surfaces a plain key/value editor and the .env format we emit is
  * the canonical Compose-compatible subset (https://docs.docker.com/compose/environment-variables/env-file/).
  *
- * Known limitation: comments in the source file are NOT preserved across a
- * read→write round-trip. Teams that rely on commented .env files should keep
+ * Known limitation: only well-formed `KEY=VALUE` lines survive a read→write
+ * round-trip. Comments, blank lines, `export KEY=VALUE` lines, lines whose
+ * key is not a valid identifier and lines without `=` are all dropped. Teams that rely on commented .env files should keep
  * the comments elsewhere (e.g. `.env.example`). Documented in docs.
  */
 import { readFile, writeFile, chmod, rename } from "node:fs/promises";
