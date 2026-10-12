@@ -13,8 +13,10 @@
   older entry that cited the old rollback-flag line was re-pointed to `:554`
   so it keeps resolving to a non-brace line), and
   `routes.ts:152-153`, `:178-183`, `:182`, `:202-211`, `:214-218` and
-  `:129-135` in deploy-failure-surfaces.md; each resolves to the same
-  statement as before. deploy-phase-model.md names the APPS_DIR mismatch
+  `:129-135` in deploy-failure-surfaces.md, plus its short continuation
+  citations (`:155`, `:156`, `:184`, `:178-182`, `:133-135`, `:187`,
+  `:120-128`) and `install.sh:578-626` in apps-dir-contract.md; each
+  resolves to the same statement as before. deploy-phase-model.md names the APPS_DIR mismatch
   failure class instead of a dated incident, matching the reworded
   `DeployOptions.force` comment. The older entries below stay as recorded
   history.

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **`GET /api/system` reports a real CPU percentage in the Alpine image** (task 8a987aee). `cpu.usage` is now computed from two reads of `/proc/stat` about 200 ms apart instead of parsing `top`, whose BusyBox build in the runtime image prints no `Cpu(s)` line, so the value was always `0`. It still falls back to `0` when `/proc/stat` is unreadable.
+- **`GET /api/system` reports a real CPU percentage in the Alpine image** (task 8a987aee). `cpu.usage` is now computed from two reads of `/proc/stat` about 200 ms apart instead of parsing `top`, whose BusyBox build in the runtime image prints no `Cpu(s)` line, so the grep matched top's own process rows and the value was a process id, not a CPU percentage. It still falls back to `0` when `/proc/stat` is unreadable.
 - **An invalid `branch` in `POST /api/apps/:name/deploy` returns `400`** (task 8a987aee). The body is validated before anything is deployed or a stream opens, so the regular path no longer answers `500` and the `stream=true` path no longer sends an SSE `error` event after a `200`. The response is `{ "error": "Invalid branch name" }`. Behaviour change: clients that matched on the old `500` must accept `400`; a non-string `branch` is rejected the same way.
 - `relay_deploy` and `relay_status` tool descriptions now match `docs/integration.md`: the branch default is the app's checked-out branch (falling back to `main`), and status reports the configured health path rather than a live health check.
 

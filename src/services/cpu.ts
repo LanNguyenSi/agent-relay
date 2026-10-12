@@ -2,7 +2,8 @@
  * Host CPU usage from /proc/stat.
  *
  * The runtime image is Alpine (BusyBox), whose `top` prints no `Cpu(s)` line,
- * so shelling out to procps-style `top` always yielded 0. /proc/stat exists on
+ * so grepping `top` for it matched top's own process rows and returned a
+ * process id, not a CPU percentage. /proc/stat exists on
  * every Linux kernel, so usage is computed from the delta between two samples.
  */
 import { readFile } from "node:fs/promises";
