@@ -60,8 +60,8 @@ export interface DeployOptions {
    * `apps_root_mount_congruence`, `compose_bind_mount_sources_exist`)
    * still gate: the first two because a deploy with those failing cannot
    * succeed, the latter two because letting them through silently masks
-   * a deployed app's on-host config with an empty directory (2026-07-15
-   * incident class) rather than merely failing the deploy.
+   * a deployed app's on-host config with an empty directory (the APPS_DIR
+   * mismatch failure class) rather than merely failing the deploy.
    */
   force?: boolean;
 }
@@ -116,8 +116,8 @@ async function defaultFlowDeploy(
   // reaches for force. apps_root_mount_congruence is critical and is NOT
   // bypassed by force: an undetected APPS_DIR mismatch silently masks a
   // deployed app's config with an empty directory regardless of whether
-  // the operator meant to force past the git checks (2026-07-15 incident
-  // class).
+  // the operator meant to force past the git checks (the APPS_DIR mismatch
+  // failure class).
   const prePullPreflightStart = Date.now();
   const prePullPreflight = await runPreflightChecks({
     appDir,
@@ -391,9 +391,8 @@ async function runHealthCheck(
   // Last probe's own result (HTTP status or the fetch error text), kept
   // across retries so a final failure can report what the LAST attempt
   // actually saw instead of just "no service responded" — that bare
-  // message carries no diagnostic signal (Task 1f6895f6 / the 2026-08-18
-  // project-forge incident, deploy 8ab63a36, where the health-check step
-  // output was empty and debugging had to fall back to manual SSH).
+  // message carries no diagnostic signal (a past failure left the
+  // health-check step output empty and debugging fell back to manual SSH).
   let lastProbeService = "";
   let lastProbeDetail = "";
   let lastKnownServices: string[] = [];
@@ -422,8 +421,8 @@ async function runHealthCheck(
           // console.log()+process.exit() can truncate output when stdout is a
           // pipe, since exit() doesn't wait for the write to drain. Defensive
           // hardening for the probe output this file now depends on for
-          // diagnostics — not confirmed as the 2026-08-18 incident's own
-          // root cause.
+          // diagnostics — not confirmed as the root cause of the empty
+          // health-check output it was added for.
           const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{process.stdout.write('HTTP_STATUS='+r.status+'\\n',()=>process.exit(r.ok?0:1))}).catch(e=>{process.stdout.write('PROBE_ERROR='+(e&&e.message?e.message:String(e))+'\\n',()=>process.exit(1))})`;
           const check = await runExec(
             "docker",
@@ -463,8 +462,7 @@ async function runHealthCheck(
  * Captures a capped `docker compose logs --tail` excerpt of the app's
  * container(s) for inclusion in a failed health-check step's output, so the
  * deploy record itself carries what the relay already knows instead of
- * requiring a manual SSH + `docker logs` round-trip to debug a failure
- * (Task 1f6895f6).
+ * requiring a manual SSH + `docker logs` round-trip to debug a failure.
  */
 async function captureContainerLogsTail(
   appDir: string,
@@ -495,13 +493,13 @@ async function captureContainerLogsTail(
 
 /**
  * Gates the auto-rollback build/up on the same critical preflight checks
- * that gate a forward deploy (Task d5e0aad9 / 2026-07-15 incident):
+ * that gate a forward deploy (the APPS_DIR mismatch failure class):
  * `apps_root_mount_congruence` and `compose_bind_mount_sources_exist` exist
  * specifically to catch the DooD host/relay APPS_DIR mismatch that makes
  * docker silently auto-create an empty bind-mount directory over a deployed
  * app's real config. That failure mode doesn't care whether the working
  * tree just moved via `git pull` (forward deploy) or `git reset --hard`
- * (rollback, right above) — the incident class is identical either way, so
+ * (rollback, right above) — the failure class is identical either way, so
  * rollback must not run `compose build`/`up` ungated just because it's the
  * safety-net path rather than the forward path.
  *
@@ -544,8 +542,7 @@ async function rollbackIfEnabled(
   // build/up can take a while), and a stream that goes quiet for too long
   // risks a proxy/idle-timeout dropping the connection before the trailing
   // `done` event ships — which is exactly how a caller can end up with a
-  // deploy record that never learned it rolled back (Task 1f6895f6 / the
-  // 2026-08-18 project-forge incident, deploy 8ab63a36). Emitting here too
+  // deploy record that never learned it rolled back. Emitting here too
   // means a listener building its own step log from the stream (rather than
   // waiting for the final result) already has the rollback steps even if
   // the connection dies before `done`.

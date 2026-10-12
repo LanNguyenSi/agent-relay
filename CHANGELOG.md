@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /api/system` reports a real CPU percentage in the Alpine image** (task 8a987aee). `cpu.usage` is now computed from two reads of `/proc/stat` about 200 ms apart instead of parsing `top`, whose BusyBox build in the runtime image prints no `Cpu(s)` line, so the grep matched top's own process rows and the value was a process id, not a CPU percentage. It still falls back to `0` when `/proc/stat` is unreadable.
+- **An invalid `branch` in `POST /api/apps/:name/deploy` returns `400`** (task 8a987aee). The body is validated before anything is deployed or a stream opens, so the regular path no longer answers `500` and the `stream=true` path no longer sends an SSE `error` event after a `200`. The response is `{ "error": "Invalid branch name" }`. Behaviour change: clients that matched on the old `500` must accept `400`; a non-string `branch` is rejected the same way.
+- `relay_deploy` and `relay_status` tool descriptions now match `docs/integration.md`: the branch default is the app's checked-out branch (falling back to `main`), and status reports the configured health path rather than a live health check.
+
 ### Changed
 
+- `npm run dev` loads `.env` when one exists (`tsx watch --env-file-if-exists=.env`); `.env.example` notes that `APPS_DIR=/apps` is the container path. `engines.node` is narrowed to `^20.19.0 || ^22.13.0 || >=24`, matching the dev toolchain.
+- Comment and header fixes: `relay.example.yml` lists every auto-rollback trigger, `install.sh` documents `RELAY_FORCE_RECREATE` and the `/apps` symlink prerequisite, `src/services/env.ts` lists everything a `.env` round-trip drops, and internal ids were removed from `src/deploy/engine.ts` comments.
 - **Documentation-only pushes to `main` no longer publish a new image** (task 7c011beb). The Publish workflow's push trigger ignores `docs/**`, root-level `*.md` and `LICENSE`, so `:latest` and `:main-<sha>` move only for pushes that change something else (the image inputs are `Dockerfile`, the package files, `tsconfig.json` and `src/`). Tag releases and manual runs are unchanged. A static test pins the filter.
 
 ## [0.6.0] - 2026-10-10

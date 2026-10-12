@@ -6,6 +6,7 @@ import * as apps from "../services/apps.js";
 import * as appEnv from "../services/env.js";
 import { recordDeploy, getHistory } from "../services/history.js";
 import { isValidDeployId } from "../services/deploy-id.js";
+import { readCpuUsage } from "../services/cpu.js";
 
 export const api = new Hono();
 
@@ -33,6 +34,22 @@ function resolveDeployId(headerValue: string | undefined, body: unknown): Deploy
   return { ok: true, deployId: headerValue ?? (bodyValue as string | undefined) };
 }
 
+type BranchResult = { ok: true } | { ok: false; error: string };
+
+/** Validate the optional `branch` body field the same way the deploy service does. */
+function resolveBranch(body: unknown): BranchResult {
+  const branch =
+    body !== null && typeof body === "object" ? (body as Record<string, unknown>).branch : undefined;
+  if (!branch) return { ok: true }; // absent or empty: the engine uses the checked-out branch
+  if (typeof branch !== "string") return { ok: false, error: "Invalid branch name" };
+  try {
+    apps.validateBranch(branch);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Invalid branch name" };
+  }
+}
+
 // ── Auth middleware ─────────────────────────────────────────────────────────
 api.use("*", async (c, next) => {
   const auth = c.req.header("Authorization");
@@ -51,12 +68,12 @@ api.get("/health", (c) => {
 api.get("/system", async (c) => {
   const { execSync } = await import("node:child_process");
   try {
-    const cpu = execSync("top -bn1 | grep 'Cpu(s)' | awk '{print $2}'", { timeout: 5000 }).toString().trim();
+    const cpu = await readCpuUsage();
     const mem = execSync("free -m | awk '/Mem:/{printf \"%d %d\", $3, $2}'", { timeout: 5000 }).toString().trim().split(" ");
     const disk = execSync("df -h / | awk 'NR==2{printf \"%s %s %s\", $3, $2, $5}'", { timeout: 5000 }).toString().trim().split(" ");
 
     return c.json({
-      cpu: { usage: parseFloat(cpu) || 0 },
+      cpu: { usage: cpu },
       memory: { usedMb: parseInt(mem[0]) || 0, totalMb: parseInt(mem[1]) || 0 },
       disk: { used: disk[0] || "?", total: disk[1] || "?", percent: disk[2] || "?" },
       uptime: process.uptime(),
@@ -92,6 +109,11 @@ api.post("/apps/:name/deploy", async (c) => {
   if (!idResult.ok) return c.json({ error: idResult.error }, 400);
   // Pass the id only when one was supplied, so records without it stay unchanged.
   const deployIdArg = idResult.deployId === undefined ? [] : [idResult.deployId];
+
+  // Reject a malformed branch before anything is deployed or a stream opens,
+  // so both paths return 400 instead of a 500 / an SSE error after a 200.
+  const branchResult = resolveBranch(body);
+  if (!branchResult.ok) return c.json({ error: branchResult.error }, 400);
 
   // SSE streaming mode
   if (stream) {

@@ -29,7 +29,7 @@ export function createMcpServer(): McpServer {
     "Deploy an app: git pull, compose build, compose up, health check. Auto-rollback on failure.",
     {
       app: z.string().min(1).describe("App directory name under APPS_DIR"),
-      branch: z.string().optional().describe("Git branch to pull (default: main)"),
+      branch: z.string().optional().describe("Git branch to pull (default: the app's currently checked-out branch, falling back to main)"),
       force: z.boolean().optional().describe("Skip non-critical preflight checks"),
     },
     async ({ app, branch, force }) => {
@@ -49,7 +49,7 @@ export function createMcpServer(): McpServer {
   // ── relay_status ──────────────────────────────────────────
   server.tool(
     "relay_status",
-    "Get status of an app or all apps: container state, health, current commit.",
+    "Get status of an app or all apps: container state, configured health path, current commit and upstream info.",
     {
       app: z.string().optional().describe("App name (all apps if omitted)"),
     },

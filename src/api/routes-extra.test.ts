@@ -53,13 +53,19 @@ vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
 }));
 
+vi.mock("../services/cpu.js", () => ({
+  readCpuUsage: vi.fn(),
+}));
+
 import { execSync } from "node:child_process";
+import { readCpuUsage } from "../services/cpu.js";
 
 const mockDeployAppStreaming = vi.mocked(apps.deployAppStreaming);
 const mockRollbackApp = vi.mocked(apps.rollbackApp);
 const mockRecordDeploy = vi.mocked(historyMod.recordDeploy);
 const mockGetHistory = vi.mocked(historyMod.getHistory);
 const mockExecSync = vi.mocked(execSync);
+const mockReadCpuUsage = vi.mocked(readCpuUsage);
 const mockLoadRelayConfig = vi.mocked(relayMod.loadRelayConfig);
 
 const AUTH = `Bearer ${env.AUTH_TOKEN}`;
@@ -393,8 +399,8 @@ describe("GET /api/system", () => {
   });
 
   it("returns 200 with system metrics on success", async () => {
+    mockReadCpuUsage.mockResolvedValueOnce(37.5);
     mockExecSync
-      .mockReturnValueOnce(Buffer.from("2.5"))          // cpu usage
       .mockReturnValueOnce(Buffer.from("1024 4096"))    // mem used total
       .mockReturnValueOnce(Buffer.from("50G 200G 25%")); // disk used total percent
 
@@ -406,7 +412,7 @@ describe("GET /api/system", () => {
       memory: { usedMb: number; totalMb: number };
       disk: { used: string; total: string; percent: string };
     };
-    expect(body.cpu.usage).toBe(2.5);
+    expect(body.cpu.usage).toBe(37.5);
     expect(body.memory.usedMb).toBe(1024);
     expect(body.memory.totalMb).toBe(4096);
     expect(body.disk.used).toBe("50G");
