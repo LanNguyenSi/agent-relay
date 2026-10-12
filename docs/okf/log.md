@@ -2,7 +2,7 @@
 
 <!-- Add new entries at the top, newest first. -->
 
-- 2026-10-12T15:48:06Z, apps-dir-contract.md, deploy-failure-surfaces.md,
+- 2026-10-12T15:57:24Z, apps-dir-contract.md, deploy-failure-surfaces.md,
   deploy-phase-model.md, exec-trust-boundary.md and health-check-reality.md
   re-stamped after the engine comments lost their internal ids (three lines
   removed from `src/deploy/engine.ts`), `src/api/routes.ts` gained the
