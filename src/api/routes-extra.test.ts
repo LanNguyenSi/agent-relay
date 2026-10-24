@@ -454,3 +454,57 @@ describe("GET /api/deploys", () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ── GET /health (/api/health) ────────────────────────────────────────────────
+
+describe("GET /api/health", () => {
+  it("includes revision when RELAY_REVISION is set alongside status, version, and uptime", async () => {
+    const prev = process.env.RELAY_REVISION;
+    process.env.RELAY_REVISION = "89b3f8b920be3ae58617395fddb4d73fe5138f72";
+    try {
+      const res = await request("/health");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        status: string;
+        version: string;
+        revision: string;
+        uptime: number;
+      };
+      expect(body.status).toBe("ok");
+      expect(typeof body.version).toBe("string");
+      expect(body.revision).toBe("89b3f8b920be3ae58617395fddb4d73fe5138f72");
+      expect(typeof body.uptime).toBe("number");
+    } finally {
+      if (prev === undefined) delete process.env.RELAY_REVISION;
+      else process.env.RELAY_REVISION = prev;
+    }
+  });
+
+  it("defaults revision to \"unknown\" when RELAY_REVISION is absent", async () => {
+    const prev = process.env.RELAY_REVISION;
+    delete process.env.RELAY_REVISION;
+    try {
+      const res = await request("/health");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { revision: string };
+      expect(body.revision).toBe("unknown");
+    } finally {
+      if (prev === undefined) delete process.env.RELAY_REVISION;
+      else process.env.RELAY_REVISION = prev;
+    }
+  });
+
+  it("defaults revision to \"unknown\" when RELAY_REVISION is empty or whitespace", async () => {
+    const prev = process.env.RELAY_REVISION;
+    process.env.RELAY_REVISION = "  \t ";
+    try {
+      const res = await request("/health");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { revision: string };
+      expect(body.revision).toBe("unknown");
+    } finally {
+      if (prev === undefined) delete process.env.RELAY_REVISION;
+      else process.env.RELAY_REVISION = prev;
+    }
+  });
+});

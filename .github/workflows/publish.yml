@@ -82,6 +82,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: RELAY_REVISION=${{ github.sha }}
           # Single-arch amd64 for now; multi-arch (arm64) tracked as a
           # follow-up in the task referencing this workflow.
           platforms: linux/amd64

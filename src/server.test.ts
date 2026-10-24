@@ -95,12 +95,59 @@ async function readFrame(
 }
 
 describe("relay server over a real socket: routing", () => {
-  it("GET /health answers JSON through the Hono request listener", async () => {
-    const url = await listen();
-    const res = await fetch(`${url}/health`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toMatch(/application\/json/);
-    expect(await res.json()).toEqual({ status: "ok", version: RELAY_VERSION });
+  it("GET /health answers JSON with revision \"unknown\" when RELAY_REVISION is absent", async () => {
+    const prev = process.env.RELAY_REVISION;
+    delete process.env.RELAY_REVISION;
+    try {
+      const url = await listen();
+      const res = await fetch(`${url}/health`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toMatch(/application\/json/);
+      expect(await res.json()).toEqual({
+        status: "ok",
+        version: RELAY_VERSION,
+        revision: "unknown",
+      });
+    } finally {
+      if (prev === undefined) delete process.env.RELAY_REVISION;
+      else process.env.RELAY_REVISION = prev;
+    }
+  });
+
+  it("GET /health reports the running commit SHA when RELAY_REVISION is set", async () => {
+    const prev = process.env.RELAY_REVISION;
+    process.env.RELAY_REVISION = "89b3f8b920be3ae58617395fddb4d73fe5138f72";
+    try {
+      const url = await listen();
+      const res = await fetch(`${url}/health`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        status: "ok",
+        version: RELAY_VERSION,
+        revision: "89b3f8b920be3ae58617395fddb4d73fe5138f72",
+      });
+    } finally {
+      if (prev === undefined) delete process.env.RELAY_REVISION;
+      else process.env.RELAY_REVISION = prev;
+    }
+  });
+
+  it("GET /health falls back to \"unknown\" when RELAY_REVISION is empty or whitespace", async () => {
+    const prev = process.env.RELAY_REVISION;
+    process.env.RELAY_REVISION = "   ";
+    try {
+      const url = await listen();
+      const res = await fetch(`${url}/health`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        status: "ok",
+        version: RELAY_VERSION,
+        revision: "unknown",
+      });
+    } finally {
+      if (prev === undefined) delete process.env.RELAY_REVISION;
+      else process.env.RELAY_REVISION = prev;
+    }
   });
 
   it("/api rejects a request without a token with 401 JSON", async () => {

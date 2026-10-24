@@ -222,6 +222,7 @@ For the repository's dev `docker-compose.yml` (no `container_name`), run `docker
 | `AUTH_TOKEN` | Yes | -- | Bearer token for API and MCP authentication |
 | `PORT` | No | `8222` | HTTP server port |
 | `APPS_DIR` | No | `/apps` | Directory containing app directories, as seen by the relay process. The installer bind-mounts the host `APPS_DIR` (see [Installer environment variables](#installer-environment-variables)) onto `/apps` and writes `APPS_DIR=/apps` into the relay's `.env`, so this rarely needs overriding |
+| `RELAY_REVISION` | No | `"unknown"` | Build commit SHA reported as `revision` on `GET /health` and `GET /api/health`. Baked into the published GHCR image at build time (`ARG RELAY_REVISION=""` / `ENV RELAY_REVISION=$RELAY_REVISION` in `Dockerfile`, set from `github.sha` by `.github/workflows/publish.yml`); local or development runs without `RELAY_REVISION` (or with an empty/whitespace value) report `revision: "unknown"` |
 
 ## Runtime state and troubleshooting
 

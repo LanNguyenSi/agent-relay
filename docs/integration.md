@@ -44,18 +44,18 @@ All `/api` endpoints require `Authorization: Bearer <AUTH_TOKEN>` unless noted o
 
 ### `GET /health`
 
-Public relay health check. **No authentication required.** Returns status and version but does not include uptime. Useful for external uptime monitors and load balancer probes. `version` is the running relay's `package.json` version, read dynamically at startup.
+Public relay health check. **No authentication required.** Returns status, package version, and running image revision, without server uptime. Useful for external uptime monitors, load balancer probes, and clients (`deploy-panel`) that compare the running build against the newest published image without SSH. `version` is the running relay's `package.json` version, read dynamically at startup; `revision` is the build commit SHA from `RELAY_REVISION` (set by `.github/workflows/publish.yml` via `Dockerfile` build arg) or `"unknown"` on local/development runs where `RELAY_REVISION` is unset or empty.
 
 ```json
-{ "status": "ok", "version": "<version>" }
+{ "status": "ok", "version": "<version>", "revision": "<commit sha | unknown>" }
 ```
 
 ### `GET /api/health`
 
-Authenticated relay health check. Same as `/health` but includes server uptime.
+Authenticated relay health check. Same as `/health` (`status`, `version`, `revision`) plus server `uptime`.
 
 ```json
-{ "status": "ok", "version": "<version>", "uptime": 12345.67 }
+{ "status": "ok", "version": "<version>", "revision": "<commit sha | unknown>", "uptime": 12345.67 }
 ```
 
 ### `GET /api/system`

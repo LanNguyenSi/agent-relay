@@ -42,3 +42,9 @@ function readVersion(): string {
 }
 
 export const RELAY_VERSION: string = readVersion();
+
+export function getRelayRevision(env: NodeJS.ProcessEnv = process.env): string {
+  return env.RELAY_REVISION?.trim() || "unknown";
+}
+
+export const RELAY_REVISION: string = getRelayRevision();
