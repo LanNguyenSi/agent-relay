@@ -2,8 +2,17 @@
  * Tests for the MCP tool handlers in src/mcp/server.ts.
  * Verifies try/catch ok/err wrapping, blocked-deploy branch,
  * COMMIT_REF/SERVICE_NAME regex validation, and recordDeploy side-effect.
+ *
+ * Everything goes through the SDK's public surface: an in-memory transport
+ * pair (InMemoryTransport + Client) driving real tools/list and tools/call
+ * requests. The previous revision read the SDK-private `_registeredTools`
+ * field and called handlers directly; that bypassed the SDK's own input
+ * validation and broke silently across SDK/zod upgrades. Schema accept/reject
+ * is now pinned where clients actually see it: in the tools/call round-trip.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 // Mock dependencies before importing the module under test.
 vi.mock("../services/apps.js", () => ({
@@ -32,31 +41,86 @@ const mockFetchLogs = vi.mocked(apps.fetchLogs);
 const mockRunPreflight = vi.mocked(apps.runPreflight);
 const mockRecordDeploy = vi.mocked(historyMod.recordDeploy);
 
-// The MCP SDK stores registered tools in `_registeredTools`. Each entry has
-// a `handler` (the async callback) and an `inputSchema` (a zod object).
-type RegistryEntry = { handler: (...args: unknown[]) => Promise<unknown>; inputSchema?: { safeParse: (v: unknown) => { success: boolean } } };
-type ToolResult = { content: Array<{ type: string; text: string }>; isError?: true };
+type ToolResult = { content?: Array<{ type: string; text: string }>; isError?: boolean };
 
-function getTools(): Record<string, RegistryEntry> {
+// Wire a fresh server to a fresh client over the SDK's in-memory transport,
+// make one tools/call request, and tear the pair down again. Input-schema
+// violations surface as a rejected callTool (the SDK turns zod issues into
+// an McpError with an "Invalid arguments for tool ..." message).
+async function callTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ToolResult> {
   const server = createMcpServer();
-  const tools = (server as unknown as { _registeredTools?: Record<string, RegistryEntry> })._registeredTools;
-  // Fail loudly if the MCP SDK renames/restructures this private field, instead
-  // of letting every test throw on an undefined deref with no clear cause.
-  if (!tools || typeof tools !== "object" || Object.keys(tools).length === 0) {
-    throw new Error(
-      "MCP SDK internal `_registeredTools` is missing or empty — the SDK shape changed; update getTools() in server.test.ts",
-    );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test-client", version: "0.0.0" });
+  await Promise.all([
+    client.connect(clientTransport),
+    server.connect(serverTransport),
+  ]);
+  try {
+    return (await client.callTool({ name, arguments: args })) as ToolResult;
+  } finally {
+    await client.close();
   }
-  return tools;
 }
 
-function parseResult(raw: unknown): unknown {
-  const r = raw as ToolResult;
-  return JSON.parse(r.content[0]!.text);
+async function listToolNames(): Promise<string[]> {
+  const server = createMcpServer();
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test-client", version: "0.0.0" });
+  await Promise.all([
+    client.connect(clientTransport),
+    server.connect(serverTransport),
+  ]);
+  try {
+    const { tools } = await client.listTools();
+    return tools.map((t) => t.name).sort();
+  } finally {
+    await client.close();
+  }
+}
+
+function parseResult(raw: ToolResult): unknown {
+  const block = raw.content?.[0] as { type: string; text: string } | undefined;
+  return JSON.parse(block!.text);
+}
+
+function resultText(raw: ToolResult): string {
+  const block = raw.content?.[0] as { type: string; text: string } | undefined;
+  return block!.text;
+}
+
+// The SDK answers schema-invalid tool arguments with an isError result whose
+// text carries "Input validation error: Invalid arguments for tool <name>:
+// <zod message> at <path>" - it does not reject the request.
+async function expectInputRejected(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const raw = await callTool(name, args);
+  expect(raw.isError).toBe(true);
+  const text = resultText(raw);
+  expect(text).toContain(`Invalid arguments for tool ${name}`);
+  return text;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+// ── tools/list ───────────────────────────────────────────────────────────────
+
+describe("tools/list", () => {
+  it("publishes the five relay tools", async () => {
+    expect(await listToolNames()).toEqual([
+      "relay_deploy",
+      "relay_logs",
+      "relay_preflight",
+      "relay_rollback",
+      "relay_status",
+    ]);
+  });
 });
 
 // ── relay_deploy ─────────────────────────────────────────────────────────────
@@ -68,14 +132,13 @@ describe("relay_deploy", () => {
     const fakeRecord = { id: "d-1" };
     mockRecordDeploy.mockResolvedValue(fakeRecord as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_deploy"]!.handler({ app: "myapp", branch: "main" });
+    const raw = await callTool("relay_deploy", { app: "myapp", branch: "main" });
     const result = parseResult(raw);
 
     expect(result).toEqual(successResult);
     expect(mockRecordDeploy).toHaveBeenCalledOnce();
     expect(mockRecordDeploy).toHaveBeenCalledWith("myapp", successResult, "mcp");
-    expect((raw as ToolResult).isError).toBeUndefined();
+    expect(raw.isError).toBeUndefined();
   });
 
   it("returns ok result but does NOT call recordDeploy when deploy is blocked", async () => {
@@ -90,38 +153,35 @@ describe("relay_deploy", () => {
     };
     mockDeployApp.mockResolvedValue(blockedResult as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_deploy"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_deploy", { app: "myapp" });
     const result = parseResult(raw);
 
     expect(result).toEqual(blockedResult);
     // recordDeploy must NOT have been called for blocked deploys
     expect(mockRecordDeploy).not.toHaveBeenCalled();
-    expect((raw as ToolResult).isError).toBeUndefined();
+    expect(raw.isError).toBeUndefined();
   });
 
   it("returns err wrapping when deployApp throws", async () => {
     mockDeployApp.mockRejectedValue(new Error("disk full"));
 
-    const tools = getTools();
-    const raw = await tools["relay_deploy"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_deploy", { app: "myapp" });
     const result = parseResult(raw) as { success: boolean; error: string };
 
     expect(result.success).toBe(false);
     expect(result.error).toBe("disk full");
-    expect((raw as ToolResult).isError).toBe(true);
+    expect(raw.isError).toBe(true);
     expect(mockRecordDeploy).not.toHaveBeenCalled();
   });
 
   it("handles non-Error thrown values", async () => {
     mockDeployApp.mockRejectedValue("string error");
 
-    const tools = getTools();
-    const raw = await tools["relay_deploy"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_deploy", { app: "myapp" });
     const result = parseResult(raw) as { error: string };
 
     expect(result.error).toBe("string error");
-    expect((raw as ToolResult).isError).toBe(true);
+    expect(raw.isError).toBe(true);
   });
 });
 
@@ -132,8 +192,7 @@ describe("relay_status", () => {
     const detail = { name: "myapp", config: {}, commit: "abc123", containers: null };
     mockGetAppDetail.mockResolvedValue(detail as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_status"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_status", { app: "myapp" });
     const result = parseResult(raw);
 
     expect(result).toEqual(detail);
@@ -145,8 +204,7 @@ describe("relay_status", () => {
     const list = [{ name: "app1", configured: true }];
     mockListApps.mockResolvedValue(list as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_status"]!.handler({});
+    const raw = await callTool("relay_status", {});
     const result = parseResult(raw) as { apps: unknown };
 
     expect(result.apps).toEqual(list);
@@ -154,15 +212,28 @@ describe("relay_status", () => {
     expect(mockGetAppDetail).not.toHaveBeenCalled();
   });
 
+  it("strips unknown argument keys instead of rejecting (schema is non-strict)", async () => {
+    const detail = { name: "myapp", config: {}, commit: "abc123", containers: null };
+    mockGetAppDetail.mockResolvedValue(detail as never);
+
+    // Pins the parse semantics behind the tools/list metadata: object schemas
+    // strip unknown keys, so clients sending extra fields still succeed and
+    // the handler only ever sees declared fields.
+    const raw = await callTool("relay_status", { app: "myapp", bogusKey: 42 });
+    const result = parseResult(raw);
+
+    expect(result).toEqual(detail);
+    expect(mockGetAppDetail).toHaveBeenCalledWith("myapp");
+  });
+
   it("returns err when service throws", async () => {
     mockGetAppDetail.mockRejectedValue(new Error("not found"));
 
-    const tools = getTools();
-    const raw = await tools["relay_status"]!.handler({ app: "ghost" });
+    const raw = await callTool("relay_status", { app: "ghost" });
     const result = parseResult(raw) as { error: string };
 
     expect(result.error).toBe("not found");
-    expect((raw as ToolResult).isError).toBe(true);
+    expect(raw.isError).toBe(true);
   });
 });
 
@@ -174,25 +245,23 @@ describe("relay_rollback", () => {
     mockRollbackApp.mockResolvedValue(rollbackResult as never);
     mockRecordDeploy.mockResolvedValue({ id: "d-1" } as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_rollback"]!.handler({ app: "myapp", to_commit: "HEAD~1" });
+    const raw = await callTool("relay_rollback", { app: "myapp", to_commit: "HEAD~1" });
     const result = parseResult(raw) as typeof rollbackResult & { message: string };
 
     expect(result.message).toContain("bbb");
     expect(mockRollbackApp).toHaveBeenCalledWith("myapp", "HEAD~1");
     expect(mockRecordDeploy).toHaveBeenCalledWith("myapp", rollbackResult, "mcp");
-    expect((raw as ToolResult).isError).toBeUndefined();
+    expect(raw.isError).toBeUndefined();
   });
 
   it("returns err when rollbackApp throws", async () => {
     mockRollbackApp.mockRejectedValue(new Error("rollback failed"));
 
-    const tools = getTools();
-    const raw = await tools["relay_rollback"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_rollback", { app: "myapp" });
     const result = parseResult(raw) as { error: string };
 
     expect(result.error).toBe("rollback failed");
-    expect((raw as ToolResult).isError).toBe(true);
+    expect(raw.isError).toBe(true);
     expect(mockRecordDeploy).not.toHaveBeenCalled();
   });
 
@@ -214,41 +283,65 @@ describe("relay_rollback", () => {
     };
     mockRollbackApp.mockResolvedValue(blockedResult as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_rollback"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_rollback", { app: "myapp" });
     const result = parseResult(raw);
 
     expect(result).toEqual(blockedResult);
     expect(mockRecordDeploy).not.toHaveBeenCalled();
-    expect((raw as ToolResult).isError).toBeUndefined();
+    expect(raw.isError).toBeUndefined();
   });
 
-  it("COMMIT_REF schema: accepts valid hex SHA (4-40 chars)", () => {
-    const tools = getTools();
-    const schema = tools["relay_rollback"]!.inputSchema;
-    expect(schema?.safeParse({ app: "x", to_commit: "abcd1234" }).success).toBe(true);
-    expect(schema?.safeParse({ app: "x", to_commit: "abcdef1234567890abcdef1234567890abcdef12" }).success).toBe(true);
+  it("COMMIT_REF schema: accepts valid hex SHA (4-40 chars)", async () => {
+    mockRollbackApp.mockResolvedValue({ success: true, commitBefore: "aaa", commitAfter: "bbb" } as never);
+    mockRecordDeploy.mockResolvedValue({ id: "d-1" } as never);
+
+    await callTool("relay_rollback", { app: "x", to_commit: "abcd1234" });
+    expect(mockRollbackApp).toHaveBeenCalledWith("x", "abcd1234");
+
+    await callTool("relay_rollback", {
+      app: "x",
+      to_commit: "abcdef1234567890abcdef1234567890abcdef12",
+    });
+    expect(mockRollbackApp).toHaveBeenCalledWith(
+      "x",
+      "abcdef1234567890abcdef1234567890abcdef12",
+    );
   });
 
-  it("COMMIT_REF schema: accepts HEAD~N pattern", () => {
-    const tools = getTools();
-    const schema = tools["relay_rollback"]!.inputSchema;
-    expect(schema?.safeParse({ app: "x", to_commit: "HEAD~1" }).success).toBe(true);
-    expect(schema?.safeParse({ app: "x", to_commit: "HEAD~10" }).success).toBe(true);
-    expect(schema?.safeParse({ app: "x", to_commit: "HEAD~100" }).success).toBe(true);
+  it("COMMIT_REF schema: accepts HEAD~N pattern", async () => {
+    mockRollbackApp.mockResolvedValue({ success: true, commitBefore: "aaa", commitAfter: "bbb" } as never);
+    mockRecordDeploy.mockResolvedValue({ id: "d-1" } as never);
+
+    for (const ref of ["HEAD~1", "HEAD~10", "HEAD~100"]) {
+      await callTool("relay_rollback", { app: "x", to_commit: ref });
+    }
+    expect(mockRollbackApp).toHaveBeenNthCalledWith(1, "x", "HEAD~1");
+    expect(mockRollbackApp).toHaveBeenNthCalledWith(2, "x", "HEAD~10");
+    expect(mockRollbackApp).toHaveBeenNthCalledWith(3, "x", "HEAD~100");
   });
 
-  it("COMMIT_REF schema: rejects invalid commit refs", () => {
-    const tools = getTools();
-    const schema = tools["relay_rollback"]!.inputSchema;
+  it("COMMIT_REF schema: rejects invalid commit refs", async () => {
     // Too short (3 chars)
-    expect(schema?.safeParse({ app: "x", to_commit: "abc" }).success).toBe(false);
+    await expectInputRejected("relay_rollback", { app: "x", to_commit: "abc" });
     // Non-hex characters
-    expect(schema?.safeParse({ app: "x", to_commit: "xyz123abc" }).success).toBe(false);
+    await expectInputRejected("relay_rollback", { app: "x", to_commit: "xyz123abc" });
     // Shell injection attempt
-    expect(schema?.safeParse({ app: "x", to_commit: "abc123; rm -rf /" }).success).toBe(false);
+    await expectInputRejected("relay_rollback", {
+      app: "x",
+      to_commit: "abc123; rm -rf /",
+    });
     // HEAD~N with > 3 digits
-    expect(schema?.safeParse({ app: "x", to_commit: "HEAD~1000" }).success).toBe(false);
+    await expectInputRejected("relay_rollback", { app: "x", to_commit: "HEAD~1000" });
+    expect(mockRollbackApp).not.toHaveBeenCalled();
+  });
+
+  it("COMMIT_REF reject message keeps the custom regex text on the wire", async () => {
+    const text = await expectInputRejected("relay_rollback", {
+      app: "x",
+      to_commit: "nope",
+    });
+    expect(text).toContain("Must be a hex SHA or HEAD~N");
+    expect(text).toContain("at to_commit");
   });
 });
 
@@ -259,8 +352,7 @@ describe("relay_logs", () => {
     const logsResult = { app: "myapp", lines: 50, logs: "log output" };
     mockFetchLogs.mockResolvedValue(logsResult as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_logs"]!.handler({ app: "myapp", lines: 50 });
+    const raw = await callTool("relay_logs", { app: "myapp", lines: 50 });
     const result = parseResult(raw);
 
     expect(result).toEqual(logsResult);
@@ -270,8 +362,7 @@ describe("relay_logs", () => {
   it("passes service name through to fetchLogs", async () => {
     mockFetchLogs.mockResolvedValue({ app: "myapp", lines: 20, logs: "" } as never);
 
-    const tools = getTools();
-    await tools["relay_logs"]!.handler({ app: "myapp", lines: 20, service: "backend" });
+    await callTool("relay_logs", { app: "myapp", lines: 20, service: "backend" });
 
     expect(mockFetchLogs).toHaveBeenCalledWith("myapp", 20, "backend");
   });
@@ -279,28 +370,50 @@ describe("relay_logs", () => {
   it("returns err when fetchLogs throws", async () => {
     mockFetchLogs.mockRejectedValue(new Error("docker error"));
 
-    const tools = getTools();
-    const raw = await tools["relay_logs"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_logs", { app: "myapp" });
     const result = parseResult(raw) as { error: string };
 
     expect(result.error).toBe("docker error");
-    expect((raw as ToolResult).isError).toBe(true);
+    expect(raw.isError).toBe(true);
   });
 
-  it("SERVICE_NAME schema: accepts alphanumeric, dash, underscore", () => {
-    const tools = getTools();
-    const schema = tools["relay_logs"]!.inputSchema;
-    expect(schema?.safeParse({ app: "x", service: "backend" }).success).toBe(true);
-    expect(schema?.safeParse({ app: "x", service: "my-service_01" }).success).toBe(true);
+  it("SERVICE_NAME schema: accepts alphanumeric, dash, underscore", async () => {
+    mockFetchLogs.mockResolvedValue({ app: "x", lines: 10, logs: "" } as never);
+
+    await callTool("relay_logs", { app: "x", service: "backend" });
+    expect(mockFetchLogs).toHaveBeenNthCalledWith(1, "x", undefined, "backend");
+
+    await callTool("relay_logs", { app: "x", service: "my-service_01" });
+    expect(mockFetchLogs).toHaveBeenNthCalledWith(2, "x", undefined, "my-service_01");
   });
 
-  it("SERVICE_NAME schema: rejects invalid service names", () => {
-    const tools = getTools();
-    const schema = tools["relay_logs"]!.inputSchema;
+  it("SERVICE_NAME schema: rejects invalid service names", async () => {
     // Space in service name
-    expect(schema?.safeParse({ app: "x", service: "bad service" }).success).toBe(false);
+    await expectInputRejected("relay_logs", { app: "x", service: "bad service" });
     // Shell metacharacter
-    expect(schema?.safeParse({ app: "x", service: "svc;rm" }).success).toBe(false);
+    await expectInputRejected("relay_logs", { app: "x", service: "svc;rm" });
+    expect(mockFetchLogs).not.toHaveBeenCalled();
+  });
+
+  it("SERVICE_NAME reject message keeps the custom regex text on the wire", async () => {
+    const text = await expectInputRejected("relay_logs", {
+      app: "x",
+      service: "bad service",
+    });
+    expect(text).toContain("Invalid service name");
+    expect(text).toContain("at service");
+  });
+
+  it("lines schema: accepts the 1000 upper boundary", async () => {
+    mockFetchLogs.mockResolvedValue({ app: "x", lines: 1000, logs: "" } as never);
+
+    await callTool("relay_logs", { app: "x", lines: 1000 });
+    expect(mockFetchLogs).toHaveBeenCalledWith("x", 1000, undefined);
+  });
+
+  it("lines schema: rejects 1001, one past the upper boundary", async () => {
+    await expectInputRejected("relay_logs", { app: "x", lines: 1001 });
+    expect(mockFetchLogs).not.toHaveBeenCalled();
   });
 });
 
@@ -311,23 +424,21 @@ describe("relay_preflight", () => {
     const report = { passed: true, checks: [{ name: "compose_file_exists", passed: true, message: "ok", critical: true }] };
     mockRunPreflight.mockResolvedValue(report as never);
 
-    const tools = getTools();
-    const raw = await tools["relay_preflight"]!.handler({ app: "myapp" });
+    const raw = await callTool("relay_preflight", { app: "myapp" });
     const result = parseResult(raw) as { app: string };
 
     expect(result.app).toBe("myapp");
     expect(mockRunPreflight).toHaveBeenCalledWith("myapp");
-    expect((raw as ToolResult).isError).toBeUndefined();
+    expect(raw.isError).toBeUndefined();
   });
 
   it("returns err when runPreflight throws", async () => {
     mockRunPreflight.mockRejectedValue(new Error("app not found"));
 
-    const tools = getTools();
-    const raw = await tools["relay_preflight"]!.handler({ app: "ghost" });
+    const raw = await callTool("relay_preflight", { app: "ghost" });
     const result = parseResult(raw) as { error: string };
 
     expect(result.error).toBe("app not found");
-    expect((raw as ToolResult).isError).toBe(true);
+    expect(raw.isError).toBe(true);
   });
 });

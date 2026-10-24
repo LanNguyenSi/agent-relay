@@ -1,6 +1,8 @@
 import { z } from "zod";
 
-const envSchema = z.object({
+// Exported for tests: pins the v4 default/coercion behaviour of PORT
+// (default short-circuits to 8222, strings are coerced, "" -> 0).
+export const envSchema = z.object({
   PORT: z.coerce.number().default(8222),
   AUTH_TOKEN: z.string().min(1, "AUTH_TOKEN is required"),
   APPS_DIR: z.string().default("/apps"),

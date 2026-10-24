@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **zod 3 -> 4 migration** (GHSA-mrhx-c7xc-m3w5): `zod` moves from `^3.24.4` to `^4.6.7`; the advisory affects zod `< 4.6.6` and is fixed only in the v4 core, so the `zod/v3` compat subpath was not used. `src/config/env.ts`, `src/config/relay.ts` and `src/mcp/server.ts` now use the v4 API with behaviour preserved (custom error texts identical, defaults and coercion pinned by tests).
+
 ### Fixed
 
 - **`GET /api/system` reports a real CPU percentage in the Alpine image** (task 8a987aee). `cpu.usage` is now computed from two reads of `/proc/stat` about 200 ms apart instead of parsing `top`, whose BusyBox build in the runtime image prints no `Cpu(s)` line, so the grep matched top's own process rows and the value was a process id, not a CPU percentage. It still falls back to `0` when `/proc/stat` is unreadable.

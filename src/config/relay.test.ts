@@ -198,6 +198,166 @@ step_timeout_seconds: 7201
 `),
       ).toThrow(/step_timeout_seconds/);
     });
+
+    // Exact user-facing texts (printed verbatim by RelayConfigError). The
+    // zod 4 `error` parameter replaces v3's `invalid_type_error` and must
+    // keep producing the SAME text for wrong-type values only.
+    it("string value produces the identical custom wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: "600"
+`),
+      ).toThrow(
+        "step_timeout_seconds: step_timeout_seconds must be a number",
+      );
+    });
+
+    it("null value produces the identical custom wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: null
+`),
+      ).toThrow(
+        "step_timeout_seconds: step_timeout_seconds must be a number",
+      );
+    });
+
+    it("float value keeps the identical custom integer text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 1.5
+`),
+      ).toThrow("step_timeout_seconds must be an integer");
+    });
+
+    it("zero keeps the identical custom min text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 0
+`),
+      ).toThrow("step_timeout_seconds must be at least 1");
+    });
+
+    it("7201 keeps the identical custom max text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: 7201
+`),
+      ).toThrow("step_timeout_seconds must be at most 7200");
+    });
+  });
+
+  describe("issue texts reaching RelayConfigError (zod 4 migration pins)", () => {
+    it("missing name uses the v4 default wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+health: /health
+`),
+      ).toThrow("name: Invalid input: expected string, received undefined");
+    });
+
+    it("empty name keeps the identical custom message", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: ""
+health: /health
+`),
+      ).toThrow("name: name is required");
+    });
+
+    it("empty health keeps the identical custom message", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: ""
+`),
+      ).toThrow("health: health endpoint is required");
+    });
+
+    it("health_port wrong type uses the default wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_port: "x"
+`),
+      ).toThrow("health_port: Invalid input: expected number, received string");
+    });
+
+    it("compose_file charset violation keeps the identical custom message", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+compose_file: "bad name"
+`),
+      ).toThrow(
+        "compose_file must only contain letters, digits, '.', '_', '/', or '-'",
+      );
+    });
+
+    it("absolute compose_file keeps the identical custom refine message", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+compose_file: "/etc/passwd"
+`),
+      ).toThrow(
+        "compose_file must be a path relative to the app directory, not absolute",
+      );
+    });
+
+    it("compose_file wrong type uses the default wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+compose_file: 5
+`),
+      ).toThrow("compose_file: Invalid input: expected string, received number");
+    });
+
+    it("pre_update wrong type uses the default wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+pre_update: "not-a-list"
+`),
+      ).toThrow("pre_update: Invalid input: expected array, received string");
+    });
+
+    it("pre_update item wrong type uses the default wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+pre_update:
+  - 5
+`),
+      ).toThrow("pre_update.0: Invalid input: expected string, received number");
+    });
+
+    it("rollback wrong type uses the default wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+rollback: "yes"
+`),
+      ).toThrow("rollback: Invalid input: expected boolean, received string");
+    });
   });
 
   describe("compose_file shell-injection hardening", () => {
