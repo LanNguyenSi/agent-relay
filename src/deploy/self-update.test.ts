@@ -272,6 +272,7 @@ describe("self-update engine and shared concurrency lock", () => {
       ["working_dir with ':'", { "com.docker.compose.project.working_dir": "/opt/a:b" }, /unsafe com\.docker\.compose\.project\.working_dir/],
       ["working_dir with ','", { "com.docker.compose.project.working_dir": "/opt/a,readonly=false" }, /unsafe com\.docker\.compose\.project\.working_dir/],
       ["missing config_files", { "com.docker.compose.project.config_files": undefined }, /Missing com\.docker\.compose\.project\.config_files label/],
+      ["config file path with ':'", { "com.docker.compose.project.config_files": "compose:prod.yml" }, /Unsafe compose config file path/],
       ["empty config_files list", { "com.docker.compose.project.config_files": " , " }, /Empty com\.docker\.compose\.project\.config_files label/],
       ["option-shaped service", { "com.docker.compose.service": "--remove-orphans" }, /Invalid com\.docker\.compose\.service label/],
       ["service with a space", { "com.docker.compose.service": "relay x" }, /Invalid com\.docker\.compose\.service label/],
