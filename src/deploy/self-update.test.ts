@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -140,9 +141,11 @@ describe("self-update engine and shared concurrency lock", () => {
 
   function mockDocker(opts: DockerMockOptions = {}) {
     const labels = opts.labels === undefined ? defaultLabels() : opts.labels;
-    mockRunExec.mockImplementation(async (cmd, args) => {
+    mockRunExec.mockImplementation(async (cmd, args, cwd) => {
       const ok = (stdout: string) => ({ stdout, stderr: "", exitCode: 0 });
       const fail = (stderr: string) => ({ stdout: "", stderr, exitCode: 1 });
+      // Like execFile: a cwd that does not exist fails with ENOENT before the command runs.
+      if (cwd && !existsSync(cwd)) return { stdout: "", stderr: "", exitCode: 1 };
       if (cmd !== "docker") return ok("ok");
       if (args[0] === "inspect" && args.includes("{{json .Config}}")) {
         if (labels === null) return fail("No such container");
@@ -423,6 +426,32 @@ describe("self-update engine and shared concurrency lock", () => {
       const reconciled = await reconcileSelfUpdateState();
       expect(reconciled?.status).toBe("succeeded");
       expect(reconciled?.completedAt).toBeDefined();
+    });
+
+    it("completes when the compose dir exists only on the Docker host, running every docker call from APPS_DIR", async () => {
+      const hostDir = join(tempDir, "host-only-not-created");
+      const hostFile = `${hostDir}/docker-compose.prod.yml`;
+      mockDocker({
+        labels: {
+          "com.docker.compose.project": "agent-relay",
+          "com.docker.compose.project.working_dir": hostDir,
+          "com.docker.compose.project.config_files": hostFile,
+          "com.docker.compose.service": "relay",
+        },
+        hostFiles: { [hostFile]: `services:\n  relay:\n    image: ${RELAY_IMAGE}\n` },
+      });
+
+      const accepted = await prepareSelfUpdate({ candidates: ["agent-relay"], postSpawnLockMs: 0 });
+      await accepted.launchHelper();
+
+      expect((await readSelfUpdateState())?.status).toBe("in_progress");
+      const helperRun = mockRunExec.mock.calls.find(
+        ([, args]) => args[0] === "run" && !args.includes("cat"),
+      );
+      expect(helperRun?.[1]).toContain(`${hostDir}:${hostDir}:ro`);
+      for (const [, , cwd] of mockRunExec.mock.calls) {
+        expect(cwd).toBe(env.APPS_DIR);
+      }
     });
 
     it("removes finished helper containers of earlier self-updates before pulling", async () => {
