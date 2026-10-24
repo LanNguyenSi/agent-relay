@@ -2,6 +2,7 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-24T12:49:57Z, `deploy-failure-surfaces.md` re-verified after the CHANGELOG `[Unreleased]` Security bullet for the zod 4 migration gained its list of visible differences; the doc's claims about the deploy failure surfaces do not depend on it. Re-stamped.
 - 2026-10-24T12:45:05Z, zod 3 -> 4 migration. `exec-trust-boundary.md` and `path-containment-idiom.md` (source `src/config/relay.ts`) re-verified: the only change there swaps `invalid_type_error` for `error` on `step_timeout_seconds` in place, no line moved and the cited validation still reads as described. `deploy-failure-surfaces.md` (sources `src/mcp/server.test.ts`, `CHANGELOG.md`): the MCP tests now run through the SDK in-memory client, so the blocked-deploy test moved and its citation is re-pointed to `src/mcp/server.test.ts:144` (also in the older log entry that names it); `src/mcp/server.ts` is unchanged. Checked with `okf-kit check docs/okf`. Re-stamped.
 - 2026-10-12T15:57:24Z, apps-dir-contract.md, deploy-failure-surfaces.md,
   deploy-phase-model.md, exec-trust-boundary.md and health-check-reality.md
