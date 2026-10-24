@@ -69,23 +69,23 @@ export interface DeployOptions {
 export async function deploy(
   options: DeployOptions,
 ): Promise<DeployResult | DeployBlockedResult> {
-  const { appDir, config } = options;
-  // Detect current branch if not specified
-  let branch = options.branch;
-  if (!branch) {
-    const branchResult = await runExec("git", ["rev-parse", "--abbrev-ref", "HEAD"], appDir);
-    branch = branchResult.stdout.trim() || "main";
-  }
-  const steps: DeployStep[] = [];
-  const start = Date.now();
+  const release = acquireOperationLock("deploy", options.appDir);
+  try {
+    const { appDir, config } = options;
+    let branch = options.branch;
+    if (!branch) {
+      const branchResult = await runExec("git", ["rev-parse", "--abbrev-ref", "HEAD"], appDir);
+      branch = branchResult.stdout.trim() || "main";
+    }
+    const steps: DeployStep[] = [];
+    const start = Date.now();
 
-  const commitBefore = await getCurrentCommit(appDir);
-
-  if (config.command) {
-    return customCommandDeploy(options, commitBefore, steps, start);
-  }
-
-  return defaultFlowDeploy(options, branch, commitBefore, steps, start);
+    const commitBefore = await getCurrentCommit(appDir);
+    if (config.command) {
+      return await customCommandDeploy(options, commitBefore, steps, start);
+    }
+    return await defaultFlowDeploy(options, branch, commitBefore, steps, start);
+  } finally { release(); }
 }
 
 async function defaultFlowDeploy(
@@ -673,4 +673,58 @@ function result(
     commitAfter,
     steps,
   };
+}
+
+export type OperationKind = "deploy" | "rollback" | "self-update";
+
+export interface ActiveOperation {
+  kind: OperationKind;
+  target?: string;
+  startedAt: string;
+}
+
+export class DeployConflictError extends Error {
+  readonly activeOperation: ActiveOperation;
+
+  constructor(requestedKind: OperationKind, active: ActiveOperation) {
+    const targetSuffix = active.target ? ` (${active.target})` : "";
+    super(
+      `Cannot start ${requestedKind}: ${active.kind}${targetSuffix} is already in progress since ${active.startedAt}`,
+    );
+    this.name = "DeployConflictError";
+    this.activeOperation = active;
+  }
+}
+
+let activeOperation: ActiveOperation | null = null;
+
+export function getActiveOperation(): ActiveOperation | null {
+  return activeOperation ? { ...activeOperation } : null;
+}
+
+export function isOperationLocked(): boolean {
+  return activeOperation !== null;
+}
+
+export function acquireOperationLock(kind: OperationKind, target?: string): () => void {
+  if (activeOperation !== null) {
+    throw new DeployConflictError(kind, activeOperation);
+  }
+  const current: ActiveOperation = {
+    kind,
+    ...(target !== undefined ? { target } : {}),
+    startedAt: new Date().toISOString(),
+  };
+  activeOperation = current;
+  let released = false;
+  return () => {
+    if (!released && activeOperation === current) {
+      released = true;
+      activeOperation = null;
+    }
+  };
+}
+
+export function resetOperationLockForTests(): void {
+  activeOperation = null;
 }

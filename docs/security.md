@@ -24,6 +24,8 @@ Treat the deploy branch like a deploy key:
 
 `compose_file` is the one exception. It is never shell-interpolated: it is passed as a literal argument to `docker compose` via an `execFile` arg array, so the charset regex (`[A-Za-z0-9._/-]+`) is path hygiene, not a shell-escape guard. Path traversal is contained separately by resolving the path and rejecting anything that lands outside `APPS_DIR`; `..` segments are therefore allowed as long as they stay under `APPS_DIR` (the legitimate sibling-app case `../other-app/docker-compose.yml`), while deeper escapes like `../../etc/passwd` are rejected. Absolute paths are rejected outright, and so is a symlink that resolves outside `APPS_DIR`.
 
+`POST /api/self-update` (`src/deploy/self-update.ts`) follows the same `runExec` (`execFile` argv array) discipline: the optional `tag` body field is restricted to `"latest"` or `"main-<7..40 lowercase hex>"`, compose labels (`project`, `working_dir`, `config_files`, `service`) are validated and resolved under `working_dir`, and `docker inspect`, `docker pull`, `docker image inspect`, and the detached helper `docker run` invocation all pass discrete argument arrays to `runExec` without invoking a shell.
+
 `step_timeout_seconds` is read from the same post-pull `.relay.yml`, so a pushed commit can also raise its own deploy's per-step exec timeout up to the 7200 s ceiling (`build`/`up`/`post_update`). This sits inside the trust boundary above rather than outside it: raising your own timeout is a strictly smaller capability than the arbitrary shell already granted by `command`/`pre_update`/`post_update`.
 
 ## Why `.relay.yml` is re-read after `git pull`

@@ -5,6 +5,7 @@ import { logger } from "hono/logger";
 import { isAuthorized } from "./config/auth.js";
 import { getRelayRevision, RELAY_VERSION } from "./config/version.js";
 import { api } from "./api/routes.js";
+import { reconcileSelfUpdateState } from "./deploy/self-update.js";
 import { createMcpServer } from "./mcp/server.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
@@ -21,9 +22,11 @@ export function createApp(): Hono {
 
   // Authenticated API
   app.route("/api", api);
-
+  // Marks a pending self-update record succeeded once this process runs the target revision.
+  void reconcileSelfUpdateState().catch(() => {});
   return app;
 }
+
 
 /**
  * The Node.js HTTP server: /mcp goes to the MCP transport, everything else to

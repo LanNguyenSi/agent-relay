@@ -248,6 +248,22 @@ Comments and every line that `GET` skips are removed on write, so a `GET` follow
 { "entries": [ { "key": "AUTH_TOKEN", "value": "s3cr3t" } ] }
 ```
 
+### `POST /api/self-update` and `GET /api/self-update`
+
+Update an image-based relay installation in place without SSH credentials.
+
+| Body field (`POST`) | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tag` | `string` | `"latest"` | Image tag to pull from `ghcr.io/lannguyensi/agent-relay`. Restricted to `"latest"` or `"main-<7..40 lowercase hex>"`; any other value returns `400 { "error": "...", "kind": "invalid_tag" }`. |
+
+Behaviour:
+
+1. Shares the in-memory operation lock with `POST /api/apps/:name/deploy` and `POST /api/apps/:name/rollback`. If a deploy, rollback, or self-update is already active, returns `409 { "error": "...", "kind": "relay_busy", "activeOperation": { ... } }`. Conversely, starting a deploy or rollback while a self-update holds the lock returns `409`.
+2. Inspects the relay container's own `com.docker.compose.project`, `com.docker.compose.project.working_dir`, `com.docker.compose.project.config_files`, and optional `com.docker.compose.service` (default `"relay"`) labels and reads the compose file. If labels are missing/invalid or the relay service is build-based (`build:` present or `image:` missing), refuses with `422 { "error": "...", "kind": "unsupported_compose" }`.
+3. Pulls `ghcr.io/lannguyensi/agent-relay:<tag>` and inspects the pulled image for its digest and `org.opencontainers.image.revision` label (returns `502` on pull/inspect failure).
+4. Persists `.relay-self-update.json` (`status: "in_progress"`), returns `202 Accepted` with `{ status: "accepted", tag, targetImage, digest, previousRevision, targetRevision, recovery }`, and spawns a detached helper container (`--entrypoint docker`, `/var/run/docker.sock` and `<workingDir>:<workingDir>:ro`) that runs `docker compose -p <project> -f <file> up -d <service>` via discrete `execFile` argv elements after the response is flushed.
+5. `GET /api/self-update` returns `{ revision, state }` (reconciling an `in_progress` `.relay-self-update.json` record to `succeeded` once the running `RELAY_REVISION` matches `targetRevision`). If the new container does not become healthy, recover via `deploy-panel`'s SSH `Update Relay Image` flow or `docker compose pull && docker compose up -d` on the host.
+
 ## MCP tools
 
 The MCP server exposes 5 tools at `/mcp`. Same `AUTH_TOKEN` as the HTTP API.
