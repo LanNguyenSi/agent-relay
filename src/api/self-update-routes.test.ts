@@ -169,6 +169,7 @@ describe("POST /api/self-update and GET /api/self-update routes", () => {
       expect(body).toMatchObject({
         kind: "relay_busy",
         error: expect.stringContaining("Cannot start self-update: deploy (demo-app) is already in progress"),
+        activeOperation: { kind: "deploy", target: "demo-app" },
       });
     } finally {
       release();

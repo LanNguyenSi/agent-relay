@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import * as yaml from "js-yaml";
@@ -112,7 +113,7 @@ function selfUpdateStatePath(): string {
 export async function writeSelfUpdateState(record: SelfUpdateStateRecord): Promise<void> {
   const path = selfUpdateStatePath();
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(record, null, 2), "utf-8");
   await rename(tmp, path);
 }
@@ -159,7 +160,8 @@ async function inspectHelper(name: string): Promise<HelperOutcome | null> {
  * - the helper container exited non-zero -> `failed` with its exit code and log tail;
  * - the helper exited 0 but the running revision is not the target -> `failed`
  *   (compose recreated nothing), or `unverified` when the target revision is unknown;
- * - no conclusive helper outcome after STALE_IN_PROGRESS_MS -> `failed` (stale).
+ * - no helper outcome after STALE_IN_PROGRESS_MS -> `failed` (stale). A helper that is
+ *   still running keeps the record `in_progress`; it is reconciled once it exits.
  */
 export async function reconcileSelfUpdateState(): Promise<SelfUpdateStateRecord | null> {
   const record = await readSelfUpdateState();
@@ -342,6 +344,15 @@ export async function discoverSelfComposeConfig(
     configFiles.push(resolvedFile);
   }
 
+  const envFilesRaw = labels["com.docker.compose.project.environment_file"]?.trim() ?? "";
+  const defaultEnvFile = join(resolvedWorkingDir, ".env");
+  const envFiles = envFilesRaw.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  if (envFiles.some((entry) => resolve(resolvedWorkingDir, entry) !== defaultEnvFile)) {
+    throw new SelfUpdateRefusedError(
+      `The relay was started with --env-file (${envFilesRaw}); the helper would recreate it without those variables. ${SELF_UPDATE_RECOVERY_GUIDANCE}`,
+    );
+  }
+
   if (!relayImage) {
     throw new SelfUpdateRefusedError(
       "Could not determine the relay container's own image, which is needed to read the compose file through the Docker daemon.",
@@ -494,7 +505,18 @@ export function normalizeImageRef(ref: string): string {
 async function removeOldHelpers(cwd: string): Promise<void> {
   const list = await runExec(
     "docker",
-    ["ps", "-aq", "--filter", `label=${SELF_UPDATE_HELPER_LABEL}=true`],
+    [
+      "ps",
+      "-aq",
+      "--filter",
+      `label=${SELF_UPDATE_HELPER_LABEL}=true`,
+      "--filter",
+      "status=exited",
+      "--filter",
+      "status=created",
+      "--filter",
+      "status=dead",
+    ],
     cwd,
   );
   if (list.exitCode !== 0) return;

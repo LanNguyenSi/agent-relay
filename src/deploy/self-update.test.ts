@@ -289,6 +289,24 @@ describe("self-update engine and shared concurrency lock", () => {
       });
     }
 
+    it("refuses when the relay was started with an env file other than <working_dir>/.env", async () => {
+      mockDocker({
+        labels: {
+          ...defaultLabels(),
+          "com.docker.compose.project.environment_file": "/etc/relay/prod.env",
+        },
+      });
+      await expect(discoverSelfComposeConfig(["c1"])).rejects.toThrow(/started with --env-file/);
+
+      mockDocker({
+        labels: {
+          ...defaultLabels(),
+          "com.docker.compose.project.environment_file": join(composeDir, ".env"),
+        },
+      });
+      await expect(discoverSelfComposeConfig(["c1"])).resolves.toMatchObject({ service: "relay" });
+    });
+
     it("refuses an existing config file outside working_dir (traversal or sibling prefix) before reading it", async () => {
       const { mkdir } = await import("node:fs/promises");
       const outside = join(tempDir, "outside.yml");
@@ -407,9 +425,22 @@ describe("self-update engine and shared concurrency lock", () => {
       expect(reconciled?.completedAt).toBeDefined();
     });
 
-    it("removes helper containers of earlier self-updates before pulling", async () => {
+    it("removes finished helper containers of earlier self-updates before pulling", async () => {
       mockDocker({ oldHelperIds: "0123456789ab\nnot-an-id\nabcdef012345\n" });
       await prepareSelfUpdate({ candidates: ["agent-relay"], postSpawnLockMs: 0 });
+      const psCall = mockRunExec.mock.calls.find(([, args]) => args[0] === "ps");
+      expect(psCall?.[1]).toEqual([
+        "ps",
+        "-aq",
+        "--filter",
+        "label=agent-relay.self-update-helper=true",
+        "--filter",
+        "status=exited",
+        "--filter",
+        "status=created",
+        "--filter",
+        "status=dead",
+      ]);
       const rmCall = mockRunExec.mock.calls.find(([, args]) => args[0] === "rm");
       expect(rmCall?.[1]).toEqual(["rm", "-f", "0123456789ab", "abcdef012345"]);
     });
@@ -528,6 +559,26 @@ describe("self-update engine and shared concurrency lock", () => {
       await seedInProgress({ targetRevision: "unknown" });
       mockDocker({ helperState: { Status: "exited", ExitCode: 0 } });
       expect((await reconcileSelfUpdateState())?.status).toBe("unverified");
+    });
+
+    it("does not mark a record succeeded when both the running and the target revision are unknown", async () => {
+      await seedInProgress({ targetRevision: "unknown" });
+      process.env.RELAY_REVISION = "";
+      mockDocker({ helperState: { Status: "running", ExitCode: 0 } });
+      expect((await reconcileSelfUpdateState())?.status).toBe("in_progress");
+    });
+
+    it("keeps the record in_progress past the stale deadline while the helper is still running", async () => {
+      await seedInProgress({ requestedAt: new Date(Date.now() - 11 * 60_000).toISOString() });
+      mockDocker({ helperState: { Status: "running", ExitCode: 0 } });
+      expect((await reconcileSelfUpdateState())?.status).toBe("in_progress");
+    });
+
+    it("leaves one parseable record when writes race", async () => {
+      await Promise.all(
+        Array.from({ length: 20 }, (_, i) => seedInProgress({ tag: `main-${String(i).padStart(7, "0")}` })),
+      );
+      expect((await readSelfUpdateState())?.status).toBe("in_progress");
     });
 
     it("marks a record without helper outcome failed only after the stale deadline", async () => {
@@ -654,6 +705,22 @@ describe("self-update engine and shared concurrency lock", () => {
 
       releaseRollbackGate();
       await inFlightRollback;
+      expect(apps.isOperationLocked()).toBe(false);
+    });
+
+    it("releases the lock when a rollback fails", async () => {
+      const appDir = join(tempDir, "demo");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(appDir, { recursive: true });
+      await writeFile(
+        join(appDir, ".relay.yml"),
+        "name: demo\nhealth: /health\ncompose_file: docker-compose.yml\n",
+        "utf-8",
+      );
+      mockRunExec.mockResolvedValue({ stdout: "", stderr: "fatal: bad revision", exitCode: 128 });
+
+      await expect(apps.rollbackApp("demo")).rejects.toThrow();
+      expect(apps.isOperationLocked()).toBe(false);
     });
 
     it("refuses deploy and rollback with DeployConflictError while a self-update holds the lock", async () => {
