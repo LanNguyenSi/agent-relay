@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **zod 3 -> 4 migration** (GHSA-mrhx-c7xc-m3w5): `zod` moves from `^3.24.4` to `^4.6.7`; the advisory affects zod `< 4.6.6` and is fixed only in the v4 core, so the `zod/v3` compat subpath was not used. `src/config/env.ts`, `src/config/relay.ts` and `src/mcp/server.ts` use the v4 API (`src/mcp/server.ts` needed no source change); custom error texts, defaults and coercion are unchanged and pinned by tests. Visible differences: zod's default (non-custom) messages changed wording (for example `Required` is now `Invalid input: expected string, received undefined`) in `.relay.yml` errors, the startup environment check and MCP input-validation results; non-finite numbers (`PORT=Infinity`, `health_port: .inf`, `step_timeout_seconds: .inf`) are now rejected; and the MCP `tools/list` input schemas no longer carry `additionalProperties: false` (unknown argument keys are still stripped, as before).
+
 ### Fixed
 
 - **`GET /api/system` reports a real CPU percentage in the Alpine image** (task 8a987aee). `cpu.usage` is now computed from two reads of `/proc/stat` about 200 ms apart instead of parsing `top`, whose BusyBox build in the runtime image prints no `Cpu(s)` line, so the grep matched top's own process rows and the value was a process id, not a CPU percentage. It still falls back to `0` when `/proc/stat` is unreadable.

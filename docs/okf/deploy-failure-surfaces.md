@@ -3,7 +3,7 @@ type: invariant
 title: Deploy failure propagation across three surfaces — blocked vs failed vs success
 description: SSE has a dedicated `blocked` event, non-streaming HTTP wraps a blocked result under `{ result }` (PR #45), and MCP returns a plain ok(result) — all three agree that a BLOCKED deploy never calls recordDeploy and so never enters deploy history. `rollbackApp` (PR #73) now returns the same `blocked` shape as a deploy, gated on preflight after `git reset --hard`, and both rollback callers follow the identical wrap/skip-recordDeploy pattern. PR #58 resolves app config before opening the SSE stream so an unknown app is a real 404, not a mid-stream error event.
 tags: [deploy, sse, mcp, api, history, blocked, rollback]
-timestamp: 2026-10-12T15:57:24Z
+timestamp: 2026-10-24T12:49:57Z
 sources:
   - src/api/routes.ts
   - src/mcp/server.ts
@@ -24,7 +24,7 @@ A deploy call resolves to one of three outcomes: a normal `DeployResult` (`succe
 
 ## The shared invariant: a blocked deploy never enters deploy history
 
-All three surfaces agree on one thing: **`recordDeploy` is never called on the blocked branch.** SSE's blocked branch calls `send("blocked", ...)` with no `recordDeploy` call anywhere near it (`routes.ts:152-153`, contrast with `:155` on the success path); the non-streaming HTTP blocked branch returns immediately without a `recordDeploy` call (`routes.ts:178-183`, contrast with `:184` on the non-blocked path); MCP's `relay_deploy` returns immediately on the blocked branch (`server.ts:38-40`) with `recordDeploy` only reached on the line below for the non-blocked case (`:41`). Regression coverage: `src/mcp/server.test.ts` "returns ok result but does NOT call recordDeploy when deploy is blocked" (`src/mcp/server.test.ts:81#"does NOT call recordDeploy when deploy is blocked"`, asserts `mockRecordDeploy` `not.toHaveBeenCalled()`) and `src/api/routes-extra.test.ts` "emits blocked event and does NOT call recordDeploy when deploy is blocked" (`routes-extra.test.ts:132`, same assertion for the SSE path).
+All three surfaces agree on one thing: **`recordDeploy` is never called on the blocked branch.** SSE's blocked branch calls `send("blocked", ...)` with no `recordDeploy` call anywhere near it (`routes.ts:152-153`, contrast with `:155` on the success path); the non-streaming HTTP blocked branch returns immediately without a `recordDeploy` call (`routes.ts:178-183`, contrast with `:184` on the non-blocked path); MCP's `relay_deploy` returns immediately on the blocked branch (`server.ts:38-40`) with `recordDeploy` only reached on the line below for the non-blocked case (`:41`). Regression coverage: `src/mcp/server.test.ts` "returns ok result but does NOT call recordDeploy when deploy is blocked" (`src/mcp/server.test.ts:144#"does NOT call recordDeploy when deploy is blocked"`, asserts `mockRecordDeploy` `not.toHaveBeenCalled()`) and `src/api/routes-extra.test.ts` "emits blocked event and does NOT call recordDeploy when deploy is blocked" (`routes-extra.test.ts:132`, same assertion for the SSE path).
 
 Consequence: `GET /api/deploys` / `GET /api/apps/:name` (both backed by `src/services/history.ts`'s `getHistory`) never surface a blocked attempt as a deploy record — deploy history is exclusively real attempts (success or failure after preflight passed) plus rollbacks. A blocked deploy leaves no trace in `.relay-history.json`; its only record is whatever the calling surface's transient response (SSE event, HTTP body, MCP tool result) captured at call time.
 
