@@ -696,35 +696,46 @@ export class DeployConflictError extends Error {
   }
 }
 
-let activeOperation: ActiveOperation | null = null;
+// Deploys and rollbacks share the lock (any number may run side by side,
+// as before); a self-update holds it exclusively, so it refuses while any
+// deploy or rollback is active and blocks new ones until it releases.
+const activeOperations = new Set<ActiveOperation>();
+
+function blockingOperation(kind: OperationKind): ActiveOperation | null {
+  for (const op of activeOperations) {
+    if (kind === "self-update" || op.kind === "self-update") return op;
+  }
+  return null;
+}
 
 export function getActiveOperation(): ActiveOperation | null {
-  return activeOperation ? { ...activeOperation } : null;
+  const first = activeOperations.values().next();
+  return first.done ? null : { ...first.value };
 }
 
 export function isOperationLocked(): boolean {
-  return activeOperation !== null;
+  return activeOperations.size > 0;
+}
+
+/** Throws DeployConflictError when `kind` could not acquire the lock now; acquires nothing. */
+export function assertOperationAllowed(kind: OperationKind): void {
+  const blocking = blockingOperation(kind);
+  if (blocking) throw new DeployConflictError(kind, { ...blocking });
 }
 
 export function acquireOperationLock(kind: OperationKind, target?: string): () => void {
-  if (activeOperation !== null) {
-    throw new DeployConflictError(kind, activeOperation);
-  }
+  assertOperationAllowed(kind);
   const current: ActiveOperation = {
     kind,
     ...(target !== undefined ? { target } : {}),
     startedAt: new Date().toISOString(),
   };
-  activeOperation = current;
-  let released = false;
+  activeOperations.add(current);
   return () => {
-    if (!released && activeOperation === current) {
-      released = true;
-      activeOperation = null;
-    }
+    activeOperations.delete(current);
   };
 }
 
 export function resetOperationLockForTests(): void {
-  activeOperation = null;
+  activeOperations.clear();
 }

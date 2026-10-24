@@ -2,7 +2,7 @@ import { resolve, sep, dirname, basename, isAbsolute } from "node:path";
 import { readdir, stat, lstat, readlink, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
-import { deploy, stepExecOptions, DeployConflictError, acquireOperationLock, isOperationLocked } from "../deploy/engine.js";
+import { deploy, stepExecOptions, DeployConflictError, acquireOperationLock, assertOperationAllowed, isOperationLocked } from "../deploy/engine.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
 import { getUpstreamWithin, upstreamTuning, type UpstreamInfo } from "./upstream.js";
@@ -18,7 +18,7 @@ import { getUpstreamWithin, upstreamTuning, type UpstreamInfo } from "./upstream
 // `runPreflight(name)` below, which still reads the current working
 // tree.
 
-export { RelayConfigError, DeployConflictError, acquireOperationLock, isOperationLocked };
+export { RelayConfigError, DeployConflictError, acquireOperationLock, assertOperationAllowed, isOperationLocked };
 
 // realpath() requires every path segment to exist, so it can't tell us where
 // a DANGLING symlink's target really is. This walks up to the nearest
@@ -295,7 +295,7 @@ export async function getAppDetail(name: string) {
 }
 
 export async function deployApp(name: string, options?: { branch?: string; force?: boolean }) {
-  if (isOperationLocked()) acquireOperationLock("deploy", name); // fail fast; deploy() takes the real lock
+  assertOperationAllowed("deploy"); // fail fast; deploy() takes the real lock
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
   const branch = options?.branch ? validateBranch(options.branch) : undefined;
@@ -307,7 +307,7 @@ export async function deployAppStreaming(
   options?: { branch?: string; force?: boolean },
   onStep?: (step: import("../deploy/engine.js").DeployStep) => void,
 ) {
-  if (isOperationLocked()) acquireOperationLock("deploy", name); // fail fast; deploy() takes the real lock
+  assertOperationAllowed("deploy"); // fail fast; deploy() takes the real lock
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
   const branch = options?.branch ? validateBranch(options.branch) : undefined;

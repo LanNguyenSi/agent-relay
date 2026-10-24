@@ -68,6 +68,7 @@ describe("POST /api/self-update and GET /api/self-update routes", () => {
     });
 
     expect(res.status).toBe(202);
+    expect(launchHelper).not.toHaveBeenCalled();
     expect(prepareSpy).toHaveBeenCalledWith({ tag: undefined });
     const body = (await res.json()) as Record<string, unknown>;
     expect(body).toEqual({
@@ -82,6 +83,32 @@ describe("POST /api/self-update and GET /api/self-update routes", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(launchHelper).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards only the tag from the request body to prepareSelfUpdate", async () => {
+    const prepareSpy = vi.spyOn(selfUpdate, "prepareSelfUpdate").mockResolvedValue({
+      status: "accepted",
+      tag: "latest",
+      targetImage: "ghcr.io/lannguyensi/agent-relay:latest",
+      digest: DIGEST,
+      previousRevision: OLD_SHA,
+      targetRevision: NEW_SHA,
+      recovery: selfUpdate.SELF_UPDATE_RECOVERY_GUIDANCE,
+      launchHelper: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request("/self-update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tag: "latest",
+        candidates: ["--privileged"],
+        postSpawnLockMs: 0,
+        image: "evil/image",
+      }),
+    });
+    expect(res.status).toBe(202);
+    expect(prepareSpy.mock.calls[0]?.[0]).toStrictEqual({ tag: "latest" });
   });
 
   it("returns 400 when body is invalid JSON, not an object, or has a disallowed tag", async () => {

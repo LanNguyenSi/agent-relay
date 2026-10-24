@@ -127,7 +127,7 @@ api.post("/apps/:name/deploy", async (c) => {
     // internally (safeAppDir + loadRelayConfig) up front lets an unknown app /
     // invalid config return the same 404 the non-streaming path returns.
     try {
-      if (apps.isOperationLocked()) apps.acquireOperationLock("deploy", name);
+      apps.assertOperationAllowed("deploy");
       const dir = await apps.safeAppDir(name); await loadRelayConfig(dir);
     } catch (err) {
       if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);

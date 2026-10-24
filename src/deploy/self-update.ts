@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import * as yaml from "js-yaml";
@@ -18,7 +18,13 @@ export const RELAY_IMAGE_REPO = "ghcr.io/lannguyensi/agent-relay";
 
 const ALLOWED_TAG_REGEX = /^(?:latest|main-[0-9a-f]{7,40})$/;
 const COMPOSE_PROJECT_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-const COMPOSE_SERVICE_REGEX = /^[a-zA-Z0-9._-]+$/;
+const COMPOSE_SERVICE_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+// Characters that would corrupt a `-v`/`--mount` spec or argv element.
+const UNSAFE_PATH_CHARS = /[:,\0\r\n]/;
+const CONTAINER_ID_REGEX = /^[0-9a-f]{12,64}$/;
+export const SELF_UPDATE_HELPER_LABEL = "agent-relay.self-update-helper";
+/** An in_progress record without a conclusive helper outcome is marked failed after this long. */
+const STALE_IN_PROGRESS_MS = 10 * 60_000;
 
 /**Default grace period (ms) to keep the operation lock held after spawning the helper container.*/
 const DEFAULT_POST_SPAWN_LOCK_MS = 15_000;
@@ -54,7 +60,7 @@ export interface ComposeSelfConfig {
 }
 
 export interface SelfUpdateStateRecord {
-  status: "in_progress" | "succeeded" | "failed" | "refused";
+  status: "in_progress" | "succeeded" | "unverified" | "failed" | "refused";
   tag: string;
   targetImage: string;
   digest: string | null;
@@ -106,7 +112,9 @@ function selfUpdateStatePath(): string {
 export async function writeSelfUpdateState(record: SelfUpdateStateRecord): Promise<void> {
   const path = selfUpdateStatePath();
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(record, null, 2), "utf-8");
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(record, null, 2), "utf-8");
+  await rename(tmp, path);
 }
 
 export async function readSelfUpdateState(): Promise<SelfUpdateStateRecord | null> {
@@ -118,40 +126,96 @@ export async function readSelfUpdateState(): Promise<SelfUpdateStateRecord | nul
   }
 }
 
+interface HelperOutcome {
+  status: string;
+  exitCode: number;
+  logTail: string;
+}
+
+async function inspectHelper(name: string): Promise<HelperOutcome | null> {
+  const res = await runExec(
+    "docker",
+    ["inspect", "--type", "container", "--format", "{{json .State}}", name],
+    env.APPS_DIR,
+  );
+  if (res.exitCode !== 0) return null;
+  let state: { Status?: unknown; ExitCode?: unknown };
+  try {
+    state = JSON.parse(res.stdout.trim()) as { Status?: unknown; ExitCode?: unknown };
+  } catch {
+    return null;
+  }
+  const logs = await runExec("docker", ["logs", "--tail", "20", name], env.APPS_DIR);
+  return {
+    status: typeof state.Status === "string" ? state.Status : "unknown",
+    exitCode: typeof state.ExitCode === "number" ? state.ExitCode : -1,
+    logTail: `${logs.stdout}${logs.stderr}`.trim().slice(-2000),
+  };
+}
+
 /**
- * Reconciles a persisted `in_progress` self-update state record against the
- * currently running relay revision (`RELAY_REVISION`). When the running
- * container's revision matches `targetRevision`, marks the record `succeeded`.
+ * Reconciles a persisted `in_progress` self-update state record:
+ * - running revision equals `targetRevision` -> `succeeded`;
+ * - the helper container exited non-zero -> `failed` with its exit code and log tail;
+ * - the helper exited 0 but the running revision is not the target -> `failed`
+ *   (compose recreated nothing), or `unverified` when the target revision is unknown;
+ * - no conclusive helper outcome after STALE_IN_PROGRESS_MS -> `failed` (stale).
  */
 export async function reconcileSelfUpdateState(): Promise<SelfUpdateStateRecord | null> {
   const record = await readSelfUpdateState();
-  if (!record) return null;
-  if (record.status === "in_progress") {
-    const currentRevision = getRelayRevision();
-    if (
-      currentRevision !== "unknown" &&
-      record.targetRevision &&
-      record.targetRevision !== "unknown" &&
-      currentRevision === record.targetRevision
+  if (!record || record.status !== "in_progress") return record;
+
+  const currentRevision = getRelayRevision();
+  const targetKnown = !!record.targetRevision && record.targetRevision !== "unknown";
+  let status: SelfUpdateStateRecord["status"] | null = null;
+  let error: string | undefined;
+
+  if (currentRevision !== "unknown" && targetKnown && currentRevision === record.targetRevision) {
+    status = "succeeded";
+  } else {
+    const helper = record.helperContainerName
+      ? await inspectHelper(record.helperContainerName).catch(() => null)
+      : null;
+    if (helper && helper.status === "exited") {
+      if (helper.exitCode !== 0) {
+        status = "failed";
+        error = `Helper container exited with code ${helper.exitCode}: ${helper.logTail}`;
+      } else if (targetKnown) {
+        status = "failed";
+        error =
+          `Helper container finished but the relay still runs revision ${currentRevision} ` +
+          `instead of ${record.targetRevision}; compose did not recreate the relay.`;
+      } else {
+        status = "unverified";
+        error = "Helper container finished, but the target image has no revision label to verify against.";
+      }
+    } else if (
+      (!helper || helper.status !== "running") &&
+      Date.now() - Date.parse(record.requestedAt) > STALE_IN_PROGRESS_MS
     ) {
-      const now = new Date().toISOString();
-      const updated: SelfUpdateStateRecord = {
-        ...record,
-        status: "succeeded",
-        updatedAt: now,
-        completedAt: now,
-      };
-      await writeSelfUpdateState(updated).catch(() => {});
-      logSelfUpdateEvent("reconciled", {
-        status: "succeeded",
-        previousRevision: record.previousRevision,
-        targetRevision: record.targetRevision,
-        currentRevision,
-      });
-      return updated;
+      status = "failed";
+      error = "Self-update did not complete in time and no helper outcome is available.";
     }
   }
-  return record;
+
+  if (status === null) return record;
+  const now = new Date().toISOString();
+  const updated: SelfUpdateStateRecord = {
+    ...record,
+    status,
+    updatedAt: now,
+    completedAt: now,
+    ...(error !== undefined ? { error } : {}),
+  };
+  await writeSelfUpdateState(updated).catch(() => {});
+  logSelfUpdateEvent("reconciled", {
+    status,
+    previousRevision: record.previousRevision,
+    targetRevision: record.targetRevision,
+    currentRevision,
+    ...(error !== undefined ? { error } : {}),
+  });
+  return updated;
 }
 
 /**
@@ -179,21 +243,30 @@ export async function discoverSelfComposeConfig(
   candidates: readonly string[] = [hostname(), "agent-relay"],
 ): Promise<ComposeSelfConfig> {
   let labels: Record<string, string> | null = null;
+  let relayImage = "";
   let matchedCandidate = "";
 
   for (const candidate of candidates) {
     if (!candidate || candidate.includes("\0")) continue;
     const inspectRes = await runExec(
       "docker",
-      ["inspect", "--format", "{{json .Config.Labels}}", candidate],
+      ["inspect", "--type", "container", "--format", "{{json .Config}}", candidate],
       env.APPS_DIR,
     );
     const trimmed = inspectRes.stdout.trim();
     if (inspectRes.exitCode === 0 && trimmed.length > 0 && trimmed !== "null") {
       try {
         const parsed = JSON.parse(trimmed) as unknown;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          labels = parsed as Record<string, string>;
+        const config = parsed as { Labels?: unknown; Image?: unknown } | null;
+        if (
+          config &&
+          typeof config === "object" &&
+          config.Labels &&
+          typeof config.Labels === "object" &&
+          !Array.isArray(config.Labels)
+        ) {
+          labels = config.Labels as Record<string, string>;
+          relayImage = typeof config.Image === "string" ? config.Image.trim() : "";
           matchedCandidate = candidate;
           break;
         }
@@ -222,9 +295,9 @@ export async function discoverSelfComposeConfig(
     );
   }
 
-  if (!workingDirRaw || !isAbsolute(workingDirRaw) || workingDirRaw.includes("\0")) {
+  if (!workingDirRaw || !isAbsolute(workingDirRaw) || UNSAFE_PATH_CHARS.test(workingDirRaw)) {
     throw new SelfUpdateRefusedError(
-      "Missing or non-absolute com.docker.compose.project.working_dir label on the relay container; refusing to guess working directory.",
+      "Missing, non-absolute, or unsafe com.docker.compose.project.working_dir label on the relay container; refusing to guess working directory.",
     );
   }
 
@@ -255,6 +328,9 @@ export async function discoverSelfComposeConfig(
   const configFiles: string[] = [];
   for (const fileEntry of rawFiles) {
     const resolvedFile = resolve(resolvedWorkingDir, fileEntry);
+    if (UNSAFE_PATH_CHARS.test(resolvedFile)) {
+      throw new SelfUpdateRefusedError(`Unsafe compose config file path '${fileEntry}'.`);
+    }
     if (
       resolvedFile !== resolvedWorkingDir &&
       !resolvedFile.startsWith(resolvedWorkingDir + sep)
@@ -266,21 +342,43 @@ export async function discoverSelfComposeConfig(
     configFiles.push(resolvedFile);
   }
 
+  if (!relayImage) {
+    throw new SelfUpdateRefusedError(
+      "Could not determine the relay container's own image, which is needed to read the compose file through the Docker daemon.",
+    );
+  }
+
   // Read and inspect the compose file(s) to confirm the relay service is image-based, not build-based.
+  // The compose directory is a host path that is normally not mounted into the relay container,
+  // so the file is read through the Docker daemon with a short-lived, network-less container.
   let foundService = false;
   let hasBuild = false;
   let configuredImage = "";
 
   for (const filePath of configFiles) {
-    let content: string;
-    try {
-      content = await readFile(filePath, "utf-8");
-    } catch (err) {
+    const readRes = await runExec(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--mount",
+        `type=bind,source=${resolvedWorkingDir},target=${resolvedWorkingDir},readonly`,
+        "--entrypoint",
+        "cat",
+        relayImage,
+        filePath,
+      ],
+      env.APPS_DIR,
+    );
+    if (readRes.exitCode !== 0) {
+      const detail = (readRes.stderr || readRes.stdout).trim() || `exit code ${readRes.exitCode}`;
       throw new SelfUpdateRefusedError(
-        `Cannot read relay compose file '${filePath}' from inside the relay container (${err instanceof Error ? err.message : String(err)}). ` +
-          `Mount the relay compose directory or recover via SSH. ${SELF_UPDATE_RECOVERY_GUIDANCE}`,
+        `Cannot read relay compose file '${filePath}' on the Docker host (${detail}). ${SELF_UPDATE_RECOVERY_GUIDANCE}`,
       );
     }
+    const content = readRes.stdout;
 
     let doc: unknown;
     try {
@@ -386,6 +484,24 @@ function parseInspectedImage(stdout: string): { digest: string; revision: string
   return { digest, revision };
 }
 
+/** Appends the implicit `:latest` tag to an image reference without a tag or digest. */
+export function normalizeImageRef(ref: string): string {
+  const lastSegment = ref.slice(ref.lastIndexOf("/") + 1);
+  return lastSegment.includes(":") || lastSegment.includes("@") ? ref : `${ref}:latest`;
+}
+
+/** Removes helper containers of earlier self-updates (kept after exit so their outcome can be reconciled). */
+async function removeOldHelpers(cwd: string): Promise<void> {
+  const list = await runExec(
+    "docker",
+    ["ps", "-aq", "--filter", `label=${SELF_UPDATE_HELPER_LABEL}=true`],
+    cwd,
+  );
+  if (list.exitCode !== 0) return;
+  const ids = list.stdout.split("\n").map((id) => id.trim()).filter((id) => CONTAINER_ID_REGEX.test(id));
+  if (ids.length > 0) await runExec("docker", ["rm", "-f", ...ids], cwd);
+}
+
 export interface PrepareSelfUpdateOptions {
   tag?: unknown;
   candidates?: readonly string[];
@@ -436,6 +552,13 @@ export async function prepareSelfUpdate(
 
   try {
     const compose = await discoverSelfComposeConfig(options.candidates);
+    if (normalizeImageRef(compose.configuredImage) !== targetImage) {
+      throw new SelfUpdateRefusedError(
+        `The relay compose file pins image '${compose.configuredImage}', so recreating the relay would not use ${targetImage}. ` +
+          `Request the tag the compose file uses, or change the compose file over SSH.`,
+      );
+    }
+    await removeOldHelpers(compose.workingDir);
 
     const pullRes = await runExec("docker", ["pull", targetImage], compose.workingDir);
     if (pullRes.exitCode !== 0) {
@@ -495,7 +618,8 @@ export async function prepareSelfUpdate(
         const spawnArgs = [
           "run",
           "-d",
-          "--rm",
+          "--label",
+          `${SELF_UPDATE_HELPER_LABEL}=true`,
           "--name",
           helperContainerName,
           "-v",

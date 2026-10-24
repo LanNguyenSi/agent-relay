@@ -34,7 +34,7 @@ A thrown rollback failure (bad ref, `compose build`/`up` failure, invalid `.rela
 
 ## Concurrency conflicts are a plain `409`, never a deploy record
 
-Deploys, rollbacks and relay self-updates share one in-memory operation lock (`acquireOperationLock` in `src/deploy/engine.ts`). A deploy (plain or `stream=true`) or rollback requested while another deploy, rollback or self-update holds it throws `DeployConflictError`, which the routes map to `409 { error }` before anything runs (the streaming route checks before opening the stream), so a conflict never reaches `recordDeploy` and never enters history. `POST /api/self-update` answers the same conflict with `409 { error, kind: "relay_busy", activeOperation }`; its own outcome lives in `.relay-self-update.json`, not in deploy history.
+Deploys, rollbacks and relay self-updates share one in-memory operation lock (`acquireOperationLock` in `src/deploy/engine.ts`): deploys and rollbacks hold it shared (they do not block each other), a self-update holds it exclusively. A deploy (plain or `stream=true`) or rollback requested while a self-update holds it throws `DeployConflictError`, which the routes map to `409 { error }` (the streaming route checks with `assertOperationAllowed` before opening the stream; a self-update that starts between that check and `deploy()` taking the lock surfaces as an SSE `error` event instead), so a conflict never reaches `recordDeploy` and never enters history. `POST /api/self-update` answers the same conflict with `409 { error, kind: "relay_busy", activeOperation }`; its own outcome lives in `.relay-self-update.json`, not in deploy history.
 
 ## PR #58: config resolved before the SSE stream opens, so an unknown app is a real 404
 
