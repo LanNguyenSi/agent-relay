@@ -580,9 +580,12 @@ export async function prepareSelfUpdate(
           `Request the tag the compose file uses, or change the compose file over SSH.`,
       );
     }
-    await removeOldHelpers(compose.workingDir);
+    // Every docker call runs with cwd APPS_DIR: compose.workingDir is a host path
+    // that normally does not exist inside the relay container, and execFile with
+    // a missing cwd fails with ENOENT before docker even starts.
+    await removeOldHelpers(env.APPS_DIR);
 
-    const pullRes = await runExec("docker", ["pull", targetImage], compose.workingDir);
+    const pullRes = await runExec("docker", ["pull", targetImage], env.APPS_DIR);
     if (pullRes.exitCode !== 0) {
       const detail = (pullRes.stderr || pullRes.stdout).trim() || `exit code ${pullRes.exitCode}`;
       throw new SelfUpdateExecutionError(`Failed to pull ${targetImage}: ${detail}`);
@@ -591,7 +594,7 @@ export async function prepareSelfUpdate(
     const inspectRes = await runExec(
       "docker",
       ["image", "inspect", "--format", "{{json .}}", targetImage],
-      compose.workingDir,
+      env.APPS_DIR,
     );
     if (inspectRes.exitCode !== 0) {
       const detail = (inspectRes.stderr || inspectRes.stdout).trim() || `exit code ${inspectRes.exitCode}`;
@@ -662,7 +665,7 @@ export async function prepareSelfUpdate(
           compose.service,
         ];
 
-        const spawnRes = await runExec("docker", spawnArgs, compose.workingDir);
+        const spawnRes = await runExec("docker", spawnArgs, env.APPS_DIR);
         if (spawnRes.exitCode !== 0) {
           const errMsg =
             (spawnRes.stderr || spawnRes.stdout).trim() ||
