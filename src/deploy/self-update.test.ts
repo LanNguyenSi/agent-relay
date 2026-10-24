@@ -429,7 +429,7 @@ describe("self-update engine and shared concurrency lock", () => {
     });
 
     it("completes when the compose dir exists only on the Docker host, running every docker call from APPS_DIR", async () => {
-      const hostDir = "/opt/agent-relay-host-only";
+      const hostDir = join(tempDir, "host-only-not-created");
       const hostFile = `${hostDir}/docker-compose.prod.yml`;
       mockDocker({
         labels: {
