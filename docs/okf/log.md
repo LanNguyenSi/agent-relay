@@ -2,6 +2,7 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+- 2026-10-24T12:45:05Z, zod 3 -> 4 migration. `exec-trust-boundary.md` and `path-containment-idiom.md` (source `src/config/relay.ts`) re-verified: the only change there swaps `invalid_type_error` for `error` on `step_timeout_seconds` in place, no line moved and the cited validation still reads as described. `deploy-failure-surfaces.md` (sources `src/mcp/server.test.ts`, `CHANGELOG.md`): the MCP tests now run through the SDK in-memory client, so the blocked-deploy test moved and its citation is re-pointed to `src/mcp/server.test.ts:144` (also in the older log entry that names it); `src/mcp/server.ts` is unchanged. Checked with `okf-kit check docs/okf`. Re-stamped.
 - 2026-10-12T15:57:24Z, apps-dir-contract.md, deploy-failure-surfaces.md,
   deploy-phase-model.md, exec-trust-boundary.md and health-check-reality.md
   re-stamped after the engine comments lost their internal ids (three lines
@@ -42,7 +43,7 @@
   exec-trust-boundary.md no longer calls the `config.health` residual
   undocumented in docs/security.md (title, description and index.md entry
   adjusted); apps-dir-contract.md names `main` as the default branch;
-  deploy-failure-surfaces.md cites `src/mcp/server.test.ts:81` instead of a
+  deploy-failure-surfaces.md cites `src/mcp/server.test.ts:144` instead of a
   bare test-file name that matched two files. Internal task ids and a run name were
   replaced with public PR numbers (#71, #73, #91), and the dated resolution
   note left health-check-reality.md and index.md. That history, for the
