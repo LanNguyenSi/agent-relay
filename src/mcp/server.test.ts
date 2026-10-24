@@ -45,8 +45,8 @@ type ToolResult = { content?: Array<{ type: string; text: string }>; isError?: b
 
 // Wire a fresh server to a fresh client over the SDK's in-memory transport,
 // make one tools/call request, and tear the pair down again. Input-schema
-// violations surface as a rejected callTool (the SDK turns zod issues into
-// an McpError with an "Invalid arguments for tool ..." message).
+// violations resolve with an `isError: true` result whose text starts with
+// "Invalid arguments for tool ..." (see expectInputRejected).
 async function callTool(
   name: string,
   args: Record<string, unknown>,
@@ -266,7 +266,7 @@ describe("relay_rollback", () => {
   });
 
   it("returns ok result but does NOT call recordDeploy when rollback is blocked by preflight", async () => {
-    // Task 1074feb5: a rollback blocked by a critical preflight check must
+    // A rollback blocked by a critical preflight check must
     // surface the same structured shape relay_deploy already uses for a
     // blocked deploy — not the flat err() message a thrown Error produces.
     const blockedResult = {

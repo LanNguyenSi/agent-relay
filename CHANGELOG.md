@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- **zod 3 -> 4 migration** (GHSA-mrhx-c7xc-m3w5): `zod` moves from `^3.24.4` to `^4.6.7`; the advisory affects zod `< 4.6.6` and is fixed only in the v4 core, so the `zod/v3` compat subpath was not used. `src/config/env.ts`, `src/config/relay.ts` and `src/mcp/server.ts` now use the v4 API with behaviour preserved (custom error texts identical, defaults and coercion pinned by tests).
+- **zod 3 -> 4 migration** (GHSA-mrhx-c7xc-m3w5): `zod` moves from `^3.24.4` to `^4.6.7`; the advisory affects zod `< 4.6.6` and is fixed only in the v4 core, so the `zod/v3` compat subpath was not used. `src/config/env.ts`, `src/config/relay.ts` and `src/mcp/server.ts` use the v4 API (`src/mcp/server.ts` needed no source change); custom error texts, defaults and coercion are unchanged and pinned by tests. Visible differences: zod's default (non-custom) messages changed wording (for example `Required` is now `Invalid input: expected string, received undefined`) in `.relay.yml` errors, the startup environment check and MCP input-validation results; non-finite numbers (`PORT=Infinity`, `health_port: .inf`, `step_timeout_seconds: .inf`) are now rejected; and the MCP `tools/list` input schemas no longer carry `additionalProperties: false` (unknown argument keys are still stripped, as before).
 
 ### Fixed
 

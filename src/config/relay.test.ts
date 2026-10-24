@@ -171,6 +171,16 @@ step_timeout_seconds: "600"
       ).toThrow(/step_timeout_seconds/);
     });
 
+    it("rejects an infinite value with the custom wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+step_timeout_seconds: .inf
+`),
+      ).toThrow("step_timeout_seconds must be a number");
+    });
+
     it("accepts the lower boundary value 1", () => {
       const config = parseRelayConfig(`
 name: app
@@ -618,5 +628,15 @@ describe("loadRelayConfig — filesystem containment", () => {
     await expect(loadRelayConfig(appDir)).rejects.toThrow(
       /resolves outside the apps directory/,
     );
+  });
+
+  it("rejects an infinite health_port", () => {
+    expect(() =>
+      parseRelayConfig(`
+name: app
+health: /health
+health_port: .inf
+`),
+    ).toThrow(/health_port/);
   });
 });
