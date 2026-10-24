@@ -127,11 +127,11 @@ api.post("/apps/:name/deploy", async (c) => {
     // internally (safeAppDir + loadRelayConfig) up front lets an unknown app /
     // invalid config return the same 404 the non-streaming path returns.
     try {
-      const dir = await apps.safeAppDir(name);
-      await loadRelayConfig(dir);
+      apps.assertOperationAllowed("deploy");
+      const dir = await apps.safeAppDir(name); await loadRelayConfig(dir);
     } catch (err) {
       if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
-      throw err;
+      if (err instanceof apps.DeployConflictError) return c.json({ error: err.message }, 409); throw err;
     }
 
     return new Response(
@@ -185,7 +185,7 @@ api.post("/apps/:name/deploy", async (c) => {
     return c.json({ deploy: record, result });
   } catch (err) {
     if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
-    throw err;
+    if (err instanceof apps.DeployConflictError) return c.json({ error: err.message }, 409); throw err;
   }
 });
 
@@ -215,8 +215,8 @@ api.post("/apps/:name/rollback", async (c) => {
     const phase = apps.rollbackPhaseOf(err);
     const extra = phase ? { phase } : {};
     if (err instanceof RelayConfigError) return c.json({ error: err.message, ...extra }, 404);
-    if (err instanceof Error) return c.json({ error: err.message, ...extra }, 400);
-    throw err;
+    if (err instanceof apps.DeployConflictError) return c.json({ error: err.message, ...extra }, 409);
+    if (err instanceof Error) return c.json({ error: err.message, ...extra }, 400); throw err;
   }
 });
 
@@ -311,6 +311,108 @@ api.put("/apps/:name/env", async (c) => {
   } catch (err) {
     if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
     if (err instanceof Error) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+// ── Self-update (POST /api/self-update, GET /api/self-update) ──────────────
+import {
+  prepareSelfUpdate,
+  reconcileSelfUpdateState,
+  SelfUpdateValidationError,
+  SelfUpdateRefusedError,
+  SelfUpdateExecutionError,
+  logSelfUpdateEvent,
+} from "../deploy/self-update.js";
+
+api.get("/self-update", async (c) => {
+  const state = await reconcileSelfUpdateState();
+  return c.json({
+    revision: getRelayRevision(),
+    state,
+  });
+});
+
+api.post("/self-update", async (c) => {
+  const rawContentType = c.req.header("content-type") ?? "";
+  let body: unknown = {};
+  if (rawContentType.includes("application/json")) {
+    const parsed = await c.req.json().catch(() => null);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      logSelfUpdateEvent("refused", { reason: "invalid_body", error: "Request body must be a JSON object" });
+      return c.json({ error: "Request body must be a JSON object" }, 400);
+    }
+    body = parsed;
+  } else {
+    const text = await c.req.text().catch(() => "");
+    if (text.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          logSelfUpdateEvent("refused", { reason: "invalid_body", error: "Request body must be a JSON object" });
+          return c.json({ error: "Request body must be a JSON object" }, 400);
+        }
+        body = parsed;
+      } catch {
+        logSelfUpdateEvent("refused", { reason: "invalid_body", error: "Invalid JSON body" });
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+    }
+  }
+
+  const tag = (body as Record<string, unknown>).tag;
+  try {
+    const accepted = await prepareSelfUpdate({ tag });
+    // Schedule the detached helper container spawn after the 202 response flushes.
+    const timer = setTimeout(() => {
+      void accepted.launchHelper();
+    }, 25);
+    timer.unref?.();
+
+    return c.json(
+      {
+        status: accepted.status,
+        tag: accepted.tag,
+        targetImage: accepted.targetImage,
+        digest: accepted.digest,
+        previousRevision: accepted.previousRevision,
+        targetRevision: accepted.targetRevision,
+        recovery: accepted.recovery,
+      },
+      202,
+    );
+  } catch (err) {
+    if (err instanceof SelfUpdateValidationError) {
+      return c.json({ error: err.message, kind: "invalid_tag" }, 400);
+    }
+    if (err instanceof apps.DeployConflictError) {
+      return c.json(
+        {
+          error: err.message,
+          kind: "relay_busy",
+          activeOperation: err.activeOperation,
+        },
+        409,
+      );
+    }
+    if (err instanceof SelfUpdateRefusedError) {
+      return c.json(
+        {
+          error: err.message,
+          kind: "unsupported_compose",
+        },
+        422,
+      );
+    }
+    if (err instanceof SelfUpdateExecutionError) {
+      return c.json(
+        {
+          error: err.message,
+          kind: "pull_or_inspect_failed",
+        },
+        502,
+      );
+    }
     throw err;
   }
 });
