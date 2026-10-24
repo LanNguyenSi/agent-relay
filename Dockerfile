@@ -23,6 +23,8 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 COPY --from=builder /app/dist dist/
+ARG RELAY_REVISION=""
+ENV RELAY_REVISION=$RELAY_REVISION
 EXPOSE 8222
 ENTRYPOINT ["/sbin/tini", "-s", "--"]
 CMD ["node", "dist/index.js"]

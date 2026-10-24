@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { isAuthorized } from "../config/auth.js";
-import { RELAY_VERSION } from "../config/version.js";
+import { getRelayRevision, RELAY_VERSION } from "../config/version.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import * as apps from "../services/apps.js";
 import * as appEnv from "../services/env.js";
@@ -61,7 +61,7 @@ api.use("*", async (c, next) => {
 
 // ── GET /api/health ─────────────────────────────────────────────────────────
 api.get("/health", (c) => {
-  return c.json({ status: "ok", version: RELAY_VERSION, uptime: process.uptime() });
+  return c.json({ status: "ok", version: RELAY_VERSION, revision: getRelayRevision(), uptime: process.uptime() });
 });
 
 // ── GET /api/system — host CPU/RAM/Disk metrics ────────────────────────────

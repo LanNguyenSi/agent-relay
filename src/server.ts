@@ -3,7 +3,7 @@ import { getRequestListener } from "@hono/node-server";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { isAuthorized } from "./config/auth.js";
-import { RELAY_VERSION } from "./config/version.js";
+import { getRelayRevision, RELAY_VERSION } from "./config/version.js";
 import { api } from "./api/routes.js";
 import { createMcpServer } from "./mcp/server.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -16,7 +16,7 @@ export function createApp(): Hono {
 
   // Public health (no auth)
   app.get("/health", (c) =>
-    c.json({ status: "ok", version: RELAY_VERSION }),
+    c.json({ status: "ok", version: RELAY_VERSION, revision: getRelayRevision() }),
   );
 
   // Authenticated API

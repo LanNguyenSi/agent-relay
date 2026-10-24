@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /health` and `GET /api/health` report the running image revision** (task 2d0669bb). Both endpoints add `revision` alongside `status` and `version` (additive, backwards compatible). `.github/workflows/publish.yml` passes `RELAY_REVISION=${{ github.sha }}` as a Docker build argument and `Dockerfile` sets `ARG RELAY_REVISION=""` and `ENV RELAY_REVISION=$RELAY_REVISION` in the runtime stage, so published GHCR images report the exact commit SHA they were built from without an SSH check. Local or development runs where `RELAY_REVISION` is unset, empty, or whitespace-only report `revision: "unknown"`.
+
 ### Security
 
 - **zod 3 -> 4 migration** (GHSA-mrhx-c7xc-m3w5): `zod` moves from `^3.24.4` to `^4.6.7`; the advisory affects zod `< 4.6.6` and is fixed only in the v4 core, so the `zod/v3` compat subpath was not used. `src/config/env.ts`, `src/config/relay.ts` and `src/mcp/server.ts` use the v4 API (`src/mcp/server.ts` needed no source change); custom error texts, defaults and coercion are unchanged and pinned by tests. Visible differences: zod's default (non-custom) messages changed wording (for example `Required` is now `Invalid input: expected string, received undefined`) in `.relay.yml` errors, the startup environment check and MCP input-validation results; non-finite numbers (`PORT=Infinity`, `health_port: .inf`, `step_timeout_seconds: .inf`) are now rejected; and the MCP `tools/list` input schemas no longer carry `additionalProperties: false` (unknown argument keys are still stripped, as before).
