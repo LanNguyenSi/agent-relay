@@ -37,7 +37,7 @@ sudo RELAY_DOMAIN=relay.example.com \
      bash /tmp/agent-relay-install.sh
 ```
 
-When this resolves to `greenfield` (port 80 free), the relay port (8222) is also published on all host interfaces as plain HTTP, next to the TLS route; see [docs/security.md](docs/security.md#api-authentication).
+When this resolves to `greenfield` (port 80 free), the relay port (8222) is also published as plain HTTP: on `127.0.0.1` when a TLS route exists (`RELAY_DOMAIN` with `TRAEFIK_EMAIL` or `TRAEFIK_CA=self-signed`), on all host interfaces otherwise, and on `RELAY_BIND` when you set it; see [docs/security.md](docs/security.md#api-authentication).
 
 > Env vars must be set on the `sudo` line, not before `curl`: the pipe binds them to the download, not to the `bash` that runs the script. If your sudoers strips command-line variables, `export` them and use `sudo -E`, or run as root directly.
 
