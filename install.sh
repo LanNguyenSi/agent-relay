@@ -291,6 +291,9 @@ AGENT_RELAY_MANAGED_KEY_RE='^[[:space:]]*(export[[:space:]]+)?(AUTH_TOKEN|APPS_D
 agent_relay_resolve_token() {
   local relay_dir="$1" token=""
   if [ -f "$relay_dir/.env" ]; then
+    # An unreadable .env must stop the run: falling through would replace the
+    # token that every connected client uses.
+    [ -r "$relay_dir/.env" ] || err "cannot read $relay_dir/.env; fix its owner or mode and re-run"
     token="$(grep -E '^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=' "$relay_dir/.env" \
       | tail -n 1 \
       | sed -E 's/^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//' || true)"
@@ -320,8 +323,9 @@ agent_relay_write_env() {
   env_file="$relay_dir/.env"
   chmod 700 "$relay_dir"
   if [ -f "$env_file" ]; then
-    # grep exits 1 when nothing is kept; that is fine under `set -e`.
-    extra="$(grep -vE "$AGENT_RELAY_MANAGED_KEY_RE" "$env_file" || true)"
+    [ -r "$env_file" ] || err "cannot read $env_file; fix its owner or mode and re-run"
+    # grep exits 1 when nothing is kept (fine); any other status is a read error.
+    extra="$(grep -vE "$AGENT_RELAY_MANAGED_KEY_RE" "$env_file")" || [ $? -eq 1 ] || return 1
   fi
   tmp="$(umask 077 && mktemp "$relay_dir/.env.XXXXXX")" || return 1
   if ! {

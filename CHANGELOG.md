@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- **`install.sh` writes `$RELAY_DIR/.env` with mode 600.** The file holds the bearer `AUTH_TOKEN` and was created world-readable (mode 644 under umask 022). New files are now created under `umask 077`, an existing file (a re-run over an older install) is tightened to 600 before it is rewritten, and `$RELAY_DIR` is set to mode 700. On hosts with other local users, rotate the token after upgrading (see "Rotating the token" under [Runtime state and troubleshooting](docs/operations.md#runtime-state-and-troubleshooting)), because earlier installs left the old token readable.
+- **`install.sh` writes `$RELAY_DIR/.env` with mode 600.** The file holds the bearer `AUTH_TOKEN` and was created world-readable (mode 644 under umask 022). The file is now built as a mode 600 temp file in `$RELAY_DIR` (created under `umask 077`) and renamed over `.env`, so a re-run over an older 644 install also ends at 600, and `$RELAY_DIR` is set to mode 700. An existing `.env` the installer cannot read stops the run instead of silently replacing the token. On hosts with other local users, rotate the token after upgrading (see "Rotating the token" under [Runtime state and troubleshooting](docs/operations.md#runtime-state-and-troubleshooting)), because earlier installs left the old token readable.
 
 ### Fixed
 

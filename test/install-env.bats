@@ -193,3 +193,25 @@ _resolve() {
   echo "$output" | grep -q 'APPS_DIR: /apps'
   echo "$output" | grep -q 'PORT: "8222"'
 }
+
+@test "env: an unreadable existing .env stops the run and is left untouched" {
+  [ "$(id -u)" -ne 0 ] || skip "root can read a mode 000 file"
+  printf 'AUTH_TOKEN=keep\nCUSTOM=1\n' > "$RELAY_DIR/.env"
+  chmod 000 "$RELAY_DIR/.env"
+  run bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    agent_relay_resolve_token '${RELAY_DIR}'
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot read"* ]]
+  run bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    AUTH_TOKEN=new RELAY_PORT=8222
+    agent_relay_write_env '${RELAY_DIR}'
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot read"* ]]
+  chmod 600 "$RELAY_DIR/.env"
+  [ "$(cat "$RELAY_DIR/.env")" = "$(printf 'AUTH_TOKEN=keep\nCUSTOM=1')" ]
+  [ -z "$(ls -A "$RELAY_DIR" | grep '^\.env\.')" ]
+}
