@@ -148,6 +148,6 @@ _have_compose() {
 # ─── Dockerfile HEALTHCHECK ──────────────────────────────────────────────────
 
 @test "Dockerfile declares the HEALTHCHECK against /health" {
-  grep -qxF 'HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD wget -qO- "http://127.0.0.1:${PORT:-8222}/health" >/dev/null || exit 1' \
+  grep -qxF 'HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --start-interval=2s --retries=3 CMD wget -qO- "http://127.0.0.1:${PORT:-8222}/health" >/dev/null || exit 1' \
     "${ROOT}/Dockerfile"
 }
