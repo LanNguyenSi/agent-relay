@@ -281,6 +281,62 @@ COMPOSE_EOF
   esac
 }
 
+# Key line of a managed key in any form docker compose env_file accepts:
+# optional leading space, optional `export `, optional space around `=`.
+AGENT_RELAY_MANAGED_KEY_RE='^[[:space:]]*(export[[:space:]]+)?(AUTH_TOKEN|APPS_DIR|PORT)[[:space:]]*='
+
+# Print the auth token: the LAST AUTH_TOKEN line of <relay_dir>/.env (compose
+# env_file parsing is last-wins) with `export `, spaces around `=` and trailing
+# space removed, else a freshly generated one. Status lines go to stderr.
+agent_relay_resolve_token() {
+  local relay_dir="$1" token=""
+  if [ -f "$relay_dir/.env" ]; then
+    # An unreadable .env must stop the run: falling through would replace the
+    # token that every connected client uses.
+    [ -r "$relay_dir/.env" ] || err "cannot read $relay_dir/.env; fix its owner or mode and re-run"
+    token="$(grep -E '^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=' "$relay_dir/.env" \
+      | tail -n 1 \
+      | sed -E 's/^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//' || true)"
+  fi
+  if [ -n "$token" ]; then
+    log "Using existing auth token" >&2
+  else
+    token="$(openssl rand -hex 32)"
+    log "Generated auth token" >&2
+  fi
+  printf '%s\n' "$token"
+}
+
+# Write <relay_dir>/.env: the bearer token must never be readable by group or
+# other. Uses globals: AUTH_TOKEN, RELAY_PORT.
+# - <relay_dir> is mode 700.
+# - The file is built as a temp file in <relay_dir> under umask 077, chmod 600
+#   and renamed over .env, so it is never group/other readable and a symlink
+#   planted at .env is replaced, not followed.
+# - Every line of an existing .env that is not a managed key (custom keys,
+#   comments, blank lines) is carried over in order. The managed keys
+#   (AUTH_TOKEN, APPS_DIR, PORT) are written AFTER them with the installer's
+#   values: compose env_file parsing is last-wins, and a managed key repeated
+#   in the old file is dropped as well. The merge is line-based.
+agent_relay_write_env() {
+  local relay_dir="$1" env_file tmp extra=""
+  env_file="$relay_dir/.env"
+  chmod 700 "$relay_dir"
+  if [ -f "$env_file" ]; then
+    [ -r "$env_file" ] || err "cannot read $env_file; fix its owner or mode and re-run"
+    # grep exits 1 when nothing is kept (fine); any other status is a read error.
+    extra="$(grep -vE "$AGENT_RELAY_MANAGED_KEY_RE" "$env_file")" || [ $? -eq 1 ] || return 1
+  fi
+  tmp="$(umask 077 && mktemp "$relay_dir/.env.XXXXXX")" || return 1
+  if ! {
+    if [ -n "$extra" ]; then printf '%s\n' "$extra"; fi
+    printf 'AUTH_TOKEN=%s\nAPPS_DIR=/apps\nPORT=%s\n' "$AUTH_TOKEN" "$RELAY_PORT"
+  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$env_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 # ── Source-only guard ────────────────────────────────────────────────────────
 # Sourcing with INSTALL_SH_SOURCE_ONLY=1 stops here so tests can inject
 # id/docker shims and call the above functions directly without side effects.
@@ -626,19 +682,9 @@ BANNER
 fi
 
 # Preserve existing token or generate new one
-if [ -f "$RELAY_DIR/.env" ] && grep -q '^AUTH_TOKEN=' "$RELAY_DIR/.env"; then
-  AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$RELAY_DIR/.env" | cut -d= -f2-)
-  log "Using existing auth token"
-else
-  AUTH_TOKEN=$(openssl rand -hex 32)
-  log "Generated auth token"
-fi
+AUTH_TOKEN="$(agent_relay_resolve_token "$RELAY_DIR")"
 
-cat > "$RELAY_DIR/.env" <<ENV_EOF
-AUTH_TOKEN=${AUTH_TOKEN}
-APPS_DIR=/apps
-PORT=${RELAY_PORT}
-ENV_EOF
+agent_relay_write_env "$RELAY_DIR"
 
 # Build compose file. Three shapes, driven by RELAY_MODE.
 agent_relay_write_relay_compose "$RELAY_DIR"

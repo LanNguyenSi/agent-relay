@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **`install.sh` writes `$RELAY_DIR/.env` with mode 600.** The file holds the bearer `AUTH_TOKEN` and was created world-readable (mode 644 under umask 022). The file is now built as a mode 600 temp file in `$RELAY_DIR` (created under `umask 077`) and renamed over `.env`, so a re-run over an older 644 install also ends at 600, and `$RELAY_DIR` is set to mode 700. An existing `.env` the installer cannot read stops the run instead of silently replacing the token. On hosts with other local users, rotate the token after upgrading (see "Rotating the token" under [Runtime state and troubleshooting](docs/operations.md#runtime-state-and-troubleshooting)), because earlier installs left the old token readable.
+
+### Fixed
+
+- **Re-running `install.sh` no longer drops operator additions from `$RELAY_DIR/.env`.** Every line other than `AUTH_TOKEN`, `APPS_DIR` and `PORT` (custom keys, comments, blank lines) is carried over in order. The installer's own values win in every form compose accepts (`export KEY=`, `KEY = value`, indented): such lines are dropped and the managed keys are written after the carried-over lines. A re-run takes the last `AUTH_TOKEN` line of the old file.
+
 ## [0.7.0] - 2026-10-25
 
 ### Added
