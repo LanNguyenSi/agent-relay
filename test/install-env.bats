@@ -215,3 +215,20 @@ _resolve() {
   [ "$(cat "$RELAY_DIR/.env")" = "$(printf 'AUTH_TOKEN=keep\nCUSTOM=1')" ]
   [ -z "$(ls -A "$RELAY_DIR" | grep '^\.env\.')" ]
 }
+
+@test "env: a grep read error on the old .env fails the write and keeps the file" {
+  printf 'AUTH_TOKEN=keep\nCUSTOM=1\n' > "$RELAY_DIR/.env"
+  chmod 600 "$RELAY_DIR/.env"
+  STUB_DIR="$(mktemp -d)"
+  printf '#!/bin/sh\necho "grep: read error" >&2\nexit 2\n' > "$STUB_DIR/grep"
+  chmod 755 "$STUB_DIR/grep"
+  run bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    AUTH_TOKEN=new RELAY_PORT=8222
+    PATH='${STUB_DIR}':\"\$PATH\" agent_relay_write_env '${RELAY_DIR}'
+  "
+  rm -rf "$STUB_DIR"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$RELAY_DIR/.env")" = "$(printf 'AUTH_TOKEN=keep\nCUSTOM=1')" ]
+  [ -z "$(ls -A "$RELAY_DIR" | grep '^\.env\.')" ]
+}
