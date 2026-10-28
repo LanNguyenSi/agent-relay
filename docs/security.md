@@ -10,7 +10,7 @@ The installer writes the token file `$RELAY_DIR/.env` with mode `600` inside a `
 
 The auth model is intentionally minimal: one bearer token, constant-time compared. No rate limits, no TLS termination, no mTLS. TLS is the responsibility of whatever sits in front of the relay (Traefik in `greenfield` / `existing-traefik` modes; nginx or Caddy in `port-only`). See [docs/operations.md](operations.md) for install modes.
 
-In `greenfield` mode, the compose file written by `install.sh` also publishes `RELAY_PORT` (default 8222) on all host interfaces over plain HTTP, next to the Traefik route. Traefik routes to the relay only when `RELAY_DOMAIN` is set together with `TRAEFIK_EMAIL` or `TRAEFIK_CA=self-signed`. Otherwise the relay is reachable only over plain HTTP on that port. Block the port with a firewall rule that also applies to Docker-published ports, or use `existing-traefik`, or `port-only` with the default loopback bind.
+In `greenfield` mode, the compose file written by `install.sh` also publishes `RELAY_PORT` (default 8222) over plain HTTP, next to the Traefik route. Traefik routes to the relay only when `RELAY_DOMAIN` is set together with `TRAEFIK_EMAIL` or `TRAEFIK_CA=self-signed`. With that TLS route the plain port binds `127.0.0.1` by default, so other hosts must use the HTTPS domain. Without it (no domain, or a domain without email or self-signed) the plain port is the only way in and binds all host interfaces, so the relay is reachable over plain HTTP from the network. An explicitly set `RELAY_BIND` (non-empty) wins in both cases. Block the port with a firewall rule that also applies to Docker-published ports, or use `existing-traefik`, or `port-only` with the default loopback bind.
 
 ## `.relay.yml` shell-exec trust boundary
 

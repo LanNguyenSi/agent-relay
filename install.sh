@@ -32,7 +32,11 @@
 #                            pebble       Custom Pebble CA server at PEBBLE_URL (for local testing)
 #                            self-signed  Traefik built-in self-signed cert; no ACME at all
 #   PEBBLE_URL             Pebble CA server URL; required when TRAEFIK_CA=pebble
-#   RELAY_BIND             Host bind IP for port-only mode (default 127.0.0.1; use 0.0.0.0 to expose)
+#   RELAY_BIND             Host bind IP for the published plain-HTTP port (default 127.0.0.1;
+#                          use 0.0.0.0 to expose). port-only: always applies. greenfield: applies
+#                          when set explicitly; unset, the port binds 127.0.0.1 if a TLS route
+#                          exists (RELAY_DOMAIN plus TRAEFIK_EMAIL or TRAEFIK_CA=self-signed) and
+#                          all interfaces otherwise (no other way in). An empty value counts as unset.
 #   SKIP_TRAEFIK=1         Back-compat alias for RELAY_MODE=port-only
 #   RELAY_FORCE_RECREATE=1 Remove an existing agent-relay container before `docker compose up` (use after a failed or conflicting earlier install)
 
@@ -55,6 +59,9 @@ TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-traefik-public}"
 TRAEFIK_CERTRESOLVER="${TRAEFIK_CERTRESOLVER:-letsencrypt}"
 TRAEFIK_CA="${TRAEFIK_CA:-letsencrypt}"
 PEBBLE_URL="${PEBBLE_URL:-}"
+# RELAY_BIND_SET=1 only for an explicitly set, non-empty RELAY_BIND (empty counts as
+# unset); greenfield uses it to pick the plain-HTTP port binding.
+RELAY_BIND_SET="${RELAY_BIND:+1}"
 RELAY_BIND="${RELAY_BIND:-127.0.0.1}"
 
 # Back-compat: SKIP_TRAEFIK=1 → port-only (only when mode wasn't explicitly set)
@@ -170,7 +177,7 @@ TRAEFIK_EOF
 #               TRAEFIK_CA, TRAEFIK_NETWORK, TRAEFIK_CERTRESOLVER, RELAY_BIND.
 agent_relay_write_relay_compose() {
   local relay_dir="$1"
-  local relay_network_name relay_cert_resolver relay_labels
+  local relay_network_name relay_cert_resolver relay_labels relay_port_line
   case "$RELAY_MODE" in
     greenfield)
       relay_network_name="traefik-public"
@@ -201,8 +208,18 @@ agent_relay_write_relay_compose() {
       - traefik.http.routers.relay.tls=true
       - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
         fi
+        # TLS route exists: the plain-HTTP port is not the way in, so it defaults
+        # to loopback. An explicit RELAY_BIND wins.
+        relay_port_line="${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT}"
       else
         relay_labels=""
+        # No TLS route: the published port is the only access path. All
+        # interfaces unless RELAY_BIND was set explicitly.
+        if [ "${RELAY_BIND_SET:-}" = "1" ]; then
+          relay_port_line="${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT}"
+        else
+          relay_port_line="${RELAY_PORT}:${RELAY_PORT}"
+        fi
       fi
       cat > "${relay_dir}/docker-compose.yml" <<COMPOSE_EOF
 services:
@@ -213,7 +230,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${RELAY_PORT}:${RELAY_PORT}"
+      - "${relay_port_line}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${APPS_DIR}:/apps
@@ -750,13 +767,20 @@ HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 HOST_IP="${HOST_IP:-<set-host-ip>}"
 
 case "$RELAY_MODE" in
-  greenfield|existing-traefik)
-    if [ -n "$RELAY_DOMAIN" ]; then
+  greenfield)
+    # The HTTPS URL is only true when the TLS route exists (same condition as
+    # the Traefik labels in agent_relay_write_relay_compose); otherwise the
+    # published plain-HTTP port is the only way in.
+    if [ -n "$RELAY_DOMAIN" ] && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }; then
       RELAY_URL="https://${RELAY_DOMAIN}"
+      GREENFIELD_TLS_ROUTE=1
     else
-      # Only reachable in greenfield-without-domain edge case (no labels, no TLS)
       RELAY_URL="http://${HOST_IP}:${RELAY_PORT}"
+      GREENFIELD_TLS_ROUTE=0
     fi
+    ;;
+  existing-traefik)
+    RELAY_URL="https://${RELAY_DOMAIN}"
     ;;
   port-only)
     # Always advertise the host IP so consumers (deploy-panel, operators on
@@ -781,6 +805,24 @@ if [ "$RELAY_MODE" = "greenfield" ] && [ "$TRAEFIK_CA" = "self-signed" ]; then
   echo -e "  ${YELLOW}Self-signed TLS:${NC} Traefik uses its built-in self-signed certificate."
   echo -e "  Your browser and curl will warn about an untrusted certificate."
   echo -e "  Accept the security exception manually, or pass -k / --insecure to curl."
+  echo ""
+fi
+if [ "$RELAY_MODE" = "greenfield" ]; then
+  if [ "$GREENFIELD_TLS_ROUTE" = "1" ]; then
+    if [ "$RELAY_BIND_SET" = "1" ]; then
+      echo -e "  Plain-HTTP port ${RELAY_PORT} is published on ${RELAY_BIND} (RELAY_BIND). Use the HTTPS URL above."
+    else
+      echo -e "  Plain-HTTP port ${RELAY_PORT} is published on ${RELAY_BIND} only; use the HTTPS URL above"
+      echo -e "  from other hosts, or re-run with RELAY_BIND=0.0.0.0 to expose the plain port."
+    fi
+  elif [ "$RELAY_BIND_SET" = "1" ]; then
+    echo -e "  ${YELLOW}No TLS route.${NC} Plain HTTP on ${RELAY_BIND}:${RELAY_PORT}."
+    if [ "$RELAY_BIND" = "127.0.0.1" ]; then
+      echo -e "  ${YELLOW}Loopback bind:${NC} the URL above is NOT reachable from outside this host."
+    fi
+  else
+    echo -e "  ${YELLOW}No TLS route.${NC} Plain HTTP on all interfaces, port ${RELAY_PORT}."
+  fi
   echo ""
 fi
 if [ "$RELAY_MODE" = "port-only" ]; then
