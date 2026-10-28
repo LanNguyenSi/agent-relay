@@ -281,31 +281,56 @@ COMPOSE_EOF
   esac
 }
 
+# Key line of a managed key in any form docker compose env_file accepts:
+# optional leading space, optional `export `, optional space around `=`.
+AGENT_RELAY_MANAGED_KEY_RE='^[[:space:]]*(export[[:space:]]+)?(AUTH_TOKEN|APPS_DIR|PORT)[[:space:]]*='
+
+# Print the auth token: the LAST AUTH_TOKEN line of <relay_dir>/.env (compose
+# env_file parsing is last-wins) with `export `, spaces around `=` and trailing
+# space removed, else a freshly generated one. Status lines go to stderr.
+agent_relay_resolve_token() {
+  local relay_dir="$1" token=""
+  if [ -f "$relay_dir/.env" ]; then
+    token="$(grep -E '^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=' "$relay_dir/.env" \
+      | tail -n 1 \
+      | sed -E 's/^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//' || true)"
+  fi
+  if [ -n "$token" ]; then
+    log "Using existing auth token" >&2
+  else
+    token="$(openssl rand -hex 32)"
+    log "Generated auth token" >&2
+  fi
+  printf '%s\n' "$token"
+}
+
 # Write <relay_dir>/.env: the bearer token must never be readable by group or
 # other. Uses globals: AUTH_TOKEN, RELAY_PORT.
 # - <relay_dir> is mode 700.
-# - An existing .env is chmod 600 BEFORE it is rewritten (`>` keeps the mode of
-#   an existing file), a new one is created under umask 077.
-# - Managed keys (AUTH_TOKEN, APPS_DIR, PORT) are written first with the
-#   installer's values; every other line of an existing .env (custom keys,
-#   comments, blank lines) is carried over in order. A managed key repeated in
-#   the old file is dropped, so the installer's value wins.
+# - The file is built as a temp file in <relay_dir> under umask 077, chmod 600
+#   and renamed over .env, so it is never group/other readable and a symlink
+#   planted at .env is replaced, not followed.
+# - Every line of an existing .env that is not a managed key (custom keys,
+#   comments, blank lines) is carried over in order. The managed keys
+#   (AUTH_TOKEN, APPS_DIR, PORT) are written AFTER them with the installer's
+#   values: compose env_file parsing is last-wins, and a managed key repeated
+#   in the old file is dropped as well. The merge is line-based.
 agent_relay_write_env() {
-  local relay_dir="$1" env_file extra=""
+  local relay_dir="$1" env_file tmp extra=""
   env_file="$relay_dir/.env"
   chmod 700 "$relay_dir"
   if [ -f "$env_file" ]; then
-    chmod 600 "$env_file"
     # grep exits 1 when nothing is kept; that is fine under `set -e`.
-    extra="$(grep -vE '^(AUTH_TOKEN|APPS_DIR|PORT)=' "$env_file" || true)"
+    extra="$(grep -vE "$AGENT_RELAY_MANAGED_KEY_RE" "$env_file" || true)"
   fi
-  (
-    umask 077
-    {
-      printf 'AUTH_TOKEN=%s\nAPPS_DIR=/apps\nPORT=%s\n' "$AUTH_TOKEN" "$RELAY_PORT"
-      if [ -n "$extra" ]; then printf '%s\n' "$extra"; fi
-    } > "$env_file"
-  )
+  tmp="$(umask 077 && mktemp "$relay_dir/.env.XXXXXX")" || return 1
+  if ! {
+    if [ -n "$extra" ]; then printf '%s\n' "$extra"; fi
+    printf 'AUTH_TOKEN=%s\nAPPS_DIR=/apps\nPORT=%s\n' "$AUTH_TOKEN" "$RELAY_PORT"
+  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$env_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # ── Source-only guard ────────────────────────────────────────────────────────
@@ -653,13 +678,7 @@ BANNER
 fi
 
 # Preserve existing token or generate new one
-if [ -f "$RELAY_DIR/.env" ] && grep -q '^AUTH_TOKEN=' "$RELAY_DIR/.env"; then
-  AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$RELAY_DIR/.env" | cut -d= -f2-)
-  log "Using existing auth token"
-else
-  AUTH_TOKEN=$(openssl rand -hex 32)
-  log "Generated auth token"
-fi
+AUTH_TOKEN="$(agent_relay_resolve_token "$RELAY_DIR")"
 
 agent_relay_write_env "$RELAY_DIR"
 
