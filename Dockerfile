@@ -26,5 +26,9 @@ COPY --from=builder /app/dist dist/
 ARG RELAY_REVISION=""
 ENV RELAY_REVISION=$RELAY_REVISION
 EXPOSE 8222
+# Makes a hung relay visible (docker ps, docker inspect, compose up --wait).
+# Docker does not restart an unhealthy container; this does not self-heal.
+# Shell form so ${PORT} expands at run time (the app reads PORT, default 8222).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD wget -qO- "http://127.0.0.1:${PORT:-8222}/health" >/dev/null || exit 1
 ENTRYPOINT ["/sbin/tini", "-s", "--"]
 CMD ["node", "dist/index.js"]

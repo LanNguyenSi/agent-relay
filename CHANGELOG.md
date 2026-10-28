@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Container log rotation and an image healthcheck.** Every compose file (the installer's relay and Traefik files, `docker-compose.yml`, `docker-compose.prod.example.yml`) sets `logging: json-file` with `max-size: 10m` and `max-file: 3`, and the `Dockerfile` declares a `HEALTHCHECK` on `GET /health` (30 s interval, 5 s timeout, 20 s start period, 3 retries), so it also covers `docker run`. The healthcheck makes a hang visible (`docker ps`, `docker inspect`, `compose up --wait`); Docker does not restart an unhealthy container. Upgrade note: the next installer re-run or `docker compose up -d` recreates the containers (Traefik and relay) with the new logging settings; hand-edited compose files are overwritten by a re-run as before.
+
 ### Security
 
 - **Greenfield `install.sh` publishes the plain-HTTP relay port on `127.0.0.1` when a TLS route exists.** With `RELAY_DOMAIN` set together with `TRAEFIK_EMAIL` or `TRAEFIK_CA=self-signed`, the compose file now maps `127.0.0.1:${RELAY_PORT}:${RELAY_PORT}` instead of all host interfaces; Traefik still reaches the relay over `traefik-public`. An explicitly set, non-empty `RELAY_BIND` overrides the default (an empty value counts as unset). Without a TLS route the port stays on all interfaces (it is the only access path) unless `RELAY_BIND` is set. The installer's final summary now states the plain-HTTP binding. Upgrade note: on the next installer re-run of a greenfield install with a TLS route, `http://<host>:8222` stops answering from other hosts; use the HTTPS domain or set `RELAY_BIND=0.0.0.0`. deploy-panel servers configured with a plain-HTTP relay URL must switch to the HTTPS URL. The install summary prints the `https://` URL only when that TLS route exists; a greenfield install with `RELAY_DOMAIN` but without `TRAEFIK_EMAIL` or self-signed now prints the plain-HTTP URL it actually serves instead of an `https://` URL nothing answered (deploy-panel's install wizard stores that URL as the relay URL).
@@ -14,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`docker-compose.prod.example.yml` matches the installer.** It joined an external network named `traefik`, while the installer and Traefik use `traefik-public`, and it mounted the placeholder `/path/to/apps` that silently created a wrong host directory when left unedited. It now joins `traefik-public` and mounts `${APPS_HOST_DIR}`, which compose requires with a pointer to `docs/operations.md`. Set `APPS_HOST_DIR` before `docker compose up`.
 - **Re-running `install.sh` no longer drops operator additions from `$RELAY_DIR/.env`.** Every line other than `AUTH_TOKEN`, `APPS_DIR` and `PORT` (custom keys, comments, blank lines) is carried over in order. The installer's own values win in every form compose accepts (`export KEY=`, `KEY = value`, indented): such lines are dropped and the managed keys are written after the carried-over lines. A re-run takes the last `AUTH_TOKEN` line of the old file.
 
 ## [0.7.0] - 2026-10-25

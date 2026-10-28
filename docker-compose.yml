@@ -12,6 +12,11 @@ services:
       - ${APPS_DIR:-./apps}:/apps
       - ${SSH_DIR:-/root/.ssh}:/root/.ssh:ro
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Reap orphaned git/docker grandchildren (see docs/operations.md). The image
     # already runs tini as its entrypoint; this keeps compose installs covered
     # if the entrypoint is ever overridden.

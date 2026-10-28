@@ -138,6 +138,11 @@ services:
     image: traefik:v3
     container_name: traefik
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
@@ -229,6 +234,11 @@ services:
     init: true
     restart: unless-stopped
     env_file: .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "${relay_port_line}"
     volumes:
@@ -261,6 +271,11 @@ services:
     init: true
     restart: unless-stopped
     env_file: .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     expose:
       - "${RELAY_PORT}"
     volumes:
@@ -286,6 +301,11 @@ services:
     init: true
     restart: unless-stopped
     env_file: .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT}"
     volumes:

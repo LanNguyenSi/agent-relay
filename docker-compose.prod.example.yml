@@ -1,8 +1,12 @@
-# Production template — copy to VPS and adjust:
-#   - volumes: set host path for /apps mount
+# Production template, built from source (for example on arm64, where the
+# published image is not available). Copy to the VPS and adjust:
+#   - APPS_HOST_DIR (required, set in the shell or next to this file in .env):
+#     host directory of your app repos, mounted at /apps
 #   - ports: expose 8222 if relay must be reachable from other hosts
 #   - labels: add traefik labels if behind reverse proxy
-#   - networks: add traefik network if using traefik
+#   - networks: joins the external `traefik-public` network, the name install.sh
+#     uses; create it first (`docker network create traefik-public`) or change it
+#   - logging (json-file, 10m x 3) is set; the image carries a HEALTHCHECK
 #
 # Required .env on VPS:
 #   AUTH_TOKEN=<relay-token>
@@ -13,6 +17,11 @@ services:
     build: .
     container_name: agent-relay
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Reap orphaned git/docker grandchildren (see docs/operations.md). The image
     # already runs tini as its entrypoint; this keeps compose installs covered
     # if the entrypoint is ever overridden.
@@ -21,14 +30,14 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/.ssh:/root/.ssh:ro
-      # Adjust this path to where your app repos live on the host. The docker
+      # APPS_HOST_DIR (required) is where your app repos live on the host. The docker
       # daemon resolves deployed apps' own bind mounts against the HOST's
       # /apps (DooD), so host /apps must be this SAME directory, e.g. via a
-      # host symlink /apps -> /path/to/apps. See docs/operations.md.
-      - /path/to/apps:/apps
+      # host symlink /apps -> $APPS_HOST_DIR. See docs/operations.md.
+      - ${APPS_HOST_DIR:?set APPS_HOST_DIR to the host directory of your app repos (see docs/operations.md)}:/apps
     networks:
-      - traefik
+      - traefik-public
 
 networks:
-  traefik:
+  traefik-public:
     external: true
