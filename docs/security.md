@@ -6,6 +6,8 @@ agent-relay runs as a long-lived daemon on a VPS, with access to the Docker sock
 
 All `/api` endpoints require `Authorization: Bearer <AUTH_TOKEN>`. The exception is `GET /health`: a public, unauthenticated relay-health probe (status + version, no uptime), suitable for external uptime monitors and load balancer probes.
 
+The installer writes the token file `$RELAY_DIR/.env` with mode `600` inside a `700` directory, so other local users cannot read the bearer token.
+
 The auth model is intentionally minimal: one bearer token, constant-time compared. No rate limits, no TLS termination, no mTLS. TLS is the responsibility of whatever sits in front of the relay (Traefik in `greenfield` / `existing-traefik` modes; nginx or Caddy in `port-only`). See [docs/operations.md](operations.md) for install modes.
 
 In `greenfield` mode, the compose file written by `install.sh` also publishes `RELAY_PORT` (default 8222) on all host interfaces over plain HTTP, next to the Traefik route. Traefik routes to the relay only when `RELAY_DOMAIN` is set together with `TRAEFIK_EMAIL` or `TRAEFIK_CA=self-signed`. Otherwise the relay is reachable only over plain HTTP on that port. Block the port with a firewall rule that also applies to Docker-published ports, or use `existing-traefik`, or `port-only` with the default loopback bind.

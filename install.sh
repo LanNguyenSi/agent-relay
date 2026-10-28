@@ -281,6 +281,33 @@ COMPOSE_EOF
   esac
 }
 
+# Write <relay_dir>/.env: the bearer token must never be readable by group or
+# other. Uses globals: AUTH_TOKEN, RELAY_PORT.
+# - <relay_dir> is mode 700.
+# - An existing .env is chmod 600 BEFORE it is rewritten (`>` keeps the mode of
+#   an existing file), a new one is created under umask 077.
+# - Managed keys (AUTH_TOKEN, APPS_DIR, PORT) are written first with the
+#   installer's values; every other line of an existing .env (custom keys,
+#   comments, blank lines) is carried over in order. A managed key repeated in
+#   the old file is dropped, so the installer's value wins.
+agent_relay_write_env() {
+  local relay_dir="$1" env_file extra=""
+  env_file="$relay_dir/.env"
+  chmod 700 "$relay_dir"
+  if [ -f "$env_file" ]; then
+    chmod 600 "$env_file"
+    # grep exits 1 when nothing is kept; that is fine under `set -e`.
+    extra="$(grep -vE '^(AUTH_TOKEN|APPS_DIR|PORT)=' "$env_file" || true)"
+  fi
+  (
+    umask 077
+    {
+      printf 'AUTH_TOKEN=%s\nAPPS_DIR=/apps\nPORT=%s\n' "$AUTH_TOKEN" "$RELAY_PORT"
+      if [ -n "$extra" ]; then printf '%s\n' "$extra"; fi
+    } > "$env_file"
+  )
+}
+
 # ── Source-only guard ────────────────────────────────────────────────────────
 # Sourcing with INSTALL_SH_SOURCE_ONLY=1 stops here so tests can inject
 # id/docker shims and call the above functions directly without side effects.
@@ -634,11 +661,7 @@ else
   log "Generated auth token"
 fi
 
-cat > "$RELAY_DIR/.env" <<ENV_EOF
-AUTH_TOKEN=${AUTH_TOKEN}
-APPS_DIR=/apps
-PORT=${RELAY_PORT}
-ENV_EOF
+agent_relay_write_env "$RELAY_DIR"
 
 # Build compose file. Three shapes, driven by RELAY_MODE.
 agent_relay_write_relay_compose "$RELAY_DIR"

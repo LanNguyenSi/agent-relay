@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **`install.sh` writes `$RELAY_DIR/.env` with mode 600.** The file holds the bearer `AUTH_TOKEN` and was created world-readable (mode 644 under umask 022). New files are now created under `umask 077`, an existing file (a re-run over an older install) is tightened to 600 before it is rewritten, and `$RELAY_DIR` is set to mode 700.
+
+### Fixed
+
+- **Re-running `install.sh` no longer drops operator additions from `$RELAY_DIR/.env`.** Every line other than `AUTH_TOKEN`, `APPS_DIR` and `PORT` (custom keys, comments, blank lines) is carried over in order. The installer's own values win: a duplicate of those three keys in the old file is dropped.
+
 ## [0.7.0] - 2026-10-25
 
 ### Added
