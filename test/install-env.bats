@@ -25,8 +25,9 @@ _write_env() {
   [ "$status" -eq 0 ]
 }
 
-# Portable file mode (octal): BSD stat first, then GNU.
-_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+# Portable file mode (octal): GNU stat first (on Linux `stat -f` reports the
+# filesystem instead of failing), then BSD.
+_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 @test "env: first install writes the three managed keys with mode 600" {
   _write_env
