@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`docker-compose.prod.example.yml` matches the installer.** It joined an external network named `traefik`, while the installer and Traefik use `traefik-public`, and it mounted the placeholder `/path/to/apps` that silently created a wrong host directory when left unedited. It now joins `traefik-public` and mounts `${APPS_HOST_DIR}`, which compose requires with a pointer to `docs/operations.md`. Set `APPS_HOST_DIR` before `docker compose up`.
 - **Re-running `install.sh` no longer drops operator additions from `$RELAY_DIR/.env`.** Every line other than `AUTH_TOKEN`, `APPS_DIR` and `PORT` (custom keys, comments, blank lines) is carried over in order. The installer's own values win in every form compose accepts (`export KEY=`, `KEY = value`, indented): such lines are dropped and the managed keys are written after the carried-over lines. A re-run takes the last `AUTH_TOKEN` line of the old file.
 
+### Documentation
+
+- Four stale docs statements corrected against the code: `CONTRIBUTING.md` now says `GET /api/system` runs only `free` and `df` through `execSync` (CPU comes from `readCpuUsage()` in `src/services/cpu.ts`); `install.sh`'s header comment and `docs/operations.md` now say `RELAY_DOMAIN` is required only in `existing-traefik` (greenfield without it serves plain HTTP) and `TRAEFIK_EMAIL` is recommended, not required (the installer warns and continues, Traefik runs without an ACME resolver); `README.md` now lists Node 24+ next to 20.19+ and 22.13+.
+
 ## [0.7.0] - 2026-10-25
 
 ### Added

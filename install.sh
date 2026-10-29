@@ -17,9 +17,13 @@
 #   port-only         No Traefik, no TLS; relay publishes to RELAY_BIND:RELAY_PORT directly
 #
 # Env-var surface:
-#   RELAY_DOMAIN           FQDN for TLS routing (required in greenfield / existing-traefik)
-#   TRAEFIK_EMAIL          LE contact address (required in greenfield when RELAY_DOMAIN is set
-#                            and TRAEFIK_CA is not self-signed)
+#   RELAY_DOMAIN           FQDN for TLS routing (required in existing-traefik; optional in greenfield:
+#                          without it no TLS route is created and the relay is served only as plain
+#                          HTTP on RELAY_PORT)
+#   TRAEFIK_EMAIL          LE contact address (recommended in greenfield when RELAY_DOMAIN is set
+#                            and TRAEFIK_CA is not self-signed; without it the installer warns and
+#                            continues, and Traefik runs without an ACME resolver, so Let's Encrypt
+#                            issues no certificate)
 #   APPS_DIR               Host dir bind-mounted into the relay container as /apps (default /home/deploy/apps as root, $HOME/.local/share/agent-relay/apps non-root)
 #   RELAY_DIR              Where install.sh writes compose + .env (default /opt/agent-relay as root, $HOME/.local/share/agent-relay non-root)
 #   RELAY_PORT             Container port (default 8222)
