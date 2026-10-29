@@ -62,9 +62,23 @@ export function runExec(
             killReason = "timeout";
           }
         }
+        let stderrText = stderr?.toString() ?? "";
+        if (
+          error
+          && typeof error.code === "string"
+          && error.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+        ) {
+          // Spawn-level failures (ENOENT for a missing binary or cwd, EACCES
+          // for a non-executable file) never write to the child's stderr, so
+          // error.message ("spawn docker ENOENT") is the only diagnostic;
+          // without it callers that print stderr show a silent failure. The
+          // max-buffer kill keeps its stderr untouched (the child may have
+          // written real output before the kill).
+          stderrText = stderrText ? `${stderrText}\n${error.message}` : error.message;
+        }
         resolve({
           stdout: stdout?.toString() ?? "",
-          stderr: stderr?.toString() ?? "",
+          stderr: stderrText,
           exitCode: error?.code !== undefined ? (typeof error.code === "number" ? error.code : 1) : 0,
           timeoutMs,
           maxBufferBytes,

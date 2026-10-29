@@ -3,7 +3,7 @@ type: invariant
 title: Exec trust boundary — runExec vs runShell, plus the config.health residual
 description: docker/git calls go through execFile-backed runExec everywhere; only .relay.yml's command/pre_update/post_update go through shell-backed runShell. A same-tier residual uses a different mechanism, config.health string-interpolated into a node -e JS snippet run via docker compose exec (engine.ts); docs/security.md documents it as a fourth executable input, and this doc adds where it sits in the code.
 tags: [security, trust-boundary, exec, shell, health-check]
-timestamp: 2026-10-28T06:08:18Z
+timestamp: 2026-10-29T15:10:55Z
 sources:
   - src/deploy/exec.ts
   - src/deploy/engine.ts
@@ -13,10 +13,10 @@ sources:
 
 # Exec trust boundary — runExec vs runShell, plus the config.health residual
 
-`src/deploy/exec.ts` exposes two ways to run a subprocess (`exec.ts:43-93`), and which one a call site uses is the whole ballgame for shell-injection exposure:
+`src/deploy/exec.ts` exposes two ways to run a subprocess (`exec.ts:43-107`), and which one a call site uses is the whole ballgame for shell-injection exposure:
 
-- **`runExec(command, args, cwd, opts?)`** — `execFile` with a discrete argument array (`exec.ts:43-76`). Each element is passed to the OS as a literal argv entry; there is no shell to break out of. The optional `opts` (`ExecOptions`: `timeoutMs`, `maxBufferBytes`) overrides the exec-level timeout and per-stream buffer cap per call; it carries no bearing on the trust boundary below, since it only tunes how long the call may run and how much output it may buffer, not what gets executed.
-- **`runShell(command, cwd, opts?)`** — `runExec("/bin/sh", ["-c", command], cwd, opts)` (`exec.ts:87-93`): the entire `command` string is handed to `/bin/sh -c`, so anything shell-metacharacter-shaped in it executes. The JSDoc states the trust boundary explicitly: only call this for `.relay.yml` fields under operator control (`pre_update`, `post_update`, `command`) — never for user-supplied or network-derived input.
+- **`runExec(command, args, cwd, opts?)`** — `execFile` with a discrete argument array (`exec.ts:43-90`). Each element is passed to the OS as a literal argv entry; there is no shell to break out of. The optional `opts` (`ExecOptions`: `timeoutMs`, `maxBufferBytes`) overrides the exec-level timeout and per-stream buffer cap per call; it carries no bearing on the trust boundary below, since it only tunes how long the call may run and how much output it may buffer, not what gets executed.
+- **`runShell(command, cwd, opts?)`** — `runExec("/bin/sh", ["-c", command], cwd, opts)` (`exec.ts:101-107`): the entire `command` string is handed to `/bin/sh -c`, so anything shell-metacharacter-shaped in it executes. The JSDoc states the trust boundary explicitly: only call this for `.relay.yml` fields under operator control (`pre_update`, `post_update`, `command`) — never for user-supplied or network-derived input.
 
 ## Where each is actually used
 

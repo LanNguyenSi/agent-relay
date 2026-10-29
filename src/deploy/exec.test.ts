@@ -3,8 +3,12 @@
  * Runs against REAL child processes to verify:
  * - stdout/stderr capture
  * - exitCode mapping: numeric (N), success (0), string code→1 (ENOENT)
+ * - spawn errors (ENOENT, EACCES) surface their error.message in stderr
  */
 import { describe, it, expect } from "vitest";
+import { mkdtemp, chmod, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runExec, runShell, DEFAULT_MAX_BUFFER_BYTES } from "./exec.js";
 
 const cwd = "/tmp";
@@ -76,6 +80,73 @@ describe("runShell", () => {
   it("propagates non-zero exit code from shell command", async () => {
     const result = await runShell("exit 5", cwd);
     expect(result.exitCode).toBe(5);
+  });
+});
+
+describe("runExec: spawn errors surface in stderr", () => {
+  it("appends the spawn error message for a nonexistent cwd", async () => {
+    const result = await runExec("node", ["-e", "process.exit(0)"], "/nonexistent-cwd-dir-xyz");
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/spawn node ENOENT/);
+  });
+
+  it("appends the spawn error message for a nonexistent binary", async () => {
+    const result = await runExec("__nonexistent_binary_xyz__", [], cwd);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/spawn __nonexistent_binary_xyz__ ENOENT/);
+  });
+
+  it("appends the spawn error message for a non-executable file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "exec-eacces-"));
+    try {
+      const file = join(dir, "not-executable");
+      await writeFile(file, "#!/bin/sh\necho hi\n");
+      await chmod(file, 0o644);
+      const result = await runExec(file, [], cwd);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      const expected = new RegExp(`spawn ${file.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} EACCES`);
+      expect(result.stderr).toMatch(expected);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runExec: non-spawn outcomes keep stderr untouched", () => {
+  it("does not append any error message for a numeric exit code", async () => {
+    const result = await runExec(
+      "node",
+      ["-e", "process.stderr.write('err'); process.exit(4)"],
+      cwd,
+    );
+    expect(result.exitCode).toBe(4);
+    expect(result.stderr).toBe("err");
+  });
+
+  it("does not append any error message on a timeout kill", async () => {
+    const result = await runExec("node", ["-e", "setTimeout(() => {}, 10000)"], cwd, {
+      timeoutMs: 300,
+    });
+    expect(result.killReason).toBe("timeout");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("");
+  });
+
+  it("does not append any error message on a max-buffer kill", async () => {
+    // stderr is written first: stderr is synchronous on POSIX, so it is
+    // buffered before the oversized stdout write triggers the kill.
+    const result = await runExec(
+      "node",
+      ["-e", "process.stderr.write('real-err'); process.stdout.write('y'.repeat(200000))"],
+      cwd,
+      { maxBufferBytes: 1024 },
+    );
+    expect(result.killReason).toBe("maxbuffer");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("real-err");
   });
 });
 

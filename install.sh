@@ -328,7 +328,11 @@ AGENT_RELAY_MANAGED_KEY_RE='^[[:space:]]*(export[[:space:]]+)?(AUTH_TOKEN|APPS_D
 
 # Print the auth token: the LAST AUTH_TOKEN line of <relay_dir>/.env (compose
 # env_file parsing is last-wins) with `export `, spaces around `=` and trailing
-# space removed, else a freshly generated one. Status lines go to stderr.
+# space removed, else a freshly generated one. The value is RAW: quotes and an
+# inline comment the operator wrote are kept, so agent_relay_write_env writes
+# the line back byte for byte and a re-run never changes what compose reads.
+# For showing the token use agent_relay_display_token.
+# Status lines go to stderr.
 agent_relay_resolve_token() {
   local relay_dir="$1" token=""
   if [ -f "$relay_dir/.env" ]; then
@@ -348,6 +352,40 @@ agent_relay_resolve_token() {
   printf '%s\n' "$token"
 }
 
+# Print what docker compose env_file parsing reads from the RAW token value $1
+# (as agent_relay_resolve_token returns it). DISPLAY ONLY (the summary
+# banner): the .env line itself is never rewritten from this value.
+# - Quoted with double quotes: the content between the quotes, with `\\`, `\"`
+#   and `\$` unescaped; an optional `# comment` may follow the closing quote.
+# - Quoted with single quotes: the content between the quotes, literal.
+# - Unquoted: everything before the first ` #` (a literal space then `#`; a
+#   `#` preceded only by a tab, or by nothing, is part of the value), trailing
+#   space removed.
+# - A value that starts with a quote but has no matching closing quote is
+#   returned as is.
+agent_relay_display_token() {
+  local v="$1"
+  local dq_re='^"((\\.|[^"\\])*)"[[:space:]]*(#.*)?$'
+  local sq_re="^'([^']*)'[[:space:]]*(#.*)?\$"
+  if [[ "$v" == \"* ]]; then
+    if [[ "$v" =~ $dq_re ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}" | sed -E 's/\\([\\"$])/\1/g'
+    else
+      printf '%s\n' "$v"
+    fi
+  elif [[ "$v" == \'* ]]; then
+    if [[ "$v" =~ $sq_re ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+      printf '%s\n' "$v"
+    fi
+  else
+    v="${v%% \#*}"
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s\n' "$v"
+  fi
+}
+
 # Write <relay_dir>/.env: the bearer token must never be readable by group or
 # other. Uses globals: AUTH_TOKEN, RELAY_PORT.
 # - <relay_dir> is mode 700.
@@ -359,6 +397,9 @@ agent_relay_resolve_token() {
 #   (AUTH_TOKEN, APPS_DIR, PORT) are written AFTER them with the installer's
 #   values: compose env_file parsing is last-wins, and a managed key repeated
 #   in the old file is dropped as well. The merge is line-based.
+# - The AUTH_TOKEN value is written as it was resolved (the raw value of the
+#   old line, or a generated hex token), unmodified, so the line is kept byte
+#   for byte across re-runs.
 agent_relay_write_env() {
   local relay_dir="$1" env_file tmp extra=""
   env_file="$relay_dir/.env"
@@ -823,7 +864,8 @@ echo -e "${CYAN}═════════════════════�
 echo ""
 echo -e "  Mode:  ${CYAN}${RELAY_MODE}${NC}"
 echo -e "  URL:   ${CYAN}${RELAY_URL}${NC}"
-echo -e "  Token: ${YELLOW}${AUTH_TOKEN}${NC}"
+# printf %s keeps backslashes in the token literal (echo -e would expand them).
+printf '  Token: %b%s%b\n' "$YELLOW" "$(agent_relay_display_token "$AUTH_TOKEN")" "$NC"
 echo ""
 if [ "$RELAY_MODE" = "greenfield" ] && [ "$TRAEFIK_CA" = "self-signed" ]; then
   echo -e "  ${YELLOW}Self-signed TLS:${NC} Traefik uses its built-in self-signed certificate."
@@ -873,7 +915,7 @@ echo -e "  ${CYAN}Add to deploy-panel:${NC}"
 echo -e "    Name:       $(hostname)"
 echo -e "    Host:       ${HOST_IP}"
 echo -e "    Relay URL:  ${RELAY_URL}"
-echo -e "    Relay Token: ${AUTH_TOKEN}"
+printf '    Relay Token: %s\n' "$(agent_relay_display_token "$AUTH_TOKEN")"
 echo ""
 
 # Firewall preflight (v0.3.0). Many fresh VPS images ship with UFW
