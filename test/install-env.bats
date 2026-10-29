@@ -407,6 +407,15 @@ _display() {
   echo "$body" | grep -qE '^agent_relay_write_env "\$RELAY_DIR"$'
 }
 
+@test "install.sh banners print the compose-read token, not the raw .env value" {
+  body="$(sed -n '/^if \[ "\${INSTALL_SH_SOURCE_ONLY:-}" = "1" \]/,$p' "$INSTALL_SH")"
+  [ "$(echo "$body" | grep -cF '"$(agent_relay_display_token "$AUTH_TOKEN")"')" -eq 2 ]
+  echo "$body" | grep -qF "printf '  Token: %b%s%b\\n'"
+  echo "$body" | grep -qF "printf '    Relay Token: %s\\n'"
+  # No banner prints the raw value.
+  ! echo "$body" | grep -qE '(echo|printf).*\$\{?AUTH_TOKEN\}?[^"]'
+}
+
 @test "env: docker compose sees the installer values (skipped without docker compose)" {
   command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || skip "docker compose not available"
   printf 'export PORT=9999\nAPPS_DIR = /srv\n  AUTH_TOKEN=evil\nFOO=bar\n' > "$RELAY_DIR/.env"

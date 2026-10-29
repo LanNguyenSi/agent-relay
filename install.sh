@@ -864,7 +864,8 @@ echo -e "${CYAN}═════════════════════�
 echo ""
 echo -e "  Mode:  ${CYAN}${RELAY_MODE}${NC}"
 echo -e "  URL:   ${CYAN}${RELAY_URL}${NC}"
-echo -e "  Token: ${YELLOW}$(agent_relay_display_token "$AUTH_TOKEN")${NC}"
+# printf %s keeps backslashes in the token literal (echo -e would expand them).
+printf '  Token: %b%s%b\n' "$YELLOW" "$(agent_relay_display_token "$AUTH_TOKEN")" "$NC"
 echo ""
 if [ "$RELAY_MODE" = "greenfield" ] && [ "$TRAEFIK_CA" = "self-signed" ]; then
   echo -e "  ${YELLOW}Self-signed TLS:${NC} Traefik uses its built-in self-signed certificate."
@@ -914,7 +915,7 @@ echo -e "  ${CYAN}Add to deploy-panel:${NC}"
 echo -e "    Name:       $(hostname)"
 echo -e "    Host:       ${HOST_IP}"
 echo -e "    Relay URL:  ${RELAY_URL}"
-echo -e "    Relay Token: $(agent_relay_display_token "$AUTH_TOKEN")"
+printf '    Relay Token: %s\n' "$(agent_relay_display_token "$AUTH_TOKEN")"
 echo ""
 
 # Firewall preflight (v0.3.0). Many fresh VPS images ship with UFW
