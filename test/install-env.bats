@@ -163,10 +163,9 @@ _resolve() {
   [ "${#output}" -eq 64 ]
 }
 
-# Assert `docker compose config` parses the AUTH_TOKEN of the current
-# $RELAY_DIR/.env to exactly $1 (same value agent_relay_resolve_token printed).
-# Skipped without docker compose.
-_compose_sees_token() {
+# Set `seen` to the AUTH_TOKEN value `docker compose config` reads from the
+# current $RELAY_DIR/.env. Skipped without docker compose.
+_compose_value() {
   command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || skip "docker compose not available"
   printf 'services:\n  x:\n    image: busybox\n    env_file: .env\n' > "$RELAY_DIR/c.yml"
   run docker compose -f "$RELAY_DIR/c.yml" config
@@ -181,143 +180,211 @@ _compose_sees_token() {
     # character these tests put in a token is the tab.
     seen="${seen//\\t/$'\t'}"
   fi
+  # `config` prints a literal `$` as `$$`.
+  seen="${seen//\$\$/\$}"
+}
+
+# Assert compose reads $1 as the AUTH_TOKEN of the current $RELAY_DIR/.env.
+_compose_sees_token() {
+  _compose_value
   [ "$seen" = "$1" ]
 }
 
-@test "resolve_token: double-quoted value, one pair of quotes stripped" {
+# resolve_token returns the RAW value of the existing line (only `export `,
+# spaces around `=` and trailing space are normalised), quotes and comment kept.
+@test "resolve_token: double-quoted value is returned raw" {
   printf 'AUTH_TOKEN="qtok"\n' > "$RELAY_DIR/.env"
   _resolve
-  [ "$output" = "qtok" ]
-  _compose_sees_token qtok
+  [ "$output" = '"qtok"' ]
 }
 
-@test "resolve_token: single-quoted value, one pair of quotes stripped" {
+@test "resolve_token: single-quoted value is returned raw" {
   printf "AUTH_TOKEN='stok'\n" > "$RELAY_DIR/.env"
   _resolve
-  [ "$output" = "stok" ]
-  _compose_sees_token stok
+  [ "$output" = "'stok'" ]
 }
 
-@test "resolve_token: unquoted trailing comment stripped" {
+@test "resolve_token: trailing comment is kept in the raw value" {
   printf 'AUTH_TOKEN=ctok # note\n' > "$RELAY_DIR/.env"
   _resolve
-  [ "$output" = "ctok" ]
-  _compose_sees_token ctok
+  [ "$output" = 'ctok # note' ]
 }
 
-@test "resolve_token: quoted token plus trailing comment, both stripped" {
-  printf 'AUTH_TOKEN="qtok" # note\n' > "$RELAY_DIR/.env"
+@test "resolve_token: export form with spaces around = and trailing space is normalised, quotes kept" {
+  printf 'export AUTH_TOKEN =  "a b"  \n' > "$RELAY_DIR/.env"
   _resolve
-  [ "$output" = "qtok" ]
-  _compose_sees_token qtok
+  [ "$output" = '"a b"' ]
 }
 
-@test "resolve_token: hash without leading whitespace stays part of the token" {
-  printf 'AUTH_TOKEN=tok#nocomment\n' > "$RELAY_DIR/.env"
-  _resolve
-  [ "$output" = "tok#nocomment" ]
-  _compose_sees_token 'tok#nocomment'
-}
-
-@test "resolve_token: quoted value with a space keeps the space" {
-  printf 'AUTH_TOKEN="a b"\n' > "$RELAY_DIR/.env"
-  _resolve
-  [ "$output" = "a b" ]
-  _compose_sees_token "a b"
-}
-
-@test "resolve_token: quoted value keeps # inside the quotes" {
-  printf 'AUTH_TOKEN="a #b"\n' > "$RELAY_DIR/.env"
-  _resolve
-  [ "$output" = "a #b" ]
-  _compose_sees_token "a #b"
-}
-
-@test "resolve_token: mismatched quote is left alone" {
+@test "resolve_token: mismatched quote is returned raw" {
   printf 'AUTH_TOKEN="mismatch\n' > "$RELAY_DIR/.env"
   _resolve
   [ "$output" = '"mismatch' ]
 }
 
-# Full re-run round-trip: $1 is the raw AUTH_TOKEN line of .env, $2 the token
-# agent_relay_resolve_token must print, $3 the exact AUTH_TOKEN value
-# agent_relay_write_env must write (quoting applied). compose must then read $2
-# back from the written file (skipped without docker compose), so a re-run
-# never changes the token the container sees.
-_roundtrip() {
-  printf '%s\n' "$1" > "$RELAY_DIR/.env"
+# Re-run twice: the written AUTH_TOKEN line is byte-identical to the original
+# line value both times, and compose reads the same value from the original
+# file and from each rewritten file. $1 is the value after `AUTH_TOKEN=`; an
+# empty $1 means no .env at all (generated token).
+_rerun() {
   run bash -c "
     umask 022
     INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
     AUTH_TOKEN=\$(agent_relay_resolve_token '${RELAY_DIR}' 2>/dev/null)
     RELAY_PORT=8222
     agent_relay_write_env '${RELAY_DIR}'
-    printf 'TOKEN=%s' \"\$AUTH_TOKEN\"
   "
   [ "$status" -eq 0 ]
-  [ "$output" = "TOKEN=$2" ]
-  grep -Fqx "AUTH_TOKEN=$3" "$RELAY_DIR/.env"
+}
+
+_assert_rerun_stable() {
+  local raw="$1" before_seen
+  if [ -n "$raw" ]; then
+    printf 'AUTH_TOKEN=%s\n' "$raw" > "$RELAY_DIR/.env"
+    _compose_value
+    before_seen="$seen"
+  else
+    _rerun
+    raw="$(sed -n 's/^AUTH_TOKEN=//p' "$RELAY_DIR/.env")"
+    [ "${#raw}" -eq 64 ]
+    _compose_value
+    before_seen="$seen"
+  fi
+  local i
+  for i in 1 2; do
+    _rerun
+    [ "$(grep -c '^AUTH_TOKEN=' "$RELAY_DIR/.env")" = "1" ]
+    grep -Fqx "AUTH_TOKEN=$raw" "$RELAY_DIR/.env"
+    _compose_value
+    [ "$seen" = "$before_seen" ]
+  done
+}
+
+@test "re-run: plain token line is byte-identical, twice" {
+  _assert_rerun_stable 'tok123'
+}
+
+@test "re-run: generated hex token line is byte-identical, twice" {
+  _assert_rerun_stable ''
+}
+
+@test "re-run: \"a #b\" line is byte-identical, twice" {
+  _assert_rerun_stable '"a #b"'
+}
+
+@test "re-run: \" lead\" line is byte-identical, twice" {
+  _assert_rerun_stable '" lead"'
+}
+
+@test "re-run: 'x\"y' line is byte-identical, twice" {
+  _assert_rerun_stable "'x\"y'"
+}
+
+@test "re-run: \"p=q\" line is byte-identical, twice" {
+  _assert_rerun_stable '"p=q"'
+}
+
+@test "re-run: 'a\$b' line is byte-identical, twice" {
+  _assert_rerun_stable "'a\$b'"
+}
+
+@test "re-run: \"a\\\\b'c\" line is byte-identical, twice" {
+  _assert_rerun_stable "\"a\\\\b'c\""
+}
+
+@test "re-run: \"to'k\" line is byte-identical, twice" {
+  _assert_rerun_stable "\"to'k\""
+}
+
+@test "re-run: unquoted trailing comment line is byte-identical, twice" {
+  _assert_rerun_stable 'tok # note'
+}
+
+@test "re-run: tab before # line is byte-identical, twice" {
+  _assert_rerun_stable $'a\t#c'
+}
+
+@test "write_env: the AUTH_TOKEN value is written exactly as given, never quoted" {
+  run env AUTH_TOKEN=$'x\'y"z\\w #q' RELAY_PORT=8222 bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    agent_relay_write_env '${RELAY_DIR}'
+  "
+  [ "$status" -eq 0 ]
+  grep -Fqx 'AUTH_TOKEN=x'\''y"z\w #q' "$RELAY_DIR/.env"
+}
+
+# agent_relay_display_token: $1 raw value, $2 the banner value; when compose
+# accepts the line it must read the same value as the banner shows.
+_display() {
+  run bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    agent_relay_display_token \"\$1\"
+  " _ "$1"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$2" ]
+  printf 'AUTH_TOKEN=%s\n' "$1" > "$RELAY_DIR/.env"
   _compose_sees_token "$2"
 }
 
-@test "round-trip: plain token stays unquoted in the written file" {
-  _roundtrip 'AUTH_TOKEN=tok123' 'tok123' 'tok123'
+@test "display_token: plain token" {
+  _display 'tok123' 'tok123'
 }
 
-@test "round-trip: token with # and a space is single-quoted on write-back" {
-  _roundtrip 'AUTH_TOKEN="a #b"' 'a #b' "'a #b'"
+@test "display_token: double-quoted value loses its quotes, keeps # and space" {
+  _display '"a #b"' 'a #b'
 }
 
-@test "round-trip: token with a leading space stays quoted on write-back" {
-  _roundtrip 'AUTH_TOKEN=" lead"' ' lead' "' lead'"
+@test "display_token: double-quoted leading space is kept" {
+  _display '" lead"' ' lead'
 }
 
-@test "round-trip: token with a trailing space stays quoted on write-back" {
-  _roundtrip 'AUTH_TOKEN="trail "' 'trail ' "'trail '"
+@test "display_token: single-quoted value keeps a double quote" {
+  _display "'x\"y'" 'x"y'
 }
 
-@test "round-trip: token with a double quote is single-quoted on write-back" {
-  _roundtrip "AUTH_TOKEN='x\"y'" 'x"y' "'x\"y'"
+@test "display_token: = inside quotes" {
+  _display '"p=q"' 'p=q'
 }
 
-@test "round-trip: token with = is single-quoted on write-back" {
-  _roundtrip 'AUTH_TOKEN="p=q"' 'p=q' "'p=q'"
+@test "display_token: single quotes are literal, \$ stays" {
+  _display "'a\$b'" 'a$b'
 }
 
-@test "round-trip: token with a single quote is double-quoted on write-back" {
-  _roundtrip "AUTH_TOKEN=\"to'k\"" "to'k" "\"to'k\""
+@test "display_token: double quotes unescape backslash pairs" {
+  _display "\"a\\\\b'c\"" "a\\b'c"
 }
 
-@test "round-trip: tab before # is value, not a comment, and stays quoted on write-back" {
-  _roundtrip $'AUTH_TOKEN=a\t#c' $'a\t#c' $'\x27a\t#c\x27'
+@test "display_token: single quote inside double quotes" {
+  _display "\"to'k\"" "to'k"
 }
 
-# Write .env with AUTH_TOKEN=$1 (no resolve step), then assert.
-_write_env_token() {
-  run env AUTH_TOKEN="$1" RELAY_PORT=8222 bash -c "
-    umask 022
+@test "display_token: unquoted trailing comment stripped" {
+  _display 'tok # note' 'tok'
+}
+
+@test "display_token: quoted value plus trailing comment" {
+  _display '"qtok" # note' 'qtok'
+}
+
+@test "display_token: tab before # is part of the value" {
+  _display $'a\t#c' $'a\t#c'
+}
+
+@test "display_token: # without a leading space is part of the value" {
+  _display 'tok#nocomment' 'tok#nocomment'
+}
+
+@test "display_token: escaped quote and dollar inside double quotes" {
+  _display '"a\"b\$c"' 'a"b$c'
+}
+
+@test "display_token: mismatched quote is left alone" {
+  run bash -c "
     INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
-    agent_relay_write_env '${RELAY_DIR}'
-  " 2>&1
+    agent_relay_display_token '\"mismatch'
+  "
   [ "$status" -eq 0 ]
-}
-
-@test "write_env: token with both quote kinds gets double-quote escapes compose unescapes" {
-  _write_env_token $'x\'y"z\\w'
-  grep -Fqx 'AUTH_TOKEN="x'\''y\"z\\w"' "$RELAY_DIR/.env"
-  _compose_sees_token $'x\'y"z\\w'
-}
-
-@test "write_env: backslash-only token needs no quoting and compose keeps it literal" {
-  _write_env_token 'a\b'
-  grep -Fqx 'AUTH_TOKEN=a\b' "$RELAY_DIR/.env"
-  _compose_sees_token 'a\b'
-}
-
-@test "write_env: empty token is written single-quoted" {
-  _write_env_token ''
-  grep -Fqx "AUTH_TOKEN=''" "$RELAY_DIR/.env"
-  _compose_sees_token ''
+  [ "$output" = '"mismatch' ]
 }
 
 @test "env: symlink at .env is replaced by a regular 600 file, target untouched, no temp files left" {
