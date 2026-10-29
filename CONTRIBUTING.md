@@ -41,7 +41,7 @@ For the deployed flavor: see `Dockerfile` and `docker-compose.prod.example.yml`.
 
 The module map below shows how a request travels from the entry point to the subprocesses the deploy and status paths run and the files the relay writes. Paths are relative to `src/`.
 
-- HTTP entry and auth: `index.ts` binds the port; `server.ts` sends `/mcp` to the MCP transport after a bearer check and everything else to the Hono app, which serves the public `GET /health` and mounts `api/routes.ts` behind bearer middleware. For `GET /api/system`, `api/routes.ts` runs `top`, `free` and `df` directly through `execSync`, not through `deploy/exec.ts`.
+- HTTP entry and auth: `index.ts` binds the port; `server.ts` sends `/mcp` to the MCP transport after a bearer check and everything else to the Hono app, which serves the public `GET /health` and mounts `api/routes.ts` behind bearer middleware. For `GET /api/system`, `api/routes.ts` runs `free` and `df` directly through `execSync`, not through `deploy/exec.ts`; the CPU value comes from `readCpuUsage()` in `services/cpu.ts`, which computes it from two `/proc/stat` samples instead of parsing `top`.
 - MCP: `mcp/server.ts` defines the 5 tools on top of the same services.
 - Services: `services/apps.ts` (app lookup, deploy, rollback, logs, status), `services/env.ts` (per-app `.env`), `services/history.ts` (deploy history), `services/upstream.ts` (remote head lookup).
 - Deploy: `deploy/engine.ts` (the deploy flow), `deploy/preflight.ts` (pre-flight checks), `deploy/exec.ts` (runs `git`, `docker` and `/bin/sh` as subprocesses).

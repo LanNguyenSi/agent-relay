@@ -68,7 +68,7 @@ Set these before running the script to customise the install:
 |----------|---------|-------------|
 | `RELAY_MODE` | `auto` | `auto` / `greenfield` / `existing-traefik` / `port-only` |
 | `RELAY_DOMAIN` | -- | FQDN the relay should serve. Required for `existing-traefik`. In `greenfield` it is needed for the TLS route but not enforced: without it, the relay is served only as plain HTTP on `RELAY_PORT`, on all interfaces unless `RELAY_BIND` is set. |
-| `TRAEFIK_EMAIL` | -- | Email for Let's Encrypt. Required in `greenfield` when `RELAY_DOMAIN` is set. Not required when `TRAEFIK_CA=self-signed`. |
+| `TRAEFIK_EMAIL` | -- | Email for Let's Encrypt. Recommended in `greenfield` when `RELAY_DOMAIN` is set and `TRAEFIK_CA` is not `self-signed`: without it the installer warns and continues, Traefik runs without an ACME resolver so Let's Encrypt issues no certificate, and the relay is served only as plain HTTP on `RELAY_PORT`. Not needed when `TRAEFIK_CA=self-signed`. |
 | `TRAEFIK_NETWORK` | `traefik-public` | Docker network of the existing Traefik (used in `existing-traefik` mode) |
 | `TRAEFIK_CERTRESOLVER` | `letsencrypt` | ACME resolver name configured on the existing Traefik |
 | `TRAEFIK_CA` | `letsencrypt` | TLS provider for greenfield Traefik. Values: `letsencrypt` (default, production LE), `staging` (LE staging CA, untrusted cert), `pebble` (custom Pebble CA at `PEBBLE_URL`), `self-signed` (Traefik built-in cert, no ACME). Only affects `greenfield` mode. |

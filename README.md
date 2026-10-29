@@ -71,7 +71,7 @@ That call runs `git pull`, pre-flight checks, `docker compose build`/`up`, and t
 
 ## Development and contributing
 
-Requires Node.js 20.19+ or 22.13+ for development (CI uses Node 22).
+Requires Node.js 20.19+, 22.13+ or 24+ for development (CI uses Node 22).
 
 ```bash
 npm install
