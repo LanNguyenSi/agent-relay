@@ -13,10 +13,10 @@ sources:
 
 # Exec trust boundary — runExec vs runShell, plus the config.health residual
 
-`src/deploy/exec.ts` exposes two ways to run a subprocess (`exec.ts:43-93`), and which one a call site uses is the whole ballgame for shell-injection exposure:
+`src/deploy/exec.ts` exposes two ways to run a subprocess (`exec.ts:43-107`), and which one a call site uses is the whole ballgame for shell-injection exposure:
 
-- **`runExec(command, args, cwd, opts?)`** — `execFile` with a discrete argument array (`exec.ts:43-76`). Each element is passed to the OS as a literal argv entry; there is no shell to break out of. The optional `opts` (`ExecOptions`: `timeoutMs`, `maxBufferBytes`) overrides the exec-level timeout and per-stream buffer cap per call; it carries no bearing on the trust boundary below, since it only tunes how long the call may run and how much output it may buffer, not what gets executed.
-- **`runShell(command, cwd, opts?)`** — `runExec("/bin/sh", ["-c", command], cwd, opts)` (`exec.ts:87-93`): the entire `command` string is handed to `/bin/sh -c`, so anything shell-metacharacter-shaped in it executes. The JSDoc states the trust boundary explicitly: only call this for `.relay.yml` fields under operator control (`pre_update`, `post_update`, `command`) — never for user-supplied or network-derived input.
+- **`runExec(command, args, cwd, opts?)`** — `execFile` with a discrete argument array (`exec.ts:43-90`). Each element is passed to the OS as a literal argv entry; there is no shell to break out of. The optional `opts` (`ExecOptions`: `timeoutMs`, `maxBufferBytes`) overrides the exec-level timeout and per-stream buffer cap per call; it carries no bearing on the trust boundary below, since it only tunes how long the call may run and how much output it may buffer, not what gets executed.
+- **`runShell(command, cwd, opts?)`** — `runExec("/bin/sh", ["-c", command], cwd, opts)` (`exec.ts:101-107`): the entire `command` string is handed to `/bin/sh -c`, so anything shell-metacharacter-shaped in it executes. The JSDoc states the trust boundary explicitly: only call this for `.relay.yml` fields under operator control (`pre_update`, `post_update`, `command`) — never for user-supplied or network-derived input.
 
 ## Where each is actually used
 

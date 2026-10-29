@@ -328,7 +328,17 @@ AGENT_RELAY_MANAGED_KEY_RE='^[[:space:]]*(export[[:space:]]+)?(AUTH_TOKEN|APPS_D
 
 # Print the auth token: the LAST AUTH_TOKEN line of <relay_dir>/.env (compose
 # env_file parsing is last-wins) with `export `, spaces around `=` and trailing
-# space removed, else a freshly generated one. Status lines go to stderr.
+# space removed, plus compose's own value parsing: an unquoted trailing
+# comment (whitespace then `#` to end of line) and ONE pair of matching
+# surrounding quotes are stripped; a quoted value keeps `#` (and everything
+# else) inside the quotes, a `#` without leading whitespace is part of the
+# value, and mismatched quotes are left alone.
+# Else a freshly generated one.
+# Note: agent_relay_write_env below writes the resolved token back to .env
+# UNQUOTED, so a token whose quoted original contains `#` or trailing
+# whitespace does not round-trip byte-for-byte; that known limitation is out
+# of scope here, and this function must not make it worse.
+# Status lines go to stderr.
 agent_relay_resolve_token() {
   local relay_dir="$1" token=""
   if [ -f "$relay_dir/.env" ]; then
@@ -337,7 +347,8 @@ agent_relay_resolve_token() {
     [ -r "$relay_dir/.env" ] || err "cannot read $relay_dir/.env; fix its owner or mode and re-run"
     token="$(grep -E '^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=' "$relay_dir/.env" \
       | tail -n 1 \
-      | sed -E 's/^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//' || true)"
+      | sed -E "s/^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=[[:space:]]*//; s/[[:space:]]+\$//; s/^([^\"'][^#]*)[[:space:]]+#.*\$/\1/; s/[[:space:]]+\$//; s/^\"([^\"]*)\"[[:space:]]*(#.*)?\$/\1/; s/^'([^']*)'[[:space:]]*(#.*)?\$/\1/" \
+      || true)"
   fi
   if [ -n "$token" ]; then
     log "Using existing auth token" >&2

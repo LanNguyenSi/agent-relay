@@ -163,6 +163,75 @@ _resolve() {
   [ "${#output}" -eq 64 ]
 }
 
+# Assert `docker compose config` parses the AUTH_TOKEN of the current
+# $RELAY_DIR/.env to exactly $1 (same value agent_relay_resolve_token printed).
+# Skipped without docker compose.
+_compose_sees_token() {
+  command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || skip "docker compose not available"
+  printf 'services:\n  x:\n    image: busybox\n    env_file: .env\n' > "$RELAY_DIR/c.yml"
+  run docker compose -f "$RELAY_DIR/c.yml" config
+  [ "$status" -eq 0 ]
+  seen="$(printf '%s\n' "$output" | sed -n 's/^ *AUTH_TOKEN: *//p')"
+  seen="${seen#\"}"; seen="${seen%\"}"
+  seen="${seen#\'}"; seen="${seen%\'}"
+  [ "$seen" = "$1" ]
+}
+
+@test "resolve_token: double-quoted value, one pair of quotes stripped" {
+  printf 'AUTH_TOKEN="qtok"\n' > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = "qtok" ]
+  _compose_sees_token qtok
+}
+
+@test "resolve_token: single-quoted value, one pair of quotes stripped" {
+  printf "AUTH_TOKEN='stok'\n" > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = "stok" ]
+  _compose_sees_token stok
+}
+
+@test "resolve_token: unquoted trailing comment stripped" {
+  printf 'AUTH_TOKEN=ctok # note\n' > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = "ctok" ]
+  _compose_sees_token ctok
+}
+
+@test "resolve_token: quoted token plus trailing comment, both stripped" {
+  printf 'AUTH_TOKEN="qtok" # note\n' > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = "qtok" ]
+  _compose_sees_token qtok
+}
+
+@test "resolve_token: hash without leading whitespace stays part of the token" {
+  printf 'AUTH_TOKEN=tok#nocomment\n' > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = "tok#nocomment" ]
+  _compose_sees_token 'tok#nocomment'
+}
+
+@test "resolve_token: quoted value with a space keeps the space" {
+  printf 'AUTH_TOKEN="a b"\n' > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = "a b" ]
+  _compose_sees_token "a b"
+}
+
+@test "resolve_token: quoted value keeps # inside the quotes" {
+  printf 'AUTH_TOKEN="a #b"\n' > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = "a #b" ]
+  _compose_sees_token "a #b"
+}
+
+@test "resolve_token: mismatched quote is left alone" {
+  printf 'AUTH_TOKEN="mismatch\n' > "$RELAY_DIR/.env"
+  _resolve
+  [ "$output" = '"mismatch' ]
+}
+
 @test "env: symlink at .env is replaced by a regular 600 file, target untouched, no temp files left" {
   printf 'SECRET=target\n' > "$RELAY_DIR/target"
   chmod 644 "$RELAY_DIR/target"
