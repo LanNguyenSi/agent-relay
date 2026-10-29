@@ -83,7 +83,7 @@ describe("runShell", () => {
   });
 });
 
-describe("runExec — spawn errors surface in stderr", () => {
+describe("runExec: spawn errors surface in stderr", () => {
   it("appends the spawn error message for a nonexistent cwd", async () => {
     const result = await runExec("node", ["-e", "process.exit(0)"], "/nonexistent-cwd-dir-xyz");
     expect(result.exitCode).toBe(1);
@@ -115,7 +115,7 @@ describe("runExec — spawn errors surface in stderr", () => {
   });
 });
 
-describe("runExec — non-spawn outcomes keep stderr untouched", () => {
+describe("runExec: non-spawn outcomes keep stderr untouched", () => {
   it("does not append any error message for a numeric exit code", async () => {
     const result = await runExec(
       "node",
