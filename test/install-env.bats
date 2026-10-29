@@ -172,8 +172,15 @@ _compose_sees_token() {
   run docker compose -f "$RELAY_DIR/c.yml" config
   [ "$status" -eq 0 ]
   seen="$(printf '%s\n' "$output" | sed -n 's/^ *AUTH_TOKEN: *//p')"
+  dq=0
+  case "$seen" in '"'*'"') dq=1 ;; esac
   seen="${seen#\"}"; seen="${seen%\"}"
   seen="${seen#\'}"; seen="${seen%\'}"
+  if [ "$dq" = 1 ]; then
+    # YAML escapes a real tab as \t inside double quotes; the only control
+    # character these tests put in a token is the tab.
+    seen="${seen//\\t/$'\t'}"
+  fi
   [ "$seen" = "$1" ]
 }
 
@@ -230,6 +237,87 @@ _compose_sees_token() {
   printf 'AUTH_TOKEN="mismatch\n' > "$RELAY_DIR/.env"
   _resolve
   [ "$output" = '"mismatch' ]
+}
+
+# Full re-run round-trip: $1 is the raw AUTH_TOKEN line of .env, $2 the token
+# agent_relay_resolve_token must print, $3 the exact AUTH_TOKEN value
+# agent_relay_write_env must write (quoting applied). compose must then read $2
+# back from the written file (skipped without docker compose), so a re-run
+# never changes the token the container sees.
+_roundtrip() {
+  printf '%s\n' "$1" > "$RELAY_DIR/.env"
+  run bash -c "
+    umask 022
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    AUTH_TOKEN=\$(agent_relay_resolve_token '${RELAY_DIR}' 2>/dev/null)
+    RELAY_PORT=8222
+    agent_relay_write_env '${RELAY_DIR}'
+    printf 'TOKEN=%s' \"\$AUTH_TOKEN\"
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "TOKEN=$2" ]
+  grep -Fqx "AUTH_TOKEN=$3" "$RELAY_DIR/.env"
+  _compose_sees_token "$2"
+}
+
+@test "round-trip: plain token stays unquoted in the written file" {
+  _roundtrip 'AUTH_TOKEN=tok123' 'tok123' 'tok123'
+}
+
+@test "round-trip: token with # and a space is single-quoted on write-back" {
+  _roundtrip 'AUTH_TOKEN="a #b"' 'a #b' "'a #b'"
+}
+
+@test "round-trip: token with a leading space stays quoted on write-back" {
+  _roundtrip 'AUTH_TOKEN=" lead"' ' lead' "' lead'"
+}
+
+@test "round-trip: token with a trailing space stays quoted on write-back" {
+  _roundtrip 'AUTH_TOKEN="trail "' 'trail ' "'trail '"
+}
+
+@test "round-trip: token with a double quote is single-quoted on write-back" {
+  _roundtrip "AUTH_TOKEN='x\"y'" 'x"y' "'x\"y'"
+}
+
+@test "round-trip: token with = is single-quoted on write-back" {
+  _roundtrip 'AUTH_TOKEN="p=q"' 'p=q' "'p=q'"
+}
+
+@test "round-trip: token with a single quote is double-quoted on write-back" {
+  _roundtrip "AUTH_TOKEN=\"to'k\"" "to'k" "\"to'k\""
+}
+
+@test "round-trip: tab before # is value, not a comment, and stays quoted on write-back" {
+  _roundtrip $'AUTH_TOKEN=a\t#c' $'a\t#c' $'\x27a\t#c\x27'
+}
+
+# Write .env with AUTH_TOKEN=$1 (no resolve step), then assert.
+_write_env_token() {
+  run env AUTH_TOKEN="$1" RELAY_PORT=8222 bash -c "
+    umask 022
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    agent_relay_write_env '${RELAY_DIR}'
+  " 2>&1
+  [ "$status" -eq 0 ]
+}
+
+@test "write_env: token with both quote kinds gets double-quote escapes compose unescapes" {
+  _write_env_token $'x\'y"z\\w'
+  grep -Fqx 'AUTH_TOKEN="x'\''y\"z\\w"' "$RELAY_DIR/.env"
+  _compose_sees_token $'x\'y"z\\w'
+}
+
+@test "write_env: backslash-only token needs no quoting and compose keeps it literal" {
+  _write_env_token 'a\b'
+  grep -Fqx 'AUTH_TOKEN=a\b' "$RELAY_DIR/.env"
+  _compose_sees_token 'a\b'
+}
+
+@test "write_env: empty token is written single-quoted" {
+  _write_env_token ''
+  grep -Fqx "AUTH_TOKEN=''" "$RELAY_DIR/.env"
+  _compose_sees_token ''
 }
 
 @test "env: symlink at .env is replaced by a regular 600 file, target untouched, no temp files left" {

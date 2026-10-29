@@ -329,15 +329,15 @@ AGENT_RELAY_MANAGED_KEY_RE='^[[:space:]]*(export[[:space:]]+)?(AUTH_TOKEN|APPS_D
 # Print the auth token: the LAST AUTH_TOKEN line of <relay_dir>/.env (compose
 # env_file parsing is last-wins) with `export `, spaces around `=` and trailing
 # space removed, plus compose's own value parsing: an unquoted trailing
-# comment (whitespace then `#` to end of line) and ONE pair of matching
-# surrounding quotes are stripped; a quoted value keeps `#` (and everything
-# else) inside the quotes, a `#` without leading whitespace is part of the
-# value, and mismatched quotes are left alone.
+# comment (a space then `#` to end of line; compose treats a `#` preceded
+# only by a tab as value, so only a literal space starts a comment) and ONE
+# pair of matching surrounding quotes are stripped; a quoted value keeps `#`
+# (and everything else) inside the quotes, a `#` not preceded by a space is
+# part of the value, and mismatched quotes are left alone.
 # Else a freshly generated one.
-# Note: agent_relay_write_env below writes the resolved token back to .env
-# UNQUOTED, so a token whose quoted original contains `#` or trailing
-# whitespace does not round-trip byte-for-byte; that known limitation is out
-# of scope here, and this function must not make it worse.
+# Note: agent_relay_write_env below re-quotes the token it writes back when
+# compose env_file parsing would not read a bare value back unchanged, so the
+# token the container sees survives a re-run (see its comment).
 # Status lines go to stderr.
 agent_relay_resolve_token() {
   local relay_dir="$1" token=""
@@ -347,7 +347,7 @@ agent_relay_resolve_token() {
     [ -r "$relay_dir/.env" ] || err "cannot read $relay_dir/.env; fix its owner or mode and re-run"
     token="$(grep -E '^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=' "$relay_dir/.env" \
       | tail -n 1 \
-      | sed -E "s/^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=[[:space:]]*//; s/[[:space:]]+\$//; s/^([^\"'][^#]*)[[:space:]]+#.*\$/\1/; s/[[:space:]]+\$//; s/^\"([^\"]*)\"[[:space:]]*(#.*)?\$/\1/; s/^'([^']*)'[[:space:]]*(#.*)?\$/\1/" \
+      | sed -E "s/^[[:space:]]*(export[[:space:]]+)?AUTH_TOKEN[[:space:]]*=[[:space:]]*//; s/[[:space:]]+\$//; s/^([^\"'][^#]*) +#.*\$/\1/; s/[[:space:]]+\$//; s/^\"([^\"]*)\"[[:space:]]*(#.*)?\$/\1/; s/^'([^']*)'[[:space:]]*(#.*)?\$/\1/" \
       || true)"
   fi
   if [ -n "$token" ]; then
@@ -370,8 +370,16 @@ agent_relay_resolve_token() {
 #   (AUTH_TOKEN, APPS_DIR, PORT) are written AFTER them with the installer's
 #   values: compose env_file parsing is last-wins, and a managed key repeated
 #   in the old file is dropped as well. The merge is line-based.
+# - The AUTH_TOKEN value is written bare when compose env_file parsing reads
+#   it back unchanged and quoted otherwise: quoting is needed when the value
+#   contains whitespace, `#`, a single or double quote, `=` or is empty. The
+#   quote form is single quotes (literal for compose), or double quotes with
+#   `\` and `"` escaped only when the value itself contains a single quote
+#   (compose unescapes backslash escapes inside double quotes, so every `\`
+#   is doubled and a bare `"` can never appear). A generated hex token needs
+#   no quoting and the written line stays byte-identical to before.
 agent_relay_write_env() {
-  local relay_dir="$1" env_file tmp extra=""
+  local relay_dir="$1" env_file tmp extra="" tok
   env_file="$relay_dir/.env"
   chmod 700 "$relay_dir"
   if [ -f "$env_file" ]; then
@@ -379,10 +387,22 @@ agent_relay_write_env() {
     # grep exits 1 when nothing is kept (fine); any other status is a read error.
     extra="$(grep -vE "$AGENT_RELAY_MANAGED_KEY_RE" "$env_file")" || [ $? -eq 1 ] || return 1
   fi
+  tok="$AUTH_TOKEN"
+  case "$tok" in
+    *[[:space:]]* | *'#'* | *'"'* | *"'"* | *=* | '')
+      if [[ "$tok" == *"'"* ]]; then
+        tok="${tok//\\/\\\\}"
+        tok="${tok//\"/\\\"}"
+        tok="\"$tok\""
+      else
+        tok="'$tok'"
+      fi
+      ;;
+  esac
   tmp="$(umask 077 && mktemp "$relay_dir/.env.XXXXXX")" || return 1
   if ! {
     if [ -n "$extra" ]; then printf '%s\n' "$extra"; fi
-    printf 'AUTH_TOKEN=%s\nAPPS_DIR=/apps\nPORT=%s\n' "$AUTH_TOKEN" "$RELAY_PORT"
+    printf 'AUTH_TOKEN=%s\nAPPS_DIR=/apps\nPORT=%s\n' "$tok" "$RELAY_PORT"
   } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$env_file"; then
     rm -f "$tmp"
     return 1
