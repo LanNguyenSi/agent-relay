@@ -137,11 +137,11 @@ api.post("/apps/:name/deploy", async (c) => {
     // check-then-act gap and surfacing only later as an SSE `error` event
     // once deploy() takes its own lock. This route-level hold is shared like
     // deploy()'s own (shared acquires stack, so parallel deploys of
-    // different apps still do not block each other), is released on EVERY
-    // exit: a 404/409 return, a rethrow, the stream's finally, and a client
-    // cancel. A release after the stream opened is idempotent, so
-    // cancel() and the finally can both run for one request. A conflict at
-    // acquire time maps to the same 409 the non-stream path returns.
+    // different apps still do not block each other) and is released on every
+    // exit: the config-phase catch (404/409 return or rethrow) and the
+    // stream's finally. A client cancel is NOT an exit: the deploy keeps
+    // running to its end, cancel() only stops sends, and the finally
+    // releases the lock once it settles. An acquire conflict is a 409.
     let releaseStreamLock: (() => void) | undefined;
     try {
       releaseStreamLock = apps.acquireOperationLock("deploy", name);
@@ -182,11 +182,11 @@ api.post("/apps/:name/deploy", async (c) => {
           if (!cancelled) controller.close();
         },
         cancel() {
-          // Client hung up: release the route-side lock now (the engine's own
-          // deploy lock still guards any deploy already running), stop send()
-          // from enqueuing into the cancelled controller, and skip close().
+          // Client hung up: stop send() from enqueuing into the cancelled
+          // controller and skip close(). The route-side lock is NOT released
+          // here: the deploy keeps running to its end, and the stream's
+          // finally releases it once the deploy settles.
           cancelled = true;
-          releaseStreamLock?.();
         },
       }),
       {
