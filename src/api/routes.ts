@@ -126,19 +126,38 @@ api.post("/apps/:name/deploy", async (c) => {
     // throws. Doing the same config resolution `deployAppStreaming` does
     // internally (safeAppDir + loadRelayConfig) up front lets an unknown app /
     // invalid config return the same 404 the non-streaming path returns.
+    //
+    // The shared operation lock is taken in the same synchronous tick as the
+    // conflict check, before the config awaits below: acquireOperationLock
+    // performs the check itself (it runs assertOperationAllowed first), so
+    // there is no gap between "is a self-update active?" and "the lock is
+    // mine". A self-update that arrives while this handler awaits
+    // safeAppDir/loadRelayConfig therefore finds the lock held and is refused
+    // with 409 by POST /api/self-update, instead of slipping into the old
+    // check-then-act gap and surfacing only later as an SSE `error` event
+    // once deploy() takes its own lock. This route-level hold is shared like
+    // deploy()'s own (shared acquires stack, so parallel deploys of
+    // different apps still do not block each other), is released on EVERY
+    // exit: a 404/409 return, a rethrow, the stream's finally, and a client
+    // cancel. A release after the stream opened is idempotent, so
+    // cancel() and the finally can both run for one request. A conflict at
+    // acquire time maps to the same 409 the non-stream path returns.
+    let releaseStreamLock: (() => void) | undefined;
     try {
-      apps.assertOperationAllowed("deploy");
+      releaseStreamLock = apps.acquireOperationLock("deploy", name);
       const dir = await apps.safeAppDir(name); await loadRelayConfig(dir);
     } catch (err) {
+      releaseStreamLock?.();
       if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
       if (err instanceof apps.DeployConflictError) return c.json({ error: err.message }, 409); throw err;
     }
-
+    let cancelled = false;
     return new Response(
       new ReadableStream({
         async start(controller) {
           const encoder = new TextEncoder();
           function send(event: string, data: unknown) {
+            if (cancelled) return;
             controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
           }
 
@@ -157,9 +176,17 @@ api.post("/apps/:name/deploy", async (c) => {
             }
           } catch (err) {
             send("error", { message: err instanceof Error ? err.message : String(err) });
+          } finally {
+            releaseStreamLock?.();
           }
-
-          controller.close();
+          if (!cancelled) controller.close();
+        },
+        cancel() {
+          // Client hung up: release the route-side lock now (the engine's own
+          // deploy lock still guards any deploy already running), stop send()
+          // from enqueuing into the cancelled controller, and skip close().
+          cancelled = true;
+          releaseStreamLock?.();
         },
       }),
       {
