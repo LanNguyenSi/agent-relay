@@ -11,7 +11,7 @@ description: >-
   in docs/operations.md's Deploy lifecycle section; README.md keeps only a
   pointer to it.
 tags: [health-check, dead-code, docs-drift, deploy]
-timestamp: 2026-10-28T06:18:43Z
+timestamp: 2026-10-31T14:37:19Z
 sources:
   - src/deploy/engine.ts
   - docs/operations.md
@@ -22,7 +22,9 @@ sources:
 ## `engine.ts`'s inline `runHealthCheck` — what gates every deploy
 
 `runHealthCheck` (`engine.ts`, called from both `defaultFlowDeploy` and
-`customCommandDeploy`) is the only health check that runs during a deploy:
+`customCommandDeploy`, and again from `rollbackIfEnabled` after a rollback's
+`compose up`, as step `rollback: health check`, against the pre-deploy config)
+is the only health check that runs during a deploy:
 
 - **Fixed retry count and delay**: `maxRetries = 5`, flat `delayMs = 5000`
   between attempts (`0` under `NODE_ENV=test`) — no exponential backoff.
