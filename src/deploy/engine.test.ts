@@ -988,7 +988,7 @@ describe("deploy — auto-rollback preflight gate", () => {
 // health check a regular deploy gets, and an unhealthy rollback is reported
 // loudly. The deploy result is a failure in every case (the deploy itself
 // failed); the rollback health step only says whether the site is back.
-describe("deploy — auto-rollback health check", () => {
+describe("deploy: auto-rollback health check", () => {
   const preDeploy: RelayConfig = {
     ...baseConfig,
     health: "/old-health",

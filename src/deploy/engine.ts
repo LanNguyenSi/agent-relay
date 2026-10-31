@@ -640,7 +640,7 @@ async function rollbackIfEnabled(
     stepName: "rollback: health check",
     successPrefix: `Rollback healthy (commit ${commitSha}): `,
     failurePrefix:
-      `ROLLBACK UNHEALTHY — the working tree was reset to ${commitSha} and the previous ` +
+      `ROLLBACK UNHEALTHY: the working tree was reset to ${commitSha} and the previous ` +
       `stack was rebuilt and started, but it does not pass its health check; the site ` +
       `may be down. Probe and container-log excerpt:\n`,
   });
