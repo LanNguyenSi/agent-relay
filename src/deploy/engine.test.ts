@@ -1117,33 +1117,97 @@ describe("deploy: auto-rollback health check", () => {
     expect(rbHealth?.output).toContain("no running service was reachable to probe");
   });
 
-  it("probes with the pre-deploy health path, port and compose_file, not the post-pull ones", async () => {
-    mockLoadRelayConfig.mockResolvedValue(postPull);
-    // Only the pre-deploy endpoint answers: any probe built from the
-    // post-pull config (new path, port 4100, new.yml) fails.
-    const state = mockStack(
-      (p) =>
-        p.snippet.includes("localhost:3100/old-health") && p.composeFile === "old.yml",
-    );
+  // Every pull-path trigger that reaches the rollback must health-check the
+  // rolled-back stack with the PRE-deploy config. Pre-deploy and post-pull
+  // configs differ in health path, health_port and compose_file, and only the
+  // pre-deploy endpoint answers, so a probe built from the post-pull config
+  // fails the step.
+  type ForwardFailure = {
+    trigger: string;
+    post: RelayConfig;
+    setup: () => void;
+    overrides?: (command: string, args: string[]) => { stdout: string; stderr: string; exitCode: number } | undefined;
+    forwardProbes: boolean;
+  };
+  const failures: ForwardFailure[] = [
+    {
+      trigger: "reload .relay.yml fails",
+      post: postPull,
+      setup: () => {
+        mockLoadRelayConfig.mockRejectedValue(new Error("broken .relay.yml"));
+      },
+      forwardProbes: false,
+    },
+    {
+      trigger: "compose build fails",
+      post: postPull,
+      setup: () => {},
+      overrides: (command, args) =>
+        command === "docker" && args.includes("build") && args.includes("new.yml")
+          ? { stdout: "", stderr: "build broke", exitCode: 1 }
+          : undefined,
+      forwardProbes: false,
+    },
+    {
+      trigger: "compose up fails",
+      post: postPull,
+      setup: () => {},
+      overrides: (command, args) =>
+        command === "docker" && args.includes("up") && args.includes("new.yml")
+          ? { stdout: "", stderr: "up broke", exitCode: 1 }
+          : undefined,
+      forwardProbes: false,
+    },
+    {
+      trigger: "post_update fails",
+      post: { ...postPull, post_update: ["./migrate.sh"] },
+      setup: () => {
+        mockRunShell.mockResolvedValue({ stdout: "", stderr: "migrate broke", exitCode: 1 });
+      },
+      forwardProbes: false,
+    },
+    {
+      trigger: "forward health check fails",
+      post: postPull,
+      setup: () => {},
+      forwardProbes: true,
+    },
+  ];
 
-    const result = await deploy({ appDir: "/app", config: preDeploy });
+  it.each(failures)(
+    "probes with the pre-deploy health path, port and compose_file, not the post-pull ones: $trigger",
+    async ({ post, setup, overrides, forwardProbes }) => {
+      mockLoadRelayConfig.mockResolvedValue(post);
+      setup();
+      const state = mockStack(
+        (p) => p.snippet.includes("localhost:3100/old-health") && p.composeFile === "old.yml",
+        overrides,
+      );
 
-    expect(result.steps.find((s) => s.name === "rollback: health check")?.status).toBe("success");
-    const afterReset = state.probes.filter((p) => p.afterReset);
-    expect(afterReset.length).toBeGreaterThan(0);
-    for (const p of afterReset) {
-      expect(p.snippet).toContain("localhost:3100/old-health");
-      expect(p.snippet).not.toContain("new-health");
-      expect(p.composeFile).toBe("old.yml");
-    }
-    // The forward deploy's own check still used the post-pull config.
-    const forward = state.probes.filter((p) => !p.afterReset);
-    expect(forward.length).toBeGreaterThan(0);
-    for (const p of forward) {
-      expect(p.snippet).toContain("localhost:4100/new-health");
-      expect(p.composeFile).toBe("new.yml");
-    }
-  });
+      const result = await deploy({ appDir: "/app", config: preDeploy });
+
+      expect(result.success).toBe(false);
+      expect(result.steps.find((s) => s.name === "rollback: health check")?.status).toBe("success");
+      const afterReset = state.probes.filter((p) => p.afterReset);
+      expect(afterReset.length).toBeGreaterThan(0);
+      for (const p of afterReset) {
+        expect(p.snippet).toContain("localhost:3100/old-health");
+        expect(p.snippet).not.toContain("new-health");
+        expect(p.composeFile).toBe("old.yml");
+      }
+      const forward = state.probes.filter((p) => !p.afterReset);
+      if (forwardProbes) {
+        // The forward deploy's own check still used the post-pull config.
+        expect(forward.length).toBeGreaterThan(0);
+        for (const p of forward) {
+          expect(p.snippet).toContain("localhost:4100/new-health");
+          expect(p.composeFile).toBe("new.yml");
+        }
+      } else {
+        expect(forward).toHaveLength(0);
+      }
+    },
+  );
 
   it("no health endpoint configured: skipped step with a note, no probe, no failure of the rollback", async () => {
     // The schema requires a non-empty `health`; this pins the defensive branch.
@@ -1181,6 +1245,31 @@ describe("deploy: auto-rollback health check", () => {
 
     expect(result.success).toBe(false);
     expect(result.steps.find((s) => s.name === "rollback: compose up")?.status).toBe("failure");
+    expect(result.steps.find((s) => s.name === "rollback: health check")).toBeUndefined();
+    expect(state.psAfterReset).toBe(0);
+  });
+
+  it("rollback compose build failure: no health check runs", async () => {
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    const state = mockStack(
+      () => false,
+      (command, args) => {
+        if (
+          command === "docker" &&
+          args.includes("build") &&
+          args.includes("old.yml")
+        ) {
+          return { stdout: "", stderr: "cannot build", exitCode: 1 };
+        }
+        return undefined;
+      },
+    );
+
+    const result = await deploy({ appDir: "/app", config: preDeploy });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.find((s) => s.name === "rollback: compose build")?.status).toBe("failure");
+    expect(result.steps.find((s) => s.name === "rollback: compose up")).toBeUndefined();
     expect(result.steps.find((s) => s.name === "rollback: health check")).toBeUndefined();
     expect(state.psAfterReset).toBe(0);
   });
