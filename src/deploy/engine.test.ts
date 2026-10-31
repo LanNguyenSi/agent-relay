@@ -180,12 +180,13 @@ describe("deploy — default flow", () => {
 
     expect(result.success).toBe(false);
     const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
-    expect(rollbackSteps.length).toBe(4);
+    expect(rollbackSteps.length).toBe(5);
     expect(rollbackSteps.map((s) => s.name)).toEqual([
       "rollback: git reset",
       "rollback: preflight",
       "rollback: compose build",
       "rollback: compose up",
+      "rollback: health check",
     ]);
   });
 
@@ -319,6 +320,7 @@ describe("deploy — default flow", () => {
       "rollback: preflight",
       "rollback: compose build",
       "rollback: compose up",
+      "rollback: health check",
     ];
     for (const name of rollbackNames) {
       expect(seen).toContain(name);
@@ -474,7 +476,7 @@ describe("deploy — default flow", () => {
       expect(result.success).toBe(false);
       // Pre-pull rollback=true wins: rollback steps must fire
       const rollbackSteps = result.steps.filter((s) => s.name.startsWith("rollback:"));
-      expect(rollbackSteps.length).toBe(4);
+      expect(rollbackSteps.length).toBe(5);
       // Verify the skipped-rollback branch did NOT fire (would have produced
       // a single "rollback" step with status=skipped)
       expect(result.steps.find((s) => s.name === "rollback" && s.status === "skipped"))
@@ -960,8 +962,12 @@ describe("deploy — auto-rollback preflight gate", () => {
       "rollback: preflight",
       "rollback: compose build",
       "rollback: compose up",
+      "rollback: health check",
     ]);
-    expect(rollbackSteps.every((s) => s.status === "success")).toBe(true);
+    // Everything up to the restart succeeded; this mock keeps every health
+    // probe failing, so the rollback's own health check is the one failure.
+    expect(rollbackSteps.slice(0, 4).every((s) => s.status === "success")).toBe(true);
+    expect(rollbackSteps[4]?.status).toBe("failure");
 
     // Rollback preflight must be gated by exactly the two critical checks —
     // apps_root_mount_congruence ("pre-pull" bucket) and
@@ -975,6 +981,266 @@ describe("deploy — auto-rollback preflight gate", () => {
       "apps_root_mount_congruence",
       "compose_bind_mount_sources_exist",
     ]);
+  });
+});
+
+// After an auto-rollback restored the old stack, that stack gets the same
+// health check a regular deploy gets, and an unhealthy rollback is reported
+// loudly. The deploy result is a failure in every case (the deploy itself
+// failed); the rollback health step only says whether the site is back.
+describe("deploy — auto-rollback health check", () => {
+  const preDeploy: RelayConfig = {
+    ...baseConfig,
+    health: "/old-health",
+    health_port: 3100,
+    compose_file: "old.yml",
+  };
+  const postPull: RelayConfig = {
+    ...baseConfig,
+    health: "/new-health",
+    health_port: 4100,
+    compose_file: "new.yml",
+  };
+
+  interface ExecProbe {
+    rolledBack: boolean;
+    probes: Array<{ afterReset: boolean; composeFile: string; snippet: string }>;
+    psAfterReset: number;
+  }
+
+  /**
+   * Stateful exec mock. `healthy(probe)` decides whether a health probe
+   * (docker compose exec ... node -e) answers; everything else succeeds.
+   * `rolledBack` flips when `git reset` is seen, so probes can be told apart
+   * into the forward deploy's and the rollback's.
+   */
+  function mockStack(
+    healthy: (p: { afterReset: boolean; composeFile: string; snippet: string }) => boolean,
+    overrides: (command: string, args: string[]) => { stdout: string; stderr: string; exitCode: number } | undefined = () => undefined,
+  ): ExecProbe {
+    const state: ExecProbe = { rolledBack: false, probes: [], psAfterReset: 0 };
+    mockRunExec.mockImplementation(async (command, args) => {
+      const override = overrides(command, args);
+      if (override) return override;
+      if (command === "git" && args.includes("reset")) {
+        state.rolledBack = true;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        if (state.rolledBack) state.psAfterReset += 1;
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        const probe = {
+          afterReset: state.rolledBack,
+          composeFile: args[args.indexOf("-f") + 1] ?? "",
+          snippet: args.at(-1) ?? "",
+        };
+        state.probes.push(probe);
+        return healthy(probe)
+          ? { stdout: "HTTP_STATUS=200", stderr: "", exitCode: 0 }
+          : { stdout: "HTTP_STATUS=503", stderr: "", exitCode: 1 };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        return { stdout: "app  | rolled-back container log line\n", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+    return state;
+  }
+
+  it("healthy rollback: health step succeeds, deploy result is still a failure", async () => {
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    // Forward deploy (post-pull config) is unhealthy; the old stack is fine.
+    mockStack((p) => p.afterReset);
+    const seen: string[] = [];
+
+    const result = await deploy({ appDir: "/app", config: preDeploy, onStep: (s) => seen.push(s.name) });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.find((s) => s.name === "health check")?.status).toBe("failure");
+    const rbHealth = result.steps.find((s) => s.name === "rollback: health check");
+    expect(rbHealth?.status).toBe("success");
+    expect(rbHealth?.output).toContain("Rollback healthy");
+    expect(rbHealth?.output).toContain("/old-health");
+    expect(rbHealth?.output).not.toContain("UNHEALTHY");
+    // Health check is the last step, after the restart.
+    expect(result.steps.at(-1)?.name).toBe("rollback: health check");
+    expect(result.steps.map((s) => s.name).indexOf("rollback: health check")).toBeGreaterThan(
+      result.steps.map((s) => s.name).indexOf("rollback: compose up"),
+    );
+    // Streamed too, so an SSE listener sees it before `done`.
+    expect(seen).toEqual(result.steps.map((s) => s.name));
+  });
+
+  it("unhealthy rollback: failed step says the site may be down, with probe detail and log excerpt", async () => {
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    const state = mockStack(() => false);
+
+    const result = await deploy({ appDir: "/app", config: preDeploy });
+
+    expect(result.success).toBe(false);
+    const rbHealth = result.steps.find((s) => s.name === "rollback: health check");
+    expect(rbHealth?.status).toBe("failure");
+    expect(rbHealth?.output).toContain("ROLLBACK UNHEALTHY");
+    expect(rbHealth?.output).toContain("site may be down");
+    expect(rbHealth?.output).toContain("abc123"); // names the commit it rolled back to
+    expect(rbHealth?.output).toContain("HTTP_STATUS=503"); // last probe
+    expect(rbHealth?.output).toContain("old-health");
+    expect(rbHealth?.output).toContain("rolled-back container log line"); // log excerpt
+    // Same retry behaviour as the deploy check: 5 attempts, one service, one port.
+    expect(state.psAfterReset).toBe(5);
+    expect(state.probes.filter((p) => p.afterReset)).toHaveLength(5);
+    // The rollback failure did not turn into a second rollback or a success.
+    expect(result.steps.filter((s) => s.name === "rollback: git reset")).toHaveLength(1);
+  });
+
+  it("unhealthy rollback with no running service reports it instead of probing", async () => {
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    mockStack(() => false, (command, args) =>
+      command === "docker" && args.includes("--status")
+        ? { stdout: "", stderr: "", exitCode: 0 }
+        : undefined,
+    );
+
+    const result = await deploy({ appDir: "/app", config: preDeploy });
+
+    const rbHealth = result.steps.find((s) => s.name === "rollback: health check");
+    expect(rbHealth?.status).toBe("failure");
+    expect(rbHealth?.output).toContain("ROLLBACK UNHEALTHY");
+    expect(rbHealth?.output).toContain("no running service was reachable to probe");
+  });
+
+  it("probes with the pre-deploy health path, port and compose_file, not the post-pull ones", async () => {
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    // Only the pre-deploy endpoint answers: any probe built from the
+    // post-pull config (new path, port 4100, new.yml) fails.
+    const state = mockStack(
+      (p) =>
+        p.snippet.includes("localhost:3100/old-health") && p.composeFile === "old.yml",
+    );
+
+    const result = await deploy({ appDir: "/app", config: preDeploy });
+
+    expect(result.steps.find((s) => s.name === "rollback: health check")?.status).toBe("success");
+    const afterReset = state.probes.filter((p) => p.afterReset);
+    expect(afterReset.length).toBeGreaterThan(0);
+    for (const p of afterReset) {
+      expect(p.snippet).toContain("localhost:3100/old-health");
+      expect(p.snippet).not.toContain("new-health");
+      expect(p.composeFile).toBe("old.yml");
+    }
+    // The forward deploy's own check still used the post-pull config.
+    const forward = state.probes.filter((p) => !p.afterReset);
+    expect(forward.length).toBeGreaterThan(0);
+    for (const p of forward) {
+      expect(p.snippet).toContain("localhost:4100/new-health");
+      expect(p.composeFile).toBe("new.yml");
+    }
+  });
+
+  it("no health endpoint configured: skipped step with a note, no probe, no failure of the rollback", async () => {
+    // The schema requires a non-empty `health`; this pins the defensive branch.
+    const noHealth: RelayConfig = { ...preDeploy, health: "  " };
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    const state = mockStack((p) => p.afterReset);
+
+    const result = await deploy({ appDir: "/app", config: noHealth });
+
+    expect(result.success).toBe(false);
+    const rbHealth = result.steps.find((s) => s.name === "rollback: health check");
+    expect(rbHealth?.status).toBe("skipped");
+    expect(rbHealth?.output).toContain("No health endpoint configured");
+    expect(state.probes.filter((p) => p.afterReset)).toHaveLength(0);
+    expect(state.psAfterReset).toBe(0);
+  });
+
+  it("rollback compose up failure: no health check runs", async () => {
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    const state = mockStack(
+      () => false,
+      (command, args) => {
+        if (
+          command === "docker" &&
+          args.includes("up") &&
+          args.includes("old.yml")
+        ) {
+          return { stdout: "", stderr: "cannot start", exitCode: 1 };
+        }
+        return undefined;
+      },
+    );
+
+    const result = await deploy({ appDir: "/app", config: preDeploy });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.find((s) => s.name === "rollback: compose up")?.status).toBe("failure");
+    expect(result.steps.find((s) => s.name === "rollback: health check")).toBeUndefined();
+    expect(state.psAfterReset).toBe(0);
+  });
+
+  it("blocked rollback preflight: no health check runs (existing behaviour unchanged)", async () => {
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    mockRunPreflightChecks.mockImplementation(async (opts) =>
+      opts.phase === "all"
+        ? { passed: false, checks: [{ name: "apps_root_mount_congruence", passed: false, message: "mismatch", critical: true }] }
+        : { passed: true, checks: [] },
+    );
+    const state = mockStack((p) => p.afterReset);
+
+    const result = await deploy({ appDir: "/app", config: preDeploy });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.find((s) => s.name === "rollback: preflight")?.status).toBe("failure");
+    expect(result.steps.find((s) => s.name === "rollback: health check")).toBeUndefined();
+    expect(state.psAfterReset).toBe(0);
+  });
+
+  it("rollback disabled: no rollback steps and no rollback health check", async () => {
+    const noRollback: RelayConfig = { ...preDeploy, rollback: false };
+    mockLoadRelayConfig.mockResolvedValue(postPull);
+    mockStack(() => false);
+
+    const result = await deploy({ appDir: "/app", config: noRollback });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.find((s) => s.name === "rollback")?.status).toBe("skipped");
+    expect(result.steps.find((s) => s.name === "rollback: health check")).toBeUndefined();
+  });
+
+  it("custom command flow: rollback after a failed health check is health-checked with the pre-command config", async () => {
+    const preCommand: RelayConfig = { ...preDeploy, command: "./deploy.sh" };
+    mockLoadRelayConfig.mockResolvedValue({ ...postPull, command: "./deploy.sh" });
+    const state = mockStack((p) => p.afterReset);
+
+    const result = await deploy({ appDir: "/app", config: preCommand });
+
+    expect(result.success).toBe(false);
+    const rbHealth = result.steps.find((s) => s.name === "rollback: health check");
+    expect(rbHealth?.status).toBe("success");
+    for (const p of state.probes.filter((x) => x.afterReset)) {
+      expect(p.snippet).toContain("localhost:3100/old-health");
+      expect(p.composeFile).toBe("old.yml");
+    }
+  });
+
+  it("custom command flow: unhealthy rollback is reported as failed", async () => {
+    const preCommand: RelayConfig = { ...preDeploy, command: "./deploy.sh" };
+    mockLoadRelayConfig.mockResolvedValue({ ...postPull, command: "./deploy.sh" });
+    mockStack(() => false);
+
+    const result = await deploy({ appDir: "/app", config: preCommand });
+
+    expect(result.success).toBe(false);
+    const rbHealth = result.steps.find((s) => s.name === "rollback: health check");
+    expect(rbHealth?.status).toBe("failure");
+    expect(rbHealth?.output).toContain("site may be down");
   });
 });
 

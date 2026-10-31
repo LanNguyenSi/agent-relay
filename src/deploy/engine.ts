@@ -381,12 +381,29 @@ const HEALTH_FAILURE_LOG_MAX_CHARS = 4000;
 // whatever the in-container fetch call happened to print.
 const PROBE_DETAIL_MAX_CHARS = 300;
 
+/**
+ * Presentation of one health-check run. The deploy path uses the defaults;
+ * the auto-rollback tail passes its own step name and message prefixes so
+ * an operator reading the step list can tell a failed rollback health check
+ * from a failed deploy health check. The probing itself (retries, ports,
+ * failure log excerpt) is identical for both.
+ */
+interface HealthCheckLabels {
+  stepName?: string;
+  successPrefix?: string;
+  failurePrefix?: string;
+}
+
 async function runHealthCheck(
-  options: DeployOptions,
+  options: Pick<DeployOptions, "appDir" | "config">,
   steps: DeployStep[],
+  labels: HealthCheckLabels = {},
 ): Promise<boolean> {
   const { appDir, config } = options;
   const healthPath = config.health;
+  const stepName = labels.stepName ?? "health check";
+  const successPrefix = labels.successPrefix ?? "";
+  const failurePrefix = labels.failurePrefix ?? "";
 
   // Last probe's own result (HTTP status or the fetch error text), kept
   // across retries so a final failure can report what the LAST attempt
@@ -398,7 +415,7 @@ async function runHealthCheck(
   let lastKnownServices: string[] = [];
 
   // Try each running service with node fetch, with retries for startup time
-  const healthStep = await runStep("health check", async () => {
+  const healthStep = await runStep(stepName, async () => {
     const maxRetries = 5;
     const delayMs = process.env.NODE_ENV === "test" ? 0 : 5000;
 
@@ -435,7 +452,7 @@ async function runHealthCheck(
             PROBE_DETAIL_MAX_CHARS,
           );
           if (check.exitCode === 0) {
-            return { stdout: `Health check passed: ${service}:${port}${healthPath} (attempt ${attempt + 1})`, stderr: "", exitCode: 0 };
+            return { stdout: `${successPrefix}Health check passed: ${service}:${port}${healthPath} (attempt ${attempt + 1})`, stderr: "", exitCode: 0 };
           }
         }
       }
@@ -447,7 +464,7 @@ async function runHealthCheck(
     const containerLogs = await captureContainerLogsTail(appDir, config.compose_file, lastKnownServices);
     return {
       stdout:
-        `Health check failed: no service responded on ${healthPath} after ${maxRetries} attempts${probeDetail}\n\n` +
+        `${failurePrefix}Health check failed: no service responded on ${healthPath} after ${maxRetries} attempts${probeDetail}\n\n` +
         containerLogs,
       stderr: "",
       exitCode: 1,
@@ -523,7 +540,11 @@ async function captureContainerLogsTail(
  * forward deploy's health check just failed — an emergency restore of the
  * last-known-good containers has no business waiting on `git ls-remote` /
  * `docker compose ps` calls (each bounded by exec.ts's 300s timeout) for
- * checks that don't gate it anyway. `force: true` is kept alongside `only`
+ * checks that don't gate it anyway. After a successful `compose up` the
+ * rolled-back stack is health-checked with the pre-deploy config (step
+ * `rollback: health check`; `failure` output starts with `ROLLBACK
+ * UNHEALTHY`), and the check's outcome does not change the deploy result,
+ * which is already a failure. `force: true` is kept alongside `only`
  * for defense in depth: both remaining checks are critical, so it's
  * currently a no-op on the `passed` computation, but it keeps the intent
  * ("only critical checks gate here") explicit even if a future check name
@@ -597,6 +618,34 @@ async function rollbackIfEnabled(
     runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], appDir, stepExecOptions(config)),
   );
   emit(restartStep);
+  if (restartStep.status === "failure") return;
+
+  // The rolled-back stack gets the same health check a regular deploy gets,
+  // against the config the rollback just deployed (`config` here is the
+  // pre-deploy one: its `health` path and `health_port`), so a rollback that
+  // came up broken is reported as such instead of looking like a restored
+  // site. The overall deploy result stays a failure either way (the caller
+  // returns success: false); this step only says whether the site is back.
+  // The schema requires a non-empty `health`, so the empty case is defensive.
+  if (config.health.trim().length === 0) {
+    emit({
+      name: "rollback: health check",
+      status: "skipped",
+      output: "No health endpoint configured; the rolled-back stack was not health-checked",
+      durationMs: 0,
+    });
+    return;
+  }
+  await runHealthCheck({ appDir, config }, steps, {
+    stepName: "rollback: health check",
+    successPrefix: `Rollback healthy (commit ${commitSha}): `,
+    failurePrefix:
+      `ROLLBACK UNHEALTHY — the working tree was reset to ${commitSha} and the previous ` +
+      `stack was rebuilt and started, but it does not pass its health check; the site ` +
+      `may be down. Probe and container-log excerpt:\n`,
+  });
+  const healthStep = steps[steps.length - 1];
+  if (healthStep) onStep?.(healthStep);
 }
 
 // Cap on a DeployStep's stored `output` (stdout+stderr combined, before any
