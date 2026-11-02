@@ -64,12 +64,28 @@ export interface DeployOptions {
    * mismatch failure class) rather than merely failing the deploy.
    */
   force?: boolean;
+  /**
+   * An operation entry the caller already holds on the shared operation lock
+   * and is handing down to this deploy. The `stream=true` API route is the
+   * only such caller: it takes its own entry before opening the stream (so a
+   * self-update that arrives during the route's config resolution is the one
+   * refused) and `deploy()` then takes its own, which means two entries of
+   * this same deploy are live at prune time. Passing the route's entry here
+   * lets the prune tell "these are my own holds" from "some other operation
+   * holds the lock" (see pruneBuildCache); identity, never kind or target.
+   */
+  heldOperation?: ActiveOperation;
 }
 
 export async function deploy(
   options: DeployOptions,
 ): Promise<DeployResult | DeployBlockedResult> {
-  const release = acquireOperationLock("deploy", options.appDir);
+  // Own lock entry (not just its release closure) so the post-deploy
+  // build-cache prune can tell "the current deploy holds the lock" from
+  // "some other operation holds the lock" (see pruneBuildCache). A stream
+  // deploy holds a second entry of its own from the route; it arrives as
+  // options.heldOperation and is treated as this deploy's own too.
+  const current = acquireOperation("deploy", options.appDir);
   try {
     const { appDir, config } = options;
     let branch = options.branch;
@@ -81,11 +97,22 @@ export async function deploy(
     const start = Date.now();
 
     const commitBefore = await getCurrentCommit(appDir);
-    if (config.command) {
-      return await customCommandDeploy(options, commitBefore, steps, start);
+    const flowResult = config.command
+      ? await customCommandDeploy(options, commitBefore, steps, start)
+      : await defaultFlowDeploy(options, branch, commitBefore, steps, start);
+    // Post-deploy maintenance hook: runs here, after the flow returned
+    // success, rather than at the end of defaultFlowDeploy, so command-mode
+    // apps (customCommandDeploy) are covered too. A blocked deploy, a
+    // failed deploy and a deploy that rolled back all have
+    // `success: false`-shaped results, so none of them prunes; the prune's
+    // own outcome never changes the flow result (see pruneBuildCache).
+    if (flowResult.success) {
+      const pruneStep = await pruneBuildCache(appDir, current, options.heldOperation);
+      steps.push(pruneStep);
+      options.onStep?.(pruneStep);
     }
-    return await defaultFlowDeploy(options, branch, commitBefore, steps, start);
-  } finally { release(); }
+    return flowResult;
+  } finally { activeOperations.delete(current); }
 }
 
 async function defaultFlowDeploy(
@@ -671,16 +698,25 @@ function capStepOutput(output: string): string {
   return `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${total} characters\n${tail}`;
 }
 
-async function runStep(name: string, fn: () => Promise<ExecResult>): Promise<DeployStep> {
+/**
+ * Runs one deploy step. `timeoutNote` replaces the `[relay] step timed out`
+ * line appended when the process was killed on its own timeout; only the
+ * build-cache prune passes one, because the default line points at
+ * `.relay.yml`'s `step_timeout_seconds` and is wrong for a step whose timeout
+ * is fixed in code.
+ */
+async function runStep(name: string, fn: () => Promise<ExecResult>, timeoutNote?: string): Promise<DeployStep> {
   const start = Date.now();
   try {
     const r = await fn();
     let output = capStepOutput((r.stdout + "\n" + r.stderr).trim());
     if (r.killReason === "timeout") {
       output +=
-        r.timeoutMs !== undefined
-          ? `\n[relay] step timed out after ${Math.round(r.timeoutMs / 1000)} s (raise step_timeout_seconds in .relay.yml)`
-          : `\n[relay] step timed out (raise step_timeout_seconds in .relay.yml)`;
+        timeoutNote !== undefined
+          ? timeoutNote
+          : r.timeoutMs !== undefined
+            ? `\n[relay] step timed out after ${Math.round(r.timeoutMs / 1000)} s (raise step_timeout_seconds in .relay.yml)`
+            : `\n[relay] step timed out (raise step_timeout_seconds in .relay.yml)`;
     } else if (r.killReason === "maxbuffer") {
       output +=
         r.maxBufferBytes !== undefined
@@ -772,7 +808,12 @@ export function assertOperationAllowed(kind: OperationKind): void {
   if (blocking) throw new DeployConflictError(kind, { ...blocking });
 }
 
-export function acquireOperationLock(kind: OperationKind, target?: string): () => void {
+// Adds a fresh entry to the shared set and returns it, so callers that need
+// to distinguish their own entry from other operations' (deploy's prune
+// hook) can; acquireOperationLock wraps this into the release-closure API
+// every other caller uses, acquireOperationEntry into the entry-plus-release
+// pair the stream deploy route needs.
+function acquireOperation(kind: OperationKind, target?: string): ActiveOperation {
   assertOperationAllowed(kind);
   const current: ActiveOperation = {
     kind,
@@ -780,11 +821,135 @@ export function acquireOperationLock(kind: OperationKind, target?: string): () =
     startedAt: new Date().toISOString(),
   };
   activeOperations.add(current);
+  return current;
+}
+
+export function acquireOperationLock(kind: OperationKind, target?: string): () => void {
+  const current = acquireOperation(kind, target);
   return () => {
     activeOperations.delete(current);
   };
 }
 
+/**
+ * Same acquire as acquireOperationLock, but hands back the entry itself
+ * alongside the release closure, so the caller can later tell its own hold
+ * apart from another operation's (the stream deploy route passes it into
+ * deploy() as `heldOperation`). acquireOperationLock stays the API for
+ * callers that only need to release.
+ */
+export function acquireOperationEntry(
+  kind: OperationKind,
+  target?: string,
+): { entry: ActiveOperation; release: () => void } {
+  const entry = acquireOperation(kind, target);
+  return { entry, release: () => { activeOperations.delete(entry); } };
+}
+
 export function resetOperationLockForTests(): void {
   activeOperations.clear();
+}
+
+// ── Post-deploy build-cache prune ───────────────────────────────────────────
+// Relay deploys build images on the host through docker; the build cache
+// only ever grows, so every successful deploy ends with
+// `docker builder prune -f --filter until=<window>`, which drops cache layers
+// older than the window and keeps recent ones (the next deploy's incremental
+// build stays fast).
+
+/** Env var overriding the prune window; see resolveBuildCacheKeep. */
+export const BUILD_CACHE_KEEP_ENV = "RELAY_BUILD_CACHE_KEEP";
+
+/** Fallback window (one week) when the env var is absent, empty or invalid. */
+export const DEFAULT_BUILD_CACHE_KEEP = "168h";
+
+/** What docker's `until` filter accepts for our purposes: a plain number
+ * of hours (`h`) or minutes (`m`). Anything else (7d, 48, 168H, "-4h")
+ * falls back to the default instead of being passed through to docker. */
+const BUILD_CACHE_KEEP_PATTERN = /^\d+[hm]$/;
+
+/** Name of the DeployStep recording the prune's own outcome. */
+export const BUILD_CACHE_PRUNE_STEP_NAME = "build cache prune";
+
+/**
+ * Fixed timeout for the prune step, deliberately far below the deploy
+ * steps' default: the prune is maintenance, so it must never extend a
+ * successful deploy by anywhere near the 300 s a build step may take. It is
+ * not configurable (in particular not via `step_timeout_seconds`, which
+ * covers the `.relay.yml`-driven steps) and is documented in
+ * docs/operations.md as the added latency of a deploy.
+ */
+export const BUILD_CACHE_PRUNE_TIMEOUT_MS = 120_000;
+
+/**
+ * Timeout note for the prune step, replacing runStep's default one: raising
+ * `step_timeout_seconds` would change nothing here, so pointing at it would
+ * send the operator to the wrong knob.
+ */
+const BUILD_CACHE_PRUNE_TIMEOUT_NOTE =
+  `\n[relay] step timed out after ${Math.round(BUILD_CACHE_PRUNE_TIMEOUT_MS / 1000)} s (prune timeout is fixed; the next deploy retries the prune)`;
+
+/**
+ * Resolves the prune window from `env` (defaults to process.env). An
+ * absent or empty value is "not configured" and yields the default with no
+ * warning; a valid duration wins as-is; any other value logs a warning and
+ * falls back to the default (an unparseable window must not take the prune
+ * down with it, and must not silently pass a value docker would reject).
+ */
+export function resolveBuildCacheKeep(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env[BUILD_CACHE_KEEP_ENV];
+  if (raw === undefined || raw === "") return DEFAULT_BUILD_CACHE_KEEP;
+  if (BUILD_CACHE_KEEP_PATTERN.test(raw)) return raw;
+  console.warn(
+    `[relay] ${BUILD_CACHE_KEEP_ENV}="${raw}" is not a duration docker understands (digits followed by h or m, e.g. 168h); using ${DEFAULT_BUILD_CACHE_KEEP}`,
+  );
+  return DEFAULT_BUILD_CACHE_KEEP;
+}
+
+/**
+ * Best-effort build-cache prune run by deploy() after a successful deploy.
+ * Never fails the deploy: runStep records a non-zero exit, a timeout kill
+ * or a thrown error as this step's own `failure` (with docker's "Total
+ * reclaimed space: ..." line kept in its output when present) and the
+ * caller ignores the step beyond recording it.
+ *
+ * Skipped while any operation OTHER than this deploy holds the shared
+ * operation lock: deploys run side by side, and pruning while another
+ * deploy, rollback or self-update is mid-flight could reclaim layers that
+ * operation is about to reuse. The entries that belong to this deploy are
+ * `current` (the one deploy() took above) and, for a `stream=true` deploy,
+ * `heldOperation` (the route's own entry, held since before the stream
+ * opened); every other entry gates the prune. The comparison is by entry
+ * identity, never by kind or target, because a bare isOperationLocked()
+ * would always report "busy" (this deploy's own entries are in the set
+ * here) and because kind/target cannot tell two entries of the same deploy
+ * from two concurrent deploys. A skipped prune is recorded as a `skipped`
+ * step and simply waits for the next successful deploy.
+ */
+async function pruneBuildCache(
+  appDir: string,
+  current: ActiveOperation,
+  heldOperation?: ActiveOperation,
+): Promise<DeployStep> {
+  for (const op of activeOperations) {
+    if (op !== current && op !== heldOperation) {
+      return {
+        name: BUILD_CACHE_PRUNE_STEP_NAME,
+        status: "skipped",
+        output: "skipped: another operation active",
+        durationMs: 0,
+      };
+    }
+  }
+  const keep = resolveBuildCacheKeep();
+  return runStep(
+    BUILD_CACHE_PRUNE_STEP_NAME,
+    () => runExec(
+      "docker",
+      ["builder", "prune", "-f", "--filter", `until=${keep}`],
+      appDir,
+      { timeoutMs: BUILD_CACHE_PRUNE_TIMEOUT_MS },
+    ),
+    BUILD_CACHE_PRUNE_TIMEOUT_NOTE,
+  );
 }

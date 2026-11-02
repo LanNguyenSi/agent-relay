@@ -2,7 +2,7 @@ import { resolve, sep, dirname, basename, isAbsolute } from "node:path";
 import { readdir, stat, lstat, readlink, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
-import { deploy, stepExecOptions, DeployConflictError, acquireOperationLock, assertOperationAllowed, isOperationLocked } from "../deploy/engine.js";
+import { deploy, stepExecOptions, DeployConflictError, acquireOperationLock, acquireOperationEntry, assertOperationAllowed, isOperationLocked, type ActiveOperation } from "../deploy/engine.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
 import { getUpstreamWithin, upstreamTuning, type UpstreamInfo } from "./upstream.js";
@@ -18,7 +18,8 @@ import { getUpstreamWithin, upstreamTuning, type UpstreamInfo } from "./upstream
 // `runPreflight(name)` below, which still reads the current working
 // tree.
 
-export { RelayConfigError, DeployConflictError, acquireOperationLock, assertOperationAllowed, isOperationLocked };
+export { RelayConfigError, DeployConflictError, acquireOperationLock, acquireOperationEntry, assertOperationAllowed, isOperationLocked };
+export type { ActiveOperation };
 
 // realpath() requires every path segment to exist, so it can't tell us where
 // a DANGLING symlink's target really is. This walks up to the nearest
@@ -304,7 +305,7 @@ export async function deployApp(name: string, options?: { branch?: string; force
 
 export async function deployAppStreaming(
   name: string,
-  options?: { branch?: string; force?: boolean },
+  options?: { branch?: string; force?: boolean; heldOperation?: ActiveOperation },
   onStep?: (step: import("../deploy/engine.js").DeployStep) => void,
 ) {
   assertOperationAllowed("deploy"); // fail fast; deploy() takes the real lock
@@ -316,6 +317,9 @@ export async function deployAppStreaming(
     config,
     branch,
     force: options?.force,
+    // The route's own lock entry, so deploy()'s prune does not read it as a
+    // competing operation (see DeployOptions.heldOperation).
+    heldOperation: options?.heldOperation,
     onStep,
   });
 }
