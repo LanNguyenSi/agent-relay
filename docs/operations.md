@@ -251,8 +251,10 @@ Use this when the build currently running has regressed and you need the relay t
 4. Verify the rollback answers and is the build you expect. `/health` needs no token and reports the build commit SHA as `revision` (baked in at publish time), so a `main-<sha>` image reports that SHA:
 
    ```bash
-   docker exec agent-relay wget -qO- http://127.0.0.1:8222/health
+   docker exec agent-relay sh -c 'wget -qO- "http://127.0.0.1:${PORT:-8222}/health"'
    ```
+
+   The container reads `PORT` from `$RELAY_DIR/.env` (`install.sh` writes `RELAY_PORT` there, default 8222), so the command also works on an install with a custom port.
 
 **Self-update refuses while the image is pinned.** `POST /api/self-update` (deploy-panel's `Update relay` button sends the default request, which means the `latest` tag) refuses with `SelfUpdateRefusedError` (HTTP 422) unless the compose file's `image:` is exactly the requested `ghcr.io/lannguyensi/agent-relay:<tag>` (the exact-match check in `src/deploy/self-update.ts`), so a hand-pinned compose makes every default request fail and the button shows the refusal. This is deliberate: compose would recreate the relay from the pinned image, not from the requested one, so pulling and reporting success would be wrong. The self-update tag allowlist accepts only `latest` and `main-<sha>`, so a semver pin can never be requested through self-update at all; move between pinned images with this section.
 
