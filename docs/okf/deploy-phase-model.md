@@ -3,7 +3,7 @@ type: invariant
 title: Deploy preflight phase model — which checks run when, and rollback's config source
 description: runPreflightChecks splits its 8 checks across pre-pull/post-pull/all phases by when each check has signal; force bypasses only non-critical checks; only (PR #73) restricts the battery to named checks regardless of phase, skipping the excluded checks' runExec calls entirely rather than just discarding their results — both rollback gates use it to run only the two critical checks; auto-rollback always reruns against prePullConfig/preCommandConfig, never the post-pull reloaded config, even when the new commit disabled rollback, while the standalone rollbackApp re-reads .relay.yml from the commit it resets to.
 tags: [deploy, preflight, phases, rollback, force, only]
-timestamp: 2026-10-31T16:23:32Z
+timestamp: 2026-11-02T16:32:03Z
 sources:
   - src/deploy/preflight.ts
   - src/deploy/engine.ts
@@ -47,7 +47,7 @@ Four of the 8 are critical and survive `force`: `compose_file_exists`, `health_d
 
 Every `rollbackIfEnabled` call site passes the config captured **before** the mutating step it's rolling back from, not the config reloaded after `git pull` / the custom command:
 
-- `defaultFlowDeploy` closes over `prePullConfig` (the parameter named `config` at `engine.ts:125`) and passes it to every `rollbackIfEnabled(prePullConfig, ...)` call (`engine.ts:218, 257, 267, 278, 287`) — including the post-health-check rollback, which runs *after* `config` (the post-pull reload) was used for the build/up/health steps themselves.
+- `defaultFlowDeploy` closes over `prePullConfig` (the parameter named `config` at `engine.ts:125`) and passes it to every `rollbackIfEnabled(prePullConfig, ...)` call (`engine.ts:218, 270, 280, 291, 300`) — including the post-health-check rollback, which runs *after* `config` (the post-pull reload) was used for the build/up/health steps themselves.
 - `customCommandDeploy` does the same with `preCommandConfig` (`engine.ts:315`, calls at `engine.ts:379`, `engine.ts:389`).
 
 This is deliberate, not an oversight: `rollback: boolean` is read from whichever config is passed to `rollbackIfEnabled` (`engine.ts:602`), and the engine always passes the pre-mutation one on purpose. A commit that ships a broken app **and** flips `rollback: false` in the same commit does not get to disable its own safety net — the pre-pull value of `rollback` (from the last-known-good commit) governs whether the *current* deploy's rollback fires; the new `rollback: false` only takes effect starting with the *next* deploy. Regression-pinned by `src/deploy/engine.test.ts` "rollback boolean honors pre-pull config, not post-pull" (`engine.test.ts:460`). The same reasoning is why `rollbackIfEnabled`'s rebuild/restart steps use the pre-pull `compose_file` too, and why the health check that closes the rollback (step `rollback: health check`, run after a successful `compose up` through the same `runHealthCheck` a deploy uses) probes the pre-pull `health`, `health_port` and `compose_file`, not the post-pull ones (pinned for every pull-path rollback trigger, reload failure, compose build, compose up, post_update and the forward health check, by the `it.each` "probes with the pre-deploy health path, port and compose_file" in `engine.test.ts`): `git reset --hard` restores the OLD tree, where the OLD `compose_file` is the one on disk — regression-pinned by a separate test, "rolls back using pre-pull compose_file when reload fails" (`engine.test.ts:431-458`, rationale comment at `engine.test.ts:447-449`).
