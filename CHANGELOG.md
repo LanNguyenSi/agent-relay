@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Dependency updates: `renovate.json` extends the shared `github>LanNguyenSi/renovate-config` preset (weekly grouped patch/minor pull requests, 7-day minimum release age, no automerge, majors only through the Dependency Dashboard).
 
+### Documentation
+
+- **Rolling the relay back to a specific image is documented.** `docs/operations.md` gains a "Rolling back to a specific image" subsection: pin the `image:` line in `$RELAY_DIR/docker-compose.yml` to a `main-<sha>` or semver tag, `docker compose pull && docker compose up -d`, verify via `/health` (`revision` reports the build SHA); why self-update refuses while the image is pinned (exact `image:` match against the requested `latest`, and `main-<sha>`-only tags, so a semver pin can never be requested through it); and how to return to `:latest` (edit back, or re-run `install.sh`, which rewrites the line).
+
 ## [0.8.0] - 2026-11-01
 
 ### Added

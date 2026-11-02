@@ -236,6 +236,28 @@ For the repository's dev `docker-compose.yml` (no `container_name`), run `docker
 - **Upgrading an installer install**: either trigger `POST /api/self-update` (authenticated with `Bearer <AUTH_TOKEN>`, or via `deploy-panel`'s one-click `Update relay` button), which inspects the relay container's `com.docker.compose.*` labels, reads the compose file on the host through the Docker daemon (a short-lived `--network none` container of the relay's own image with the compose directory bind-mounted read-only, so the directory does not need to be mounted into the relay), refuses when the relay was started with an env file other than `<working_dir>/.env` (the helper could not reproduce those variables), refuses unless the compose file's `image:` is exactly the requested `ghcr.io/lannguyensi/agent-relay:<tag>` (the installer pins `:latest`, so request the default tag), pulls `ghcr.io/lannguyensi/agent-relay:<tag>`, returns `202 Accepted`, and spawns a detached helper container (`--entrypoint docker`, `/var/run/docker.sock` and the compose working directory mounted `:ro`) to run `docker compose -p <project> -f <file> up -d <service>`; or run `docker compose pull && docker compose up -d` in `RELAY_DIR` over SSH. If a self-update fails or the new container does not become healthy, recover via `deploy-panel`'s SSH `Update Relay Image` flow (`POST /api/servers/:id/update-relay-image`) or `docker compose pull && docker compose up -d` on the host.
 - **Rotating the token**: edit `AUTH_TOKEN` in `$RELAY_DIR/.env`, then run `docker compose up -d --force-recreate` in `RELAY_DIR`. Re-running `install.sh` keeps the existing token.
 
+### Rolling back to a specific image
+
+Use this when the build currently running has regressed and you need the relay to run one specific published build: a `main-<sha>` image (one per published merge to `main`) or a semver release image. This is the hand-edit escape hatch over SSH; while the compose file is pinned, relay self-update stays refused (below), so updates flow only through this file until you return to `:latest`.
+
+1. Pick the tag. `.github/workflows/publish.yml` pushes to `ghcr.io/lannguyensi/agent-relay`: `main-<sha>` for every publish push to `main`, `<version>` and `<major>.<minor>` for every `v*` release tag (for example `0.8.0` and `0.8`), and `latest` for the newest publish. The tag list is on the package's Versions page, [github.com/users/LanNguyenSi/packages/container/agent-relay/versions](https://github.com/users/LanNguyenSi/packages/container/agent-relay/versions).
+2. On the relay host, edit the `image:` line of the compose file `install.sh` wrote, `$RELAY_DIR/docker-compose.yml` (`/opt/agent-relay` for a root install, `$HOME/.local/share/agent-relay` for a non-root one), changing `image: ghcr.io/lannguyensi/agent-relay:latest` to `image: ghcr.io/lannguyensi/agent-relay:main-<sha>` or `image: ghcr.io/lannguyensi/agent-relay:<version>`. The service is named `relay`; change nothing else.
+3. Pull and recreate in `RELAY_DIR`:
+
+   ```bash
+   docker compose pull && docker compose up -d
+   ```
+
+4. Verify the rollback answers and is the build you expect. `/health` needs no token and reports the build commit SHA as `revision` (baked in at publish time), so a `main-<sha>` image reports that SHA:
+
+   ```bash
+   docker exec agent-relay wget -qO- http://127.0.0.1:8222/health
+   ```
+
+**Self-update refuses while the image is pinned.** `POST /api/self-update` (deploy-panel's `Update relay` button sends the default request, which means the `latest` tag) refuses with `SelfUpdateRefusedError` (HTTP 422) unless the compose file's `image:` is exactly the requested `ghcr.io/lannguyensi/agent-relay:<tag>` (the exact-match check in `src/deploy/self-update.ts`), so a hand-pinned compose makes every default request fail and the button shows the refusal. This is deliberate: compose would recreate the relay from the pinned image, not from the requested one, so pulling and reporting success would be wrong. The self-update tag allowlist accepts only `latest` and `main-<sha>`, so a semver pin can never be requested through self-update at all; move between pinned images with this section.
+
+**Returning to `:latest`.** Edit the `image:` line back to `image: ghcr.io/lannguyensi/agent-relay:latest`, then run `docker compose pull && docker compose up -d` in `RELAY_DIR` again. Alternatively re-run `install.sh`: it rewrites the compose file with the `:latest` image line (the `.env` token is kept, hand-edited compose content is overwritten, see step 5 of the installer list).
+
 ## Deploy lifecycle
 
 Each app on the VPS is a git repo with a `docker-compose.yml` and a `.relay.yml`. The default flow:
