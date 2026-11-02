@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { RelayConfigError, type RelayConfig } from "../config/relay.js";
 
 // Mock exec module
@@ -32,7 +32,15 @@ vi.mock("../config/relay.js", async () => {
   return { ...actual, loadRelayConfig: vi.fn() };
 });
 
-import { deploy, STEP_OUTPUT_MAX_CHARS } from "./engine.js";
+import {
+  deploy,
+  STEP_OUTPUT_MAX_CHARS,
+  resolveBuildCacheKeep,
+  DEFAULT_BUILD_CACHE_KEEP,
+  BUILD_CACHE_PRUNE_STEP_NAME,
+  acquireOperationLock,
+  resetOperationLockForTests,
+} from "./engine.js";
 import { runShell, runExec } from "./exec.js";
 import { loadRelayConfig } from "../config/relay.js";
 import { runPreflightChecks } from "./preflight.js";
@@ -93,6 +101,7 @@ describe("deploy — default flow", () => {
       "compose build",
       "compose up",
       "health check",
+      "build cache prune",
     ]);
     expect(result.steps.every((s) => s.status === "success")).toBe(true);
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
@@ -119,6 +128,7 @@ describe("deploy — default flow", () => {
       "compose up",
       "post_update: npx prisma migrate deploy",
       "health check",
+      "build cache prune",
     ]);
   });
 
@@ -1518,6 +1528,7 @@ describe("deploy — custom command flow", () => {
       "command: ./deploy.sh",
       "reload .relay.yml",
       "health check",
+      "build cache prune",
     ]);
     // No git pull, compose build/up
     expect(result.steps.find((s) => s.name === "git pull")).toBeUndefined();
@@ -1665,5 +1676,284 @@ describe("injection guard — compose_file metacharacters are never shell-interp
     expect(
       mockRunShell.mock.calls.every(([s]) => !s.includes(injected)),
     ).toBe(true);
+  });
+});
+
+// Successful deploys end with a best-effort `docker builder prune -f
+// --filter until=<window>` (pruneBuildCache in engine.ts), hooked in
+// deploy() after the flow returns success so both the default and the
+// command flow are covered. The skip condition is entry-identity-based on
+// the shared operation lock: deploy() always holds its own entry, so only
+// OTHER operations gate the prune.
+describe("deploy - post-deploy build cache prune", () => {
+  let savedKeepEnv: string | undefined;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  const pruneCalls = () =>
+    mockRunExec.mock.calls.filter(
+      ([cmd, args]) => cmd === "docker" && args.includes("builder") && args.includes("prune"),
+    );
+
+  beforeEach(() => {
+    savedKeepEnv = process.env.RELAY_BUILD_CACHE_KEEP;
+    delete process.env.RELAY_BUILD_CACHE_KEEP;
+    resetOperationLockForTests();
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    if (savedKeepEnv === undefined) delete process.env.RELAY_BUILD_CACHE_KEEP;
+    else process.env.RELAY_BUILD_CACHE_KEEP = savedKeepEnv;
+    resetOperationLockForTests();
+    warnSpy.mockRestore();
+  });
+
+  it("prunes the build cache after a successful default-flow deploy with the default 168h window", async () => {
+    const seen: string[] = [];
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main", onStep: (s) => seen.push(s.name) });
+
+    expect(result.success).toBe(true);
+    const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+    expect(prune?.status).toBe("success");
+    expect(result.steps.at(-1)?.name).toBe(BUILD_CACHE_PRUNE_STEP_NAME);
+    // Streamed on onStep too, like every other step.
+    expect(seen.at(-1)).toBe(BUILD_CACHE_PRUNE_STEP_NAME);
+    expect(pruneCalls()).toHaveLength(1);
+    expect(pruneCalls()[0]?.[1]).toEqual(["builder", "prune", "-f", "--filter", "until=168h"]);
+    // execFile-backed runExec with the app directory as cwd, never a shell.
+    expect(pruneCalls()[0]?.[2]).toBe("/app");
+    expect(mockRunShell.mock.calls.every(([s]) => !s.includes("builder"))).toBe(true);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("prunes after a successful command-mode (customCommandDeploy) deploy too", async () => {
+    const config: RelayConfig = { ...baseConfig, command: "./deploy.sh" };
+
+    const result = await deploy({ appDir: "/app", config });
+
+    expect(result.success).toBe(true);
+    expect(result.steps.at(-1)?.name).toBe(BUILD_CACHE_PRUNE_STEP_NAME);
+    expect(result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME)?.status).toBe("success");
+    expect(pruneCalls()[0]?.[1]).toEqual(["builder", "prune", "-f", "--filter", "until=168h"]);
+  });
+
+  it("runs no prune after a failed deploy (git pull failure)", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args[0] === "pull") {
+        return { stdout: "", stderr: "merge conflict", exitCode: 1 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME)).toBeUndefined();
+    expect(pruneCalls()).toHaveLength(0);
+  });
+
+  it("runs no prune after a rollback (health-check failure)", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "", stderr: "", exitCode: 1 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.some((s) => s.name.startsWith("rollback:"))).toBe(true);
+    expect(result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME)).toBeUndefined();
+    expect(pruneCalls()).toHaveLength(0);
+  });
+
+  it("skips the prune while another deploy holds the shared lock, and still reports success", async () => {
+    const release = acquireOperationLock("deploy", "/apps/other");
+    try {
+      const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+      expect(result.success).toBe(true);
+      const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+      expect(prune?.status).toBe("skipped");
+      expect(prune?.output).toBe("skipped: another operation active");
+      expect(pruneCalls()).toHaveLength(0);
+    } finally {
+      release();
+    }
+  });
+
+  it("skips the prune while a rollback holds the shared lock", async () => {
+    const release = acquireOperationLock("rollback", "demo-app");
+    try {
+      const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+      expect(result.success).toBe(true);
+      const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+      expect(prune?.status).toBe("skipped");
+      expect(prune?.output).toBe("skipped: another operation active");
+      expect(pruneCalls()).toHaveLength(0);
+    } finally {
+      release();
+    }
+  });
+
+  it("runs the prune when only the current deploy holds the lock (a released lock does not gate it)", async () => {
+    const release = acquireOperationLock("deploy", "/apps/other");
+    release();
+
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+    expect(result.success).toBe(true);
+    expect(result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME)?.status).toBe("success");
+    expect(pruneCalls()).toHaveLength(1);
+  });
+
+  it("records a non-zero prune exit as a failed step without failing the deploy or rolling back", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("builder")) {
+        return { stdout: "", stderr: "permission denied while trying to connect to the Docker daemon socket", exitCode: 1 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+    expect(result.success).toBe(true);
+    const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+    expect(prune?.status).toBe("failure");
+    expect(prune?.output).toContain("permission denied");
+    // No rollback: the deploy itself succeeded, the prune is pure maintenance.
+    expect(result.steps.filter((s) => s.name.startsWith("rollback:"))).toHaveLength(0);
+  });
+
+  it("records a rejected prune call as a failed step without failing the deploy", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("builder")) {
+        throw new Error("spawn docker ENOENT");
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+    expect(result.success).toBe(true);
+    const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+    expect(prune?.status).toBe("failure");
+    expect(prune?.output).toContain("spawn docker ENOENT");
+  });
+
+  it("records a timeout-killed prune as a failed step without failing the deploy", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("builder")) {
+        return { stdout: "", stderr: "", exitCode: 1, timeoutMs: 300_000, killReason: "timeout" as const };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+    expect(result.success).toBe(true);
+    const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+    expect(prune?.status).toBe("failure");
+    expect(prune?.output).toContain("timed out after 300 s");
+  });
+
+  it("keeps docker's reclaimed-space line in the prune step output", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("builder")) {
+        return { stdout: "ID=abc\nTotal: 8.5GB\n\nTotal reclaimed space: 1.23GB\n", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+    expect(result.success).toBe(true);
+    const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+    expect(prune?.status).toBe("success");
+    expect(prune?.output).toContain("Total reclaimed space: 1.23GB");
+  });
+
+  describe("RELAY_BUILD_CACHE_KEEP window resolution", () => {
+    it("absent variable: default 168h, no warning", () => {
+      expect(resolveBuildCacheKeep({})).toBe("168h");
+      expect(resolveBuildCacheKeep({})).toBe(DEFAULT_BUILD_CACHE_KEEP);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("empty string: treated as absent, default, no warning", () => {
+      expect(resolveBuildCacheKeep({ RELAY_BUILD_CACHE_KEEP: "" })).toBe(DEFAULT_BUILD_CACHE_KEEP);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it.each(["1h", "48h", "168h", "90m", "0m"])("valid value %s wins as-is", (value) => {
+      expect(resolveBuildCacheKeep({ RELAY_BUILD_CACHE_KEEP: value })).toBe(value);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it.each(["7d", "48", "168H", "-4h", " 48h", "48 h", "h", "48m ", "1w"])(
+      "invalid value %s: default plus a warning",
+      (value) => {
+        expect(resolveBuildCacheKeep({ RELAY_BUILD_CACHE_KEEP: value })).toBe(DEFAULT_BUILD_CACHE_KEEP);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0]?.[0]).toContain(`RELAY_BUILD_CACHE_KEEP="${value}"`);
+      },
+    );
+
+    it("a valid env window reaches the docker call through a successful deploy", async () => {
+      process.env.RELAY_BUILD_CACHE_KEEP = "48h";
+
+      const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+      expect(result.success).toBe(true);
+      expect(pruneCalls()[0]?.[1]).toEqual(["builder", "prune", "-f", "--filter", "until=48h"]);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("an invalid env window falls back to 168h in the docker call and warns once, deploy still succeeds", async () => {
+      process.env.RELAY_BUILD_CACHE_KEEP = "7d";
+
+      const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+      expect(result.success).toBe(true);
+      expect(result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME)?.status).toBe("success");
+      expect(pruneCalls()[0]?.[1]).toEqual(["builder", "prune", "-f", "--filter", "until=168h"]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("an empty env window falls back to 168h without a warning", async () => {
+      process.env.RELAY_BUILD_CACHE_KEEP = "";
+
+      const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+      expect(result.success).toBe(true);
+      expect(pruneCalls()[0]?.[1]).toEqual(["builder", "prune", "-f", "--filter", "until=168h"]);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
   });
 });

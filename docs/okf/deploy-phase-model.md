@@ -21,7 +21,7 @@ Pre-pull (`phase === "pre-pull" || "all"`), against the tree as it sits before a
 
 - `git_clean` — non-critical.
 - `git_remote_reachable` — non-critical.
-- `apps_root_mount_congruence` — **critical**. Placed pre-pull deliberately: it has signal about the host/relay `APPS_DIR` view, not about the app's git tree, so pulling first buys nothing (`engine.ts:105-110`).
+- `apps_root_mount_congruence` — **critical**. Placed pre-pull deliberately: it has signal about the host/relay `APPS_DIR` view, not about the app's git tree, so pulling first buys nothing (`engine.ts:119-124`).
 
 Post-pull (`phase === "post-pull" || "all"`), against the freshly-pulled tree and the reloaded `.relay.yml`:
 
@@ -31,7 +31,7 @@ Post-pull (`phase === "post-pull" || "all"`), against the freshly-pulled tree an
 - `health_defined` — critical.
 - `compose_bind_mount_sources_exist` — **critical**. Post-pull placement means a `.relay.yml`/compose fix that lands in the same commit as a new bind-mount path is checked against the tree that actually has it (`preflight.ts:388-401`).
 
-`checkGitClean` and `checkGitRemoteReachable` are tautologies after a successful pull (a pull that succeeded already proves the tree is clean and the remote reachable), which is why the default flow runs them only pre-pull rather than in both slices — re-running them post-pull would just duplicate signal (`engine.ts:205-207`).
+`checkGitClean` and `checkGitRemoteReachable` are tautologies after a successful pull (a pull that succeeded already proves the tree is clean and the remote reachable), which is why the default flow runs them only pre-pull rather than in both slices — re-running them post-pull would just duplicate signal (`engine.ts:219-221`).
 
 ## Force: which checks it can skip, and why two can't be skipped
 
@@ -41,23 +41,23 @@ Post-pull (`phase === "post-pull" || "all"`), against the freshly-pulled tree an
 passed = force ? checks.filter(c => c.critical).every(c => c.passed) : checks.every(c => c.passed)
 ```
 
-Four of the 8 are critical and survive `force`: `compose_file_exists`, `health_defined`, `apps_root_mount_congruence`, `compose_bind_mount_sources_exist`. The `DeployOptions.force` JSDoc (`engine.ts:57-66`) states the rationale for the two APPS_DIR checks explicitly: `compose_file_exists`/`health_defined` are critical because a deploy simply cannot succeed without them, but `apps_root_mount_congruence` and `compose_bind_mount_sources_exist` are critical for a different reason — letting either through **silently masks a deployed app's on-host config with an empty directory** (the APPS_DIR mismatch failure class: the docker daemon auto-creates a missing bind-mount source as an empty directory rather than erroring) instead of merely failing the deploy. `force` is "I know what I'm doing, skip the git checks", not "let a mount mismatch corrupt my app's on-disk config" — those are different risk classes, so force's semantics deliberately does not extend to them (`engine.ts:112-120`).
+Four of the 8 are critical and survive `force`: `compose_file_exists`, `health_defined`, `apps_root_mount_congruence`, `compose_bind_mount_sources_exist`. The `DeployOptions.force` JSDoc (`engine.ts:57-66`) states the rationale for the two APPS_DIR checks explicitly: `compose_file_exists`/`health_defined` are critical because a deploy simply cannot succeed without them, but `apps_root_mount_congruence` and `compose_bind_mount_sources_exist` are critical for a different reason — letting either through **silently masks a deployed app's on-host config with an empty directory** (the APPS_DIR mismatch failure class: the docker daemon auto-creates a missing bind-mount source as an empty directory rather than erroring) instead of merely failing the deploy. `force` is "I know what I'm doing, skip the git checks", not "let a mount mismatch corrupt my app's on-disk config" — those are different risk classes, so force's semantics deliberately does not extend to them (`engine.ts:126-134`).
 
 ## Auto-rollback always uses the pre-pull (or pre-command) config, never the reloaded one
 
 Every `rollbackIfEnabled` call site passes the config captured **before** the mutating step it's rolling back from, not the config reloaded after `git pull` / the custom command:
 
-- `defaultFlowDeploy` closes over `prePullConfig` (the parameter named `config` at `engine.ts:98`) and passes it to every `rollbackIfEnabled(prePullConfig, ...)` call (`engine.ts:191, 243, 253, 264, 273`) — including the post-health-check rollback, which runs *after* `config` (the post-pull reload) was used for the build/up/health steps themselves.
-- `customCommandDeploy` does the same with `preCommandConfig` (`engine.ts:288`, calls at `engine.ts:352`, `engine.ts:362`).
+- `defaultFlowDeploy` closes over `prePullConfig` (the parameter named `config` at `engine.ts:112`) and passes it to every `rollbackIfEnabled(prePullConfig, ...)` call (`engine.ts:205, 257, 267, 278, 287`) — including the post-health-check rollback, which runs *after* `config` (the post-pull reload) was used for the build/up/health steps themselves.
+- `customCommandDeploy` does the same with `preCommandConfig` (`engine.ts:302`, calls at `engine.ts:366`, `engine.ts:376`).
 
-This is deliberate, not an oversight: `rollback: boolean` is read from whichever config is passed to `rollbackIfEnabled` (`engine.ts:575`), and the engine always passes the pre-mutation one on purpose. A commit that ships a broken app **and** flips `rollback: false` in the same commit does not get to disable its own safety net — the pre-pull value of `rollback` (from the last-known-good commit) governs whether the *current* deploy's rollback fires; the new `rollback: false` only takes effect starting with the *next* deploy. Regression-pinned by `src/deploy/engine.test.ts` "rollback boolean honors pre-pull config, not post-pull" (`engine.test.ts:448`). The same reasoning is why `rollbackIfEnabled`'s rebuild/restart steps use the pre-pull `compose_file` too, and why the health check that closes the rollback (step `rollback: health check`, run after a successful `compose up` through the same `runHealthCheck` a deploy uses) probes the pre-pull `health`, `health_port` and `compose_file`, not the post-pull ones (pinned for every pull-path rollback trigger, reload failure, compose build, compose up, post_update and the forward health check, by the `it.each` "probes with the pre-deploy health path, port and compose_file" in `engine.test.ts`): `git reset --hard` restores the OLD tree, where the OLD `compose_file` is the one on disk — regression-pinned by a separate test, "rolls back using pre-pull compose_file when reload fails" (`engine.test.ts:419-446`, rationale comment at `engine.test.ts:435-437`).
+This is deliberate, not an oversight: `rollback: boolean` is read from whichever config is passed to `rollbackIfEnabled` (`engine.ts:589`), and the engine always passes the pre-mutation one on purpose. A commit that ships a broken app **and** flips `rollback: false` in the same commit does not get to disable its own safety net — the pre-pull value of `rollback` (from the last-known-good commit) governs whether the *current* deploy's rollback fires; the new `rollback: false` only takes effect starting with the *next* deploy. Regression-pinned by `src/deploy/engine.test.ts` "rollback boolean honors pre-pull config, not post-pull" (`engine.test.ts:458`). The same reasoning is why `rollbackIfEnabled`'s rebuild/restart steps use the pre-pull `compose_file` too, and why the health check that closes the rollback (step `rollback: health check`, run after a successful `compose up` through the same `runHealthCheck` a deploy uses) probes the pre-pull `health`, `health_port` and `compose_file`, not the post-pull ones (pinned for every pull-path rollback trigger, reload failure, compose build, compose up, post_update and the forward health check, by the `it.each` "probes with the pre-deploy health path, port and compose_file" in `engine.test.ts`): `git reset --hard` restores the OLD tree, where the OLD `compose_file` is the one on disk — regression-pinned by a separate test, "rolls back using pre-pull compose_file when reload fails" (`engine.test.ts:429-456`, rationale comment at `engine.test.ts:445-447`).
 
 The standalone rollback (`rollbackApp`, `src/services/apps.ts:368-452#"return { success: true, commitBefore, commitAfter }"`, behind `POST /api/apps/:name/rollback` and the MCP `relay_rollback` tool) works the other way: after `git reset --hard` it re-reads `.relay.yml` from the target commit (`apps.ts:409-417#"const config = await loadRelayConfig(dir)"`) and uses that config for its preflight gate and for `compose build`/`up` (`apps.ts:432-448#"up.exitCode !== 0"`).
 
 ## Rollback gates on `only` two checks, not `phase`'s whole battery
 
 Both rollback call sites — `rollbackApp` (`services/apps.ts:432-438`) and
-the auto-rollback path `rollbackIfEnabled` (`engine.ts:587-593`) — pass
+the auto-rollback path `rollbackIfEnabled` (`engine.ts:601-607`) — pass
 `phase: "all", force: true` **and** `only: ROLLBACK_CRITICAL_CHECKS`
 (`preflight.ts:72-76`), where `ROLLBACK_CRITICAL_CHECKS` is exactly
 `["apps_root_mount_congruence", "compose_bind_mount_sources_exist"]`. `only`
@@ -89,7 +89,7 @@ report) and by the `only` assertions in both `apps.test.ts`'s and
 
 ## Command-mode deploys and the standalone/MCP preflight view
 
-Command-mode (`.relay.yml` with a `command:` field) has no natural pre/post-pull split — the command is opaque, so `customCommandDeploy` runs preflight once, pre-command, with no `phase` argument (`engine.ts:299`), which defaults to `"all"`. The same default applies to the two read-only entry points that inspect current disk state without deploying: `runPreflight` in `src/services/apps.ts:470-474` (backing both the standalone `GET /api/apps/:name/preflight` HTTP route and the MCP `relay_preflight` tool) calls `runPreflightChecks({ appDir, config })` with no `phase`, so it always runs the full 8-check battery against whatever is on disk right now.
+Command-mode (`.relay.yml` with a `command:` field) has no natural pre/post-pull split — the command is opaque, so `customCommandDeploy` runs preflight once, pre-command, with no `phase` argument (`engine.ts:313`), which defaults to `"all"`. The same default applies to the two read-only entry points that inspect current disk state without deploying: `runPreflight` in `src/services/apps.ts:470-474` (backing both the standalone `GET /api/apps/:name/preflight` HTTP route and the MCP `relay_preflight` tool) calls `runPreflightChecks({ appDir, config })` with no `phase`, so it always runs the full 8-check battery against whatever is on disk right now.
 
 ## What this doc does not restate
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Relay deploys now prune the docker build cache.** After a deploy turns `success` (default flow and `command` flow alike) the relay runs `docker builder prune -f --filter until=<window>`, best effort: recorded as the step `build cache prune` (`success` / `failure` / `skipped`, docker's `Total reclaimed space: ...` line kept in its output), never failing the deploy, never triggering a rollback and never changing the deploy result. The window comes from the new `RELAY_BUILD_CACHE_KEEP` env var (default `168h`; only digits followed by `h` or `m` are accepted, an empty value counts as unset and an invalid one logs a warning and uses the default). The prune is skipped while any other operation (deploy, rollback, relay self-update) holds the shared operation lock, and no prune runs after a failed deploy or a rollback; a skipped prune waits for the next successful deploy. The existing host cache is untouched by the upgrade and can be cleared once with a host-side `docker builder prune -f -a` (see [docs/operations.md](docs/operations.md#disk-and-build-cache)).
+
 ### Changed
 
 - Dependency updates: `renovate.json` extends the shared `github>LanNguyenSi/renovate-config` preset (weekly grouped patch/minor pull requests, 7-day minimum release age, no automerge, majors only through the Dependency Dashboard).

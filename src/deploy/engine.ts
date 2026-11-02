@@ -69,7 +69,10 @@ export interface DeployOptions {
 export async function deploy(
   options: DeployOptions,
 ): Promise<DeployResult | DeployBlockedResult> {
-  const release = acquireOperationLock("deploy", options.appDir);
+  // Own lock entry (not just its release closure) so the post-deploy
+  // build-cache prune can tell "the current deploy holds the lock" from
+  // "some other operation holds the lock" (see pruneBuildCache).
+  const current = acquireOperation("deploy", options.appDir);
   try {
     const { appDir, config } = options;
     let branch = options.branch;
@@ -81,11 +84,22 @@ export async function deploy(
     const start = Date.now();
 
     const commitBefore = await getCurrentCommit(appDir);
-    if (config.command) {
-      return await customCommandDeploy(options, commitBefore, steps, start);
+    const flowResult = config.command
+      ? await customCommandDeploy(options, commitBefore, steps, start)
+      : await defaultFlowDeploy(options, branch, commitBefore, steps, start);
+    // Post-deploy maintenance hook: runs here, after the flow returned
+    // success, rather than at the end of defaultFlowDeploy, so command-mode
+    // apps (customCommandDeploy) are covered too. A blocked deploy, a
+    // failed deploy and a deploy that rolled back all have
+    // `success: false`-shaped results, so none of them prunes; the prune's
+    // own outcome never changes the flow result (see pruneBuildCache).
+    if (flowResult.success) {
+      const pruneStep = await pruneBuildCache(appDir, current);
+      steps.push(pruneStep);
+      options.onStep?.(pruneStep);
     }
-    return await defaultFlowDeploy(options, branch, commitBefore, steps, start);
-  } finally { release(); }
+    return flowResult;
+  } finally { activeOperations.delete(current); }
 }
 
 async function defaultFlowDeploy(
@@ -772,7 +786,11 @@ export function assertOperationAllowed(kind: OperationKind): void {
   if (blocking) throw new DeployConflictError(kind, { ...blocking });
 }
 
-export function acquireOperationLock(kind: OperationKind, target?: string): () => void {
+// Adds a fresh entry to the shared set and returns it, so callers that need
+// to distinguish their own entry from other operations' (deploy's prune
+// hook) can; acquireOperationLock wraps this into the release-closure API
+// every other caller uses.
+function acquireOperation(kind: OperationKind, target?: string): ActiveOperation {
   assertOperationAllowed(kind);
   const current: ActiveOperation = {
     kind,
@@ -780,6 +798,11 @@ export function acquireOperationLock(kind: OperationKind, target?: string): () =
     startedAt: new Date().toISOString(),
   };
   activeOperations.add(current);
+  return current;
+}
+
+export function acquireOperationLock(kind: OperationKind, target?: string): () => void {
+  const current = acquireOperation(kind, target);
   return () => {
     activeOperations.delete(current);
   };
@@ -787,4 +810,75 @@ export function acquireOperationLock(kind: OperationKind, target?: string): () =
 
 export function resetOperationLockForTests(): void {
   activeOperations.clear();
+}
+
+// ── Post-deploy build-cache prune ───────────────────────────────────────────
+// Relay deploys build images on the host through docker; the build cache
+// only ever grows (it reached ~150 GB per host), so every successful deploy
+// ends with `docker builder prune -f --filter until=<window>`, which drops
+// cache layers older than the window and keeps recent ones (the next
+// deploy's incremental build stays fast).
+
+/** Env var overriding the prune window; see resolveBuildCacheKeep. */
+export const BUILD_CACHE_KEEP_ENV = "RELAY_BUILD_CACHE_KEEP";
+
+/** Fallback window (one week) when the env var is absent, empty or invalid. */
+export const DEFAULT_BUILD_CACHE_KEEP = "168h";
+
+/** What docker's `until` filter accepts for our purposes: a plain number
+ * of hours (`h`) or minutes (`m`). Anything else (7d, 48, 168H, "-4h")
+ * falls back to the default instead of being passed through to docker. */
+const BUILD_CACHE_KEEP_PATTERN = /^\d+[hm]$/;
+
+/** Name of the DeployStep recording the prune's own outcome. */
+export const BUILD_CACHE_PRUNE_STEP_NAME = "build cache prune";
+
+/**
+ * Resolves the prune window from `env` (defaults to process.env). An
+ * absent or empty value is "not configured" and yields the default with no
+ * warning; a valid duration wins as-is; any other value logs a warning and
+ * falls back to the default (an unparseable window must not take the prune
+ * down with it, and must not silently pass a value docker would reject).
+ */
+export function resolveBuildCacheKeep(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env[BUILD_CACHE_KEEP_ENV];
+  if (raw === undefined || raw === "") return DEFAULT_BUILD_CACHE_KEEP;
+  if (BUILD_CACHE_KEEP_PATTERN.test(raw)) return raw;
+  console.warn(
+    `[relay] ${BUILD_CACHE_KEEP_ENV}="${raw}" is not a duration docker understands (digits followed by h or m, e.g. 168h); using ${DEFAULT_BUILD_CACHE_KEEP}`,
+  );
+  return DEFAULT_BUILD_CACHE_KEEP;
+}
+
+/**
+ * Best-effort build-cache prune run by deploy() after a successful deploy.
+ * Never fails the deploy: runStep records a non-zero exit, a timeout kill
+ * or a thrown error as this step's own `failure` (with docker's "Total
+ * reclaimed space: ..." line kept in its output when present) and the
+ * caller ignores the step beyond recording it.
+ *
+ * Skipped while any operation OTHER than the current deploy holds the
+ * shared operation lock: deploys run side by side, and pruning while
+ * another deploy, rollback or self-update is mid-flight could reclaim
+ * layers that operation is about to reuse. The current deploy's own entry
+ * is always in the set here, so a bare isOperationLocked() would always
+ * report "busy"; the comparison is by entry identity instead. A skipped
+ * prune is recorded as a `skipped` step and simply waits for the next
+ * successful deploy.
+ */
+async function pruneBuildCache(appDir: string, current: ActiveOperation): Promise<DeployStep> {
+  for (const op of activeOperations) {
+    if (op !== current) {
+      return {
+        name: BUILD_CACHE_PRUNE_STEP_NAME,
+        status: "skipped",
+        output: "skipped: another operation active",
+        durationMs: 0,
+      };
+    }
+  }
+  const keep = resolveBuildCacheKeep();
+  return runStep(BUILD_CACHE_PRUNE_STEP_NAME, () =>
+    runExec("docker", ["builder", "prune", "-f", "--filter", `until=${keep}`], appDir),
+  );
 }

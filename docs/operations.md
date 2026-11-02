@@ -227,6 +227,7 @@ For the repository's dev `docker-compose.yml` (no `container_name`), run `docker
 | `PORT` | No | `8222` | HTTP server port |
 | `APPS_DIR` | No | `/apps` | Directory containing app directories, as seen by the relay process. The installer bind-mounts the host `APPS_DIR` (see [Installer environment variables](#installer-environment-variables)) onto `/apps` and writes `APPS_DIR=/apps` into the relay's `.env`, so this rarely needs overriding |
 | `RELAY_REVISION` | No | `"unknown"` | Build commit SHA reported as `revision` on `GET /health` and `GET /api/health`. Baked into the published GHCR image at build time (`ARG RELAY_REVISION=""` / `ENV RELAY_REVISION=$RELAY_REVISION` in `Dockerfile`, set from `github.sha` by `.github/workflows/publish.yml`); local or development runs without `RELAY_REVISION` (or with an empty/whitespace value) report `revision: "unknown"` |
+| `RELAY_BUILD_CACHE_KEEP` | No | `168h` | Docker build cache retention window applied after a successful deploy (`docker builder prune -f --filter until=<value>`). Digits followed by `h` or `m` only (e.g. `90m`, `168h`); an empty value counts as unset, an invalid value logs a warning and uses the default. See [Disk and build cache](#disk-and-build-cache) |
 
 ## Runtime state and troubleshooting
 
@@ -311,3 +312,43 @@ flowchart TD
     R5 -- "pass" --> RHEALTHY["rolled back, healthy<br/>deploy still failed"]
     R5 -- "fail" --> RDOWN["ROLLBACK UNHEALTHY<br/>site may be down"]
 ```
+
+## Disk and build cache
+
+Every relay deploy builds its app image on the host through docker, and the
+build cache only ever grows (hosts have reached ~150 GB). After a deploy
+turns `success` (the default flow and the `command` flow alike), the relay
+runs the build-cache-only prune:
+
+```sh
+docker builder prune -f --filter until=<window>
+```
+
+This reclaims only build-cache layers older than the window; built images,
+containers, volumes and anything running are never touched. Recent layers
+are kept, so the next deploy's incremental build still hits cache. The
+first build after a prune is slower than an incremental one because the
+pruned layers are rebuilt.
+
+- **Window:** env `RELAY_BUILD_CACHE_KEEP`, default `168h` (one week). Only
+  a duration docker understands is accepted: digits followed by `h`
+  (hours) or `m` (minutes), e.g. `90m` or `168h`. An empty value counts as
+  unset, and an invalid value (say `7d`) logs a warning in the relay log
+  and falls back to the default; the prune never runs with a value docker
+  would reject.
+- **Best effort:** the prune's outcome never changes the deploy result,
+  never fails a deploy and never triggers a rollback. It is recorded as
+  the step `build cache prune` with its own status (`success`, `failure`
+  or `skipped`), and a successful run's output carries docker's `Total
+  reclaimed space: ...` line.
+- **Skipped while busy:** while another operation (deploy, rollback or
+  relay self-update) holds the shared operation lock, the prune is skipped
+  (step output `skipped: another operation active`) so a concurrent build
+  keeps its fresh layers. A skipped prune simply waits for the next
+  successful deploy.
+- **No prune after a failed deploy or a rollback:** only a deploy that
+  ended `success` runs it.
+
+The existing cache on a host is untouched by this (the prune only ever
+runs after successful deploys); clear it once on the host with a one-off
+`docker builder prune -f -a`.
