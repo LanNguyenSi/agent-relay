@@ -38,7 +38,9 @@ import {
   resolveBuildCacheKeep,
   DEFAULT_BUILD_CACHE_KEEP,
   BUILD_CACHE_PRUNE_STEP_NAME,
+  BUILD_CACHE_PRUNE_TIMEOUT_MS,
   acquireOperationLock,
+  acquireOperationEntry,
   resetOperationLockForTests,
 } from "./engine.js";
 import { runShell, runExec } from "./exec.js";
@@ -1795,6 +1797,49 @@ describe("deploy - post-deploy build cache prune", () => {
     }
   });
 
+  it("prunes when the caller hands down its own route-level entry (a stream deploy's second hold)", async () => {
+    // What the stream=true route does: it holds a "deploy" entry of its own
+    // from before the config resolution and passes it into deploy() as
+    // heldOperation, while deploy() adds its own entry on top.
+    const routeHold = acquireOperationEntry("deploy", "demo");
+    try {
+      const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main", heldOperation: routeHold.entry });
+
+      expect(result.success).toBe(true);
+      expect(result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME)?.status).toBe("success");
+      expect(pruneCalls()).toHaveLength(1);
+    } finally {
+      routeHold.release();
+    }
+  });
+
+  it("skips the prune when a foreign operation holds the lock next to the handed-down entry", async () => {
+    const routeHold = acquireOperationEntry("deploy", "demo");
+    const otherDeploy = acquireOperationLock("deploy", "/apps/other");
+    try {
+      const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main", heldOperation: routeHold.entry });
+
+      expect(result.success).toBe(true);
+      const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
+      expect(prune?.status).toBe("skipped");
+      expect(pruneCalls()).toHaveLength(0);
+    } finally {
+      otherDeploy();
+      routeHold.release();
+    }
+  });
+
+  it("ignores a handed-down entry that is no longer held (an already-released route hold)", async () => {
+    const routeHold = acquireOperationEntry("deploy", "demo");
+    routeHold.release();
+
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main", heldOperation: routeHold.entry });
+
+    expect(result.success).toBe(true);
+    expect(result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME)?.status).toBe("success");
+    expect(pruneCalls()).toHaveLength(1);
+  });
+
   it("skips the prune while a rollback holds the shared lock", async () => {
     const release = acquireOperationLock("rollback", "demo-app");
     try {
@@ -1861,13 +1906,23 @@ describe("deploy - post-deploy build cache prune", () => {
     expect(prune?.output).toContain("spawn docker ENOENT");
   });
 
-  it("records a timeout-killed prune as a failed step without failing the deploy", async () => {
+  it("runs the prune with its own fixed 120 s timeout, not the deploy steps' default", async () => {
+    expect(BUILD_CACHE_PRUNE_TIMEOUT_MS).toBe(120_000);
+
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "main" });
+
+    expect(result.success).toBe(true);
+    // 4th runExec argument = the ExecOptions of the prune call only.
+    expect(pruneCalls()[0]?.[3]).toEqual({ timeoutMs: 120_000 });
+  });
+
+  it("records a timeout-killed prune as a failed step with the prune's own note, without failing the deploy", async () => {
     mockRunExec.mockImplementation(async (command, args) => {
       if (command === "git" && args.includes("rev-parse")) {
         return { stdout: "abc123\n", stderr: "", exitCode: 0 };
       }
       if (command === "docker" && args.includes("builder")) {
-        return { stdout: "", stderr: "", exitCode: 1, timeoutMs: 300_000, killReason: "timeout" as const };
+        return { stdout: "", stderr: "", exitCode: 1, timeoutMs: 120_000, killReason: "timeout" as const };
       }
       return { stdout: "ok", stderr: "", exitCode: 0 };
     });
@@ -1877,7 +1932,10 @@ describe("deploy - post-deploy build cache prune", () => {
     expect(result.success).toBe(true);
     const prune = result.steps.find((s) => s.name === BUILD_CACHE_PRUNE_STEP_NAME);
     expect(prune?.status).toBe("failure");
-    expect(prune?.output).toContain("timed out after 300 s");
+    expect(prune?.output).toContain("[relay] step timed out after 120 s (prune timeout is fixed; the next deploy retries the prune)");
+    // step_timeout_seconds does not govern this step, so the usual hint would
+    // send the operator to a knob that changes nothing.
+    expect(prune?.output).not.toContain("step_timeout_seconds");
   });
 
   it("keeps docker's reclaimed-space line in the prune step output", async () => {

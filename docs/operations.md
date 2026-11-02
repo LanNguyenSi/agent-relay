@@ -316,9 +316,10 @@ flowchart TD
 ## Disk and build cache
 
 Every relay deploy builds its app image on the host through docker, and the
-build cache only ever grows (hosts have reached ~150 GB). After a deploy
-turns `success` (the default flow and the `command` flow alike), the relay
-runs the build-cache-only prune:
+build cache only ever grows: on a host that deploys often it becomes one of
+the largest consumers of the disk. After a deploy turns `success` (the
+default flow and the `command` flow alike), the relay runs the
+build-cache-only prune:
 
 ```sh
 docker builder prune -f --filter until=<window>
@@ -341,6 +342,12 @@ pruned layers are rebuilt.
   the step `build cache prune` with its own status (`success`, `failure`
   or `skipped`), and a successful run's output carries docker's `Total
   reclaimed space: ...` line.
+- **Added latency:** the prune runs inside the deploy, after the health
+  check, so a successful deploy takes longer than before by however long
+  `docker builder prune` needs, up to its fixed 120 s timeout (killed at
+  that timeout and recorded as a `failure` step, the deploy still ends
+  `success`). The timeout is not `step_timeout_seconds`, which governs the
+  build and hook steps, and is not configurable.
 - **Skipped while busy:** while another operation (deploy, rollback or
   relay self-update) holds the shared operation lock, the prune is skipped
   (step output `skipped: another operation active`) so a concurrent build

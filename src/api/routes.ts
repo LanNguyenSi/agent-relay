@@ -128,7 +128,7 @@ api.post("/apps/:name/deploy", async (c) => {
     // invalid config return the same 404 the non-streaming path returns.
     //
     // The shared operation lock is taken in the same synchronous tick as the
-    // conflict check, before the config awaits below: acquireOperationLock
+    // conflict check, before the config awaits below: acquireOperationEntry
     // performs the check itself (it runs assertOperationAllowed first), so
     // there is no gap between "is a self-update active?" and "the lock is
     // mine". A self-update that arrives while this handler awaits
@@ -142,9 +142,19 @@ api.post("/apps/:name/deploy", async (c) => {
     // stream's finally. A client cancel is NOT an exit: the deploy keeps
     // running to its end, cancel() only stops sends, and the finally
     // releases the lock once it settles. An acquire conflict is a 409.
+    //
+    // The entry itself (not only its release) is kept and handed down:
+    // deploy() takes a second entry for itself, and the post-deploy
+    // build-cache prune gates on "some operation other than mine holds the
+    // lock" by entry identity, so it has to recognise this route's entry as
+    // this deploy's own (DeployOptions.heldOperation). Without it every
+    // stream deploy would record the prune as `skipped`.
     let releaseStreamLock: (() => void) | undefined;
+    let heldOperation: apps.ActiveOperation | undefined;
     try {
-      releaseStreamLock = apps.acquireOperationLock("deploy", name);
+      const lock = apps.acquireOperationEntry("deploy", name);
+      heldOperation = lock.entry;
+      releaseStreamLock = lock.release;
       const dir = await apps.safeAppDir(name); await loadRelayConfig(dir);
     } catch (err) {
       releaseStreamLock?.();
@@ -164,7 +174,7 @@ api.post("/apps/:name/deploy", async (c) => {
           try {
             const result = await apps.deployAppStreaming(
               name,
-              { branch: body.branch, force: body.force },
+              { branch: body.branch, force: body.force, heldOperation },
               (step) => send("step", step),
             );
 
