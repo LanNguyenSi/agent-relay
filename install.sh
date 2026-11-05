@@ -147,12 +147,24 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      # The ping entrypoint (:8082) is internal only: it has no ports: mapping.
+      # The traefik healthcheck command is a separate process with its own static
+      # config, so it repeats the two flags that locate the ping endpoint.
+      test: ["CMD", "traefik", "healthcheck", "--ping", "--ping.entrypoint=ping", "--entrypoints.ping.address=:8082"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=traefik-public"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
+      - "--ping=true"
+      - "--ping.entrypoint=ping"
+      - "--entrypoints.ping.address=:8082"
 $(if [ -n "$TRAEFIK_EMAIL" ] && [ "$TRAEFIK_CA" != "self-signed" ]; then
 cat <<ACME
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -179,6 +191,50 @@ networks:
   traefik-public:
     external: true
 TRAEFIK_EOF
+}
+
+# Bring the greenfield Traefik to the state the installer describes.
+# Uses the globals of agent_relay_write_traefik_compose plus TRAEFIK_CA.
+#   - no container named "traefik" runs: write the compose file and start it.
+#   - one runs and <traefik_dir>/docker-compose.yml exists (the installer's own
+#     file): rewrite the file and run "up -d", which recreates the container
+#     only when its configuration changed.
+#   - one runs and the file does not exist: it is not the installer's Traefik;
+#     leave it alone and warn.
+agent_relay_bootstrap_traefik() {
+  local traefik_dir="$1"
+  local compose_file="${traefik_dir}/docker-compose.yml"
+  local running
+
+  if ! docker network inspect traefik-public &>/dev/null; then
+    docker network create traefik-public >/dev/null
+    log "Created traefik-public network"
+  else
+    log "traefik-public network exists"
+  fi
+
+  running="$(docker ps --format '{{.Names}}' || true)"
+  if printf '%s\n' "$running" | grep -qx 'traefik'; then
+    if [ ! -f "$compose_file" ]; then
+      warn "A Traefik container is running but ${compose_file} does not exist: this Traefik is not managed by the installer and will not be updated (log rotation, healthcheck)."
+      return 0
+    fi
+    log "Traefik already running, converging compose"
+  else
+    info "Starting Traefik..."
+    mkdir -p "$traefik_dir"
+  fi
+
+  # The compose file bind-mounts acme.json; a missing source would be created
+  # by docker as a directory.
+  if [ "$TRAEFIK_CA" != "self-signed" ] && [ ! -e "${traefik_dir}/acme.json" ]; then
+    touch "${traefik_dir}/acme.json"
+    chmod 600 "${traefik_dir}/acme.json"
+  fi
+
+  agent_relay_write_traefik_compose "$traefik_dir"
+  docker compose -f "$compose_file" up -d
+  log "Traefik is up to date"
 }
 
 # Write relay docker-compose.yml to <relay_dir>/docker-compose.yml.
@@ -675,29 +731,7 @@ esac
 # ── Step 5: Traefik bootstrap (greenfield only) ────────────────────────────
 if [ "$RELAY_MODE" = "greenfield" ]; then
   agent_relay_check_greenfield_compat
-  if ! docker network inspect traefik-public &>/dev/null; then
-    docker network create traefik-public >/dev/null
-    log "Created traefik-public network"
-  else
-    log "traefik-public network exists"
-  fi
-
-  TRAEFIK_DIR="/opt/traefik"
-  if docker ps --format '{{.Names}}' | grep -q '^traefik$'; then
-    log "Traefik already running"
-  else
-    info "Starting Traefik..."
-    mkdir -p "$TRAEFIK_DIR"
-    if [ "$TRAEFIK_CA" != "self-signed" ]; then
-      touch "$TRAEFIK_DIR/acme.json"
-      chmod 600 "$TRAEFIK_DIR/acme.json"
-    fi
-
-    agent_relay_write_traefik_compose "$TRAEFIK_DIR"
-
-    docker compose -f "$TRAEFIK_DIR/docker-compose.yml" up -d
-    log "Traefik started"
-  fi
+  agent_relay_bootstrap_traefik "/opt/traefik"
 fi
 
 # ── Step 6: agent-relay ────────────────────────────────────────────────────
