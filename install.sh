@@ -1101,10 +1101,11 @@ echo -e "${CYAN}═════════════════════�
 # no wget on the host) already warned inside the probe, so the banner keeps the
 # plain ready line there.
 if [ "$HTTPS_ROUTE_RC" = "1" ]; then
-  # existing-traefik fronts the relay with the proxy detected on :80, so name
-  # that container (OWNER_NAME from the port 80 detection) when it has one.
-  if [ "$RELAY_MODE" = "existing-traefik" ] && [ -n "$OWNER_NAME" ]; then
-    proxy_logs_hint="docker logs ${OWNER_NAME}"
+  # existing-traefik fronts the relay with the Traefik container attached to
+  # TRAEFIK_NETWORK (traefik_on_net, validated above), so name that one; the
+  # owner of port 80 may be something else when the mode was set explicitly.
+  if [ "$RELAY_MODE" = "existing-traefik" ] && [ -n "${traefik_on_net:-}" ]; then
+    proxy_logs_hint="docker logs ${traefik_on_net}"
   else
     proxy_logs_hint="docker logs traefik"
   fi

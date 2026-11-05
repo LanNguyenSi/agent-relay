@@ -244,6 +244,12 @@ _plan() {
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 1 ]
   local call_line="${lines[0]%%:*}"
+  # The condition and the probe call are pinned verbatim: the plan output
+  # gates the probe and is handed to it as the insecure flag, 30 s bound.
+  run grep -cxF 'if [ "$probe_plan" != "skip" ]; then' "$INSTALL_SH"
+  [ "$output" = "1" ]
+  run grep -cxF '  agent_relay_probe_https_route "https://${RELAY_DOMAIN}/health" "$probe_plan" 30 || HTTPS_ROUTE_RC=$?' "$INSTALL_SH"
+  [ "$output" = "1" ]
   run grep -n 'agent_relay_probe_https_route "https://' "$INSTALL_SH"
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 1 ]
