@@ -171,7 +171,7 @@ git clone https://github.com/LanNguyenSi/agent-relay.git
 cd agent-relay
 npm install
 mkdir -p apps
-export AUTH_TOKEN=change-me APPS_DIR="$PWD/apps"
+export AUTH_TOKEN="$(openssl rand -hex 32)" APPS_DIR="$PWD/apps"
 npm run dev            # starts on port 8222 with hot reload (tsx watch)
 ```
 
@@ -180,12 +180,12 @@ npm run dev            # starts on port 8222 with hot reload (tsx watch)
 ### Docker
 
 ```bash
-# The dev compose fails closed without a token: export it first (or set it in .env)
-export AUTH_TOKEN=change-me
+# The dev compose fails closed without a token: generate and export one first (or set it in .env)
+export AUTH_TOKEN="$(openssl rand -hex 32)"
 docker compose up --build
 ```
 
-`AUTH_TOKEN` fails closed: if it is set neither in the shell nor in `.env`, the `AUTH_TOKEN` entry in `docker-compose.yml` uses the `${AUTH_TOKEN:?...}` form, so `docker compose up` exits with a hint instead of falling back to a well-known token on a relay that publishes port 8222 on all interfaces with the Docker socket mounted. On a machine reachable from a network, also change the port mapping to `127.0.0.1:8222:8222`.
+`AUTH_TOKEN` fails closed: if it is set neither in the shell nor in `.env`, the `AUTH_TOKEN` entry in `docker-compose.yml` uses the `${AUTH_TOKEN:?...}` form, so `docker compose up` exits with a hint instead of falling back to a well-known token; an empty value fails closed too, and `.env.example` ships `AUTH_TOKEN=` empty so a copied file does not start the relay with a public placeholder on a relay that publishes port 8222 on all interfaces with the Docker socket mounted. On a machine reachable from a network, also change the port mapping to `127.0.0.1:8222:8222`.
 
 The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management), the host apps directory `APPS_HOST_DIR` (default `./apps`) at `/apps` (the process inside the container reads it as `APPS_DIR=/apps`), and `/root/.ssh` read-only (so `git pull` can authenticate to private remotes over SSH). Override the apps source path with `APPS_HOST_DIR` and the SSH source path with `SSH_DIR` in the dev `docker-compose.yml`; the production `docker-compose.prod.example.yml` requires `APPS_HOST_DIR` the same way and mounts SSH identically. If your apps only use public or HTTPS git remotes, the SSH mount is harmless but unused. The compose file that `install.sh` generates has no SSH mount; see [VPS installer](#vps-installer).
 

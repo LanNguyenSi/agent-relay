@@ -190,3 +190,16 @@ _have_compose() {
   grep -qxF 'HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --start-interval=2s --retries=3 CMD wget -qO- "http://127.0.0.1:${PORT:-8222}/health" >/dev/null || exit 1' \
     "${ROOT}/Dockerfile"
 }
+
+@test ".env.example ships AUTH_TOKEN empty (no public placeholder token)" {
+  grep -qxF 'AUTH_TOKEN=' "${ROOT}/.env.example"
+  run grep -E '^AUTH_TOKEN=.+' "${ROOT}/.env.example"
+  [ "$status" -ne 0 ]
+}
+
+@test "dev compose fails closed on an empty AUTH_TOKEN" {
+  _have_compose || skip "docker compose not available"
+  run env AUTH_TOKEN= docker compose -f "${ROOT}/docker-compose.yml" config -q
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"set AUTH_TOKEN before starting the relay"* ]]
+}

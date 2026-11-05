@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- **The dev `docker-compose.yml` fails closed without `AUTH_TOKEN`.** With `AUTH_TOKEN` unset the file fell back to the well-known token `dev-token` while publishing port 8222 on all interfaces and mounting `/var/run/docker.sock`, so a forgotten export (`make docker-up` reaches the same file) started a relay anyone on the network could drive. The entry now uses the `${AUTH_TOKEN:?...}` form, so `docker compose up` exits with a hint pointing at `docs/operations.md` instead of starting. Set `AUTH_TOKEN` in the shell or in `.env` before `docker compose up`.
+- **The dev `docker-compose.yml` fails closed without `AUTH_TOKEN`.** With `AUTH_TOKEN` unset the file fell back to the well-known token `dev-token` while publishing port 8222 on all interfaces and mounting `/var/run/docker.sock`, so a forgotten export (`make docker-up` reaches the same file) started a relay anyone on the network could drive. The entry now uses the `${AUTH_TOKEN:?...}` form, so `docker compose up` exits with a hint pointing at `docs/operations.md` instead of starting. Set `AUTH_TOKEN` in the shell or in `.env` before `docker compose up`; an empty value fails closed as well, `.env.example` ships it empty, and the docs quickstarts generate the token with `openssl rand -hex 32` instead of a public placeholder.
 
 ### Fixed
 
