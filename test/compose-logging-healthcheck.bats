@@ -141,8 +141,47 @@ _have_compose() {
 
 @test "dev docker-compose.yml validates with docker compose config" {
   _have_compose || skip "docker compose not available"
-  run docker compose -f "${ROOT}/docker-compose.yml" config -q
+  # The compose file fails closed without AUTH_TOKEN, so the test sets it.
+  run env AUTH_TOKEN=test-token docker compose -f "${ROOT}/docker-compose.yml" config -q
   [ "$status" -eq 0 ]
+}
+
+@test "dev compose has no dev-token fallback" {
+  run grep -F 'dev-token' "${ROOT}/docker-compose.yml"
+  [ "$status" -ne 0 ]
+}
+
+@test "dev compose fails closed on a missing AUTH_TOKEN" {
+  grep -qF '      - AUTH_TOKEN=${AUTH_TOKEN:?set AUTH_TOKEN before starting the relay (see docs/operations.md)}' \
+    "${ROOT}/docker-compose.yml"
+}
+
+@test "dev compose fails closed with the hint when AUTH_TOKEN is unset" {
+  _have_compose || skip "docker compose not available"
+  cp "${ROOT}/docker-compose.yml" "${COMPOSE_DIR}/docker-compose.yml"
+  touch "${COMPOSE_DIR}/.env"
+  run env -u AUTH_TOKEN docker compose -f "${COMPOSE_DIR}/docker-compose.yml" config -q
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"set AUTH_TOKEN before starting the relay"* ]]
+  run env AUTH_TOKEN=test-token docker compose -f "${COMPOSE_DIR}/docker-compose.yml" config -q
+  [ "$status" -eq 0 ]
+}
+
+@test "dev compose mounts the host apps directory from APPS_HOST_DIR" {
+  grep -qF '      - ${APPS_HOST_DIR:-./apps}:/apps' "${ROOT}/docker-compose.yml"
+  run grep -F '${APPS_DIR:-./apps}:/apps' "${ROOT}/docker-compose.yml"
+  [ "$status" -ne 0 ]
+}
+
+@test "dev compose keeps APPS_DIR as the in-container path" {
+  grep -qxF '      - APPS_DIR=/apps' "${ROOT}/docker-compose.yml"
+}
+
+@test ".env.example keeps APPS_DIR=/apps and comments APPS_HOST_DIR" {
+  grep -qxF 'APPS_DIR=/apps' "${ROOT}/.env.example"
+  grep -qxF '# APPS_HOST_DIR=./apps' "${ROOT}/.env.example"
+  run grep -xF 'APPS_HOST_DIR=./apps' "${ROOT}/.env.example"
+  [ "$status" -ne 0 ]
 }
 
 # ─── Dockerfile HEALTHCHECK ──────────────────────────────────────────────────
@@ -150,4 +189,17 @@ _have_compose() {
 @test "Dockerfile declares the HEALTHCHECK against /health" {
   grep -qxF 'HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --start-interval=2s --retries=3 CMD wget -qO- "http://127.0.0.1:${PORT:-8222}/health" >/dev/null || exit 1' \
     "${ROOT}/Dockerfile"
+}
+
+@test ".env.example ships AUTH_TOKEN empty (no public placeholder token)" {
+  grep -qxF 'AUTH_TOKEN=' "${ROOT}/.env.example"
+  run grep -E '^AUTH_TOKEN=.+' "${ROOT}/.env.example"
+  [ "$status" -ne 0 ]
+}
+
+@test "dev compose fails closed on an empty AUTH_TOKEN" {
+  _have_compose || skip "docker compose not available"
+  run env AUTH_TOKEN= docker compose -f "${ROOT}/docker-compose.yml" config -q
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"set AUTH_TOKEN before starting the relay"* ]]
 }
