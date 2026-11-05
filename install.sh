@@ -44,7 +44,7 @@
 #   SKIP_TRAEFIK=1         Back-compat alias for RELAY_MODE=port-only
 #   TRAEFIK_REWRITE=1      Greenfield re-run: let the installer rewrite an existing /opt/traefik/docker-compose.yml
 #                          that has an ACME resolver even though this run would write none (TRAEFIK_EMAIL empty
-#                          or TRAEFIK_CA=self-signed). Without it that re-run stops before writing anything.
+#                          or TRAEFIK_CA=self-signed). Without it that re-run stops before changing the Traefik compose file.
 #   RELAY_FORCE_RECREATE=1 Remove an existing agent-relay container before `docker compose up` (use after a failed or conflicting earlier install)
 
 set -euo pipefail
@@ -238,7 +238,7 @@ agent_relay_bootstrap_traefik() {
     if grep -q -e '--certificatesresolvers\.' "$compose_file" \
       && { [ -z "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; } \
       && [ "${TRAEFIK_REWRITE:-}" != "1" ]; then
-      err "${compose_file} has an ACME certificate resolver, but this run (TRAEFIK_EMAIL='${TRAEFIK_EMAIL}', TRAEFIK_CA='${TRAEFIK_CA}') would write none: Traefik would lose TLS for every route. Re-run with the TRAEFIK_EMAIL and TRAEFIK_CA values of the first install, or set TRAEFIK_REWRITE=1 to rewrite it anyway. Nothing was changed."
+      err "${compose_file} has an ACME certificate resolver, but this run (TRAEFIK_EMAIL='${TRAEFIK_EMAIL}', TRAEFIK_CA='${TRAEFIK_CA}') would write none: Traefik would lose TLS for every route. Re-run with the TRAEFIK_EMAIL and TRAEFIK_CA values of the first install, or set TRAEFIK_REWRITE=1 to rewrite it anyway. The Traefik compose file was not changed."
     fi
     cp -p "$compose_file" "${compose_file}.bak"
     log "Previous ${compose_file} kept as ${compose_file}.bak"
