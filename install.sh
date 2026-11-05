@@ -191,15 +191,43 @@ agent_relay_greenfield_tls_route() {
   [ -n "$RELAY_DOMAIN" ] && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }
 }
 
+# The effective host bind of the published plain-HTTP port, i.e. the bind the
+# relay compose port line actually uses. Single source of truth shared by
+# agent_relay_write_relay_compose (greenfield port line) and the Step 7 UFW
+# hint (via agent_relay_ufw_ports), so the hint can never name a port the
+# relay is not reachable on. Rules, highest winner first:
+#   - non-greenfield modes: RELAY_BIND. port-only publishes exactly
+#     ${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT} whatever RELAY_BIND_SET says,
+#     and existing-traefik publishes no host port at all, so the
+#     all-interfaces fallback never applies outside greenfield.
+#   - greenfield with a TLS route: RELAY_BIND (default 127.0.0.1; the plain
+#     port is not the way in, so loopback is a safe default; an explicit
+#     RELAY_BIND still wins because it IS RELAY_BIND here).
+#   - greenfield without a TLS route and without an explicit RELAY_BIND
+#     (RELAY_BIND_SET != 1, unset or empty): the line is the bare
+#     PORT:PORT form, i.e. all interfaces, represented as 0.0.0.0.
+#   - otherwise: RELAY_BIND (an explicit bind, even 0.0.0.0).
+# Uses globals: RELAY_MODE, RELAY_BIND, RELAY_BIND_SET and the globals of
+# agent_relay_greenfield_tls_route. Prints the value; always exits 0.
+agent_relay_relay_bind() {
+  if [ "$RELAY_MODE" != "greenfield" ] || agent_relay_greenfield_tls_route || [ "${RELAY_BIND_SET:-}" = "1" ]; then
+    printf '%s' "$RELAY_BIND"
+  else
+    printf '0.0.0.0'
+  fi
+}
+
 # Write relay docker-compose.yml to <relay_dir>/docker-compose.yml.
 # Uses globals: RELAY_MODE, RELAY_PORT, APPS_DIR, RELAY_DOMAIN, TRAEFIK_EMAIL,
-#               TRAEFIK_CA, TRAEFIK_NETWORK, TRAEFIK_CERTRESOLVER, RELAY_BIND.
+#               TRAEFIK_CA, TRAEFIK_NETWORK, TRAEFIK_CERTRESOLVER, RELAY_BIND,
+#               RELAY_BIND_SET.
 agent_relay_write_relay_compose() {
   local relay_dir="$1"
-  local relay_network_name relay_cert_resolver relay_labels relay_port_line
+  local relay_network_name relay_cert_resolver relay_labels relay_port_line relay_bind
   case "$RELAY_MODE" in
     greenfield)
       relay_network_name="traefik-public"
+      relay_bind="$(agent_relay_relay_bind)"
       if [ "$TRAEFIK_CA" = "self-signed" ]; then
         relay_cert_resolver=""
       else
@@ -228,14 +256,18 @@ agent_relay_write_relay_compose() {
       - traefik.http.services.relay.loadbalancer.server.port=${RELAY_PORT}"
         fi
         # TLS route exists: the plain-HTTP port is not the way in, so it defaults
-        # to loopback. An explicit RELAY_BIND wins.
-        relay_port_line="${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT}"
+        # to loopback. An explicit RELAY_BIND wins (agent_relay_relay_bind
+        # returns RELAY_BIND whenever a TLS route exists).
+        relay_port_line="${relay_bind}:${RELAY_PORT}:${RELAY_PORT}"
       else
         relay_labels=""
         # No TLS route: the published port is the only access path. All
-        # interfaces unless RELAY_BIND was set explicitly.
-        if [ "${RELAY_BIND_SET:-}" = "1" ]; then
-          relay_port_line="${RELAY_BIND}:${RELAY_PORT}:${RELAY_PORT}"
+        # interfaces unless RELAY_BIND was set explicitly: agent_relay_relay_bind
+        # falls back to 0.0.0.0 only when RELAY_BIND was not set, and the bare
+        # PORT:PORT line (all interfaces) is emitted only for that fallback; an
+        # explicit RELAY_BIND, even 0.0.0.0, keeps the bind-qualified line.
+        if [ "$relay_bind" != "0.0.0.0" ] || [ "${RELAY_BIND_SET:-}" = "1" ]; then
+          relay_port_line="${relay_bind}:${RELAY_PORT}:${RELAY_PORT}"
         else
           relay_port_line="${RELAY_PORT}:${RELAY_PORT}"
         fi
@@ -435,7 +467,7 @@ agent_relay_write_env() {
 #   $2 tls_route    1 when a greenfield TLS route exists, 0 otherwise (ignored by
 #                   the other modes)
 #   $3 bind         effective host bind of the published plain-HTTP port (the one
-#                   the compose port line actually uses)
+#                   the compose port line actually uses, from agent_relay_relay_bind)
 #   $4 port         RELAY_PORT
 # Rules: a TLS route (greenfield with route, or existing-traefik, whose existing
 # proxy fronts the relay) needs 80/443; a plain-HTTP bind that is not loopback
@@ -975,18 +1007,12 @@ echo ""
 # different failure shapes and the warning would drift from the
 # actual fix. File as follow-up if needed.
 if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
-  # Effective host bind of the published plain-HTTP port, i.e. the one the relay
-  # compose port line uses (see agent_relay_write_relay_compose): a greenfield
-  # install with no TLS route and no explicit RELAY_BIND publishes on all
-  # interfaces; every other case publishes on RELAY_BIND.
-  bind_for_ufw="$RELAY_BIND"
-  if [ "$RELAY_MODE" = "greenfield" ] && [ "${GREENFIELD_TLS_ROUTE:-0}" = "0" ] && [ "$RELAY_BIND_SET" != "1" ]; then
-    bind_for_ufw="0.0.0.0"
-  fi
   # Ports the host firewall must open so the relay is actually reachable: a TLS
   # route fronts it on 80/443; a non-loopback plain-HTTP bind needs RELAY_PORT; a
-  # loopback-only relay needs nothing. Empty list means skip the hint.
-  ports_needed="$(agent_relay_ufw_ports "$RELAY_MODE" "${GREENFIELD_TLS_ROUTE:-}" "$bind_for_ufw" "$RELAY_PORT")"
+  # loopback-only relay needs nothing. Empty list means skip the hint. The bind
+  # argument is agent_relay_relay_bind, the single rule shared with the compose
+  # port line in agent_relay_write_relay_compose.
+  ports_needed="$(agent_relay_ufw_ports "$RELAY_MODE" "${GREENFIELD_TLS_ROUTE:-}" "$(agent_relay_relay_bind)" "$RELAY_PORT")"
 
   if [ -n "$ports_needed" ]; then
     missing=""

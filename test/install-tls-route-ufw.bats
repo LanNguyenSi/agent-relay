@@ -1,20 +1,20 @@
 #!/usr/bin/env bats
-# Tests for the extracted greenfield TLS-route predicate and the UFW port list
-# in install.sh.
+# Tests for the extracted greenfield TLS-route predicate, the shared effective
+# bind and the UFW port list in install.sh.
 #
 # install.sh is sourced with INSTALL_SH_SOURCE_ONLY=1, so no Docker or root is
-# needed. agent_relay_greenfield_tls_route and agent_relay_ufw_ports are defined
-# above the source-only guard; agent_relay_write_relay_compose pins the relay
-# compose port line for the staging / pebble-with-email TLS routes. The Step 7
-# summary and the UFW hint block live in the installer main body (below the
-# guard) and are reached only through these two functions.
+# needed. agent_relay_greenfield_tls_route, agent_relay_relay_bind and
+# agent_relay_ufw_ports are defined above the source-only guard;
+# agent_relay_write_relay_compose pins the relay compose port line for the
+# staging / pebble-with-email TLS routes and must agree with
+# agent_relay_relay_bind. The Step 7 summary and the UFW hint block live in the
+# installer main body (below the guard) and are reached only through these
+# functions.
 
 INSTALL_SH="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/install.sh"
 
 setup() {
-  # Temp dir inside the worktree: a bare mktemp targets /var/folders, which the
-  # sandbox denies (Operation not permitted).
-  COMPOSE_DIR="$(mktemp -d "${BATS_TEST_DIRNAME}/.tls-ufw-tmp.XXXXXX")"
+  COMPOSE_DIR="$(mktemp -d)"
 }
 
 teardown() {
@@ -59,6 +59,32 @@ _port_line() {
     TRAEFIK_CERTRESOLVER=letsencrypt
     agent_relay_write_relay_compose '${COMPOSE_DIR}'
     grep -E '^      - \"[0-9.:]*8222(:8222)?\"\$' '${COMPOSE_DIR}/docker-compose.yml'
+  " 2>&1
+}
+
+# _bind_line <mode> <domain> <email> <ca> [bind-env-assignment...]
+# One sourcing: prints the effective bind from agent_relay_relay_bind (as
+# "BIND <value>") and the single published-ports entry the compose writer
+# emits (as "LINE <entry>"), so each row asserts the function and the file
+# agree. RELAY_BIND is passed in the environment because install.sh records at
+# source time whether it was set explicitly; pass no assignment to leave it
+# absent.
+_bind_line() {
+  local mode="$1" domain="$2" email="$3" ca="$4"
+  shift 4
+  run env -u RELAY_BIND "$@" MODE_FOR="$mode" DOM="$domain" EML="$email" CA="$ca" bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    RELAY_MODE=\"\$MODE_FOR\"
+    RELAY_DOMAIN=\"\$DOM\"
+    TRAEFIK_EMAIL=\"\$EML\"
+    TRAEFIK_CA=\"\$CA\"
+    APPS_DIR=/home/deploy/apps
+    RELAY_PORT=8222
+    TRAEFIK_NETWORK=traefik-public
+    TRAEFIK_CERTRESOLVER=letsencrypt
+    echo \"BIND \$(agent_relay_relay_bind)\"
+    agent_relay_write_relay_compose '${COMPOSE_DIR}'
+    echo \"LINE \$(grep -E '^      - \"[0-9.:]*8222(:8222)?\"\$' '${COMPOSE_DIR}/docker-compose.yml')\"
   " 2>&1
 }
 
@@ -118,6 +144,85 @@ _port_line() {
   _port_line greenfield relay.example.com admin@example.com pebble
   [ "$status" -eq 0 ]
   [ "$output" = '      - "127.0.0.1:8222:8222"' ]
+}
+
+# ─── agent_relay_relay_bind: effective-bind table ─────────────────────────────
+# Each row pins the bind the function prints and the compose port line that
+# agrees with it. Which input wins: an explicit non-empty RELAY_BIND always
+# wins and is bind-qualified (even 0.0.0.0); with a TLS route and no explicit
+# bind the default 127.0.0.1 wins over the fallback; without a TLS route and
+# with RELAY_BIND absent or empty the all-interfaces fallback wins (printed as
+# 0.0.0.0, emitted as the bare PORT:PORT line); outside greenfield RELAY_BIND
+# always wins (port-only publishes exactly on it, default included).
+
+@test "bind: greenfield no TLS route, RELAY_BIND absent -> 0.0.0.0, bare port line" {
+  _bind_line greenfield "" "" letsencrypt
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 0.0.0.0" ]
+  [ "${lines[1]}" = 'LINE       - "8222:8222"' ]
+}
+
+@test "bind: greenfield no TLS route, RELAY_BIND empty -> 0.0.0.0 (empty counts as unset), bare port line" {
+  _bind_line greenfield "" "" letsencrypt RELAY_BIND=
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 0.0.0.0" ]
+  [ "${lines[1]}" = 'LINE       - "8222:8222"' ]
+}
+
+@test "bind: greenfield no TLS route, RELAY_BIND=127.0.0.1 -> explicit bind wins, qualified port line" {
+  _bind_line greenfield "" "" letsencrypt RELAY_BIND=127.0.0.1
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 127.0.0.1" ]
+  [ "${lines[1]}" = 'LINE       - "127.0.0.1:8222:8222"' ]
+}
+
+@test "bind: greenfield no TLS route, RELAY_BIND=0.0.0.0 -> explicit bind wins over fallback, qualified port line" {
+  _bind_line greenfield "" "" letsencrypt RELAY_BIND=0.0.0.0
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 0.0.0.0" ]
+  [ "${lines[1]}" = 'LINE       - "0.0.0.0:8222:8222"' ]
+}
+
+@test "bind: greenfield with TLS route, RELAY_BIND absent -> default 127.0.0.1, qualified port line" {
+  _bind_line greenfield relay.example.com admin@example.com letsencrypt
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 127.0.0.1" ]
+  [ "${lines[1]}" = 'LINE       - "127.0.0.1:8222:8222"' ]
+}
+
+@test "bind: greenfield with TLS route, RELAY_BIND empty -> default 127.0.0.1, qualified port line" {
+  _bind_line greenfield relay.example.com admin@example.com letsencrypt RELAY_BIND=
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 127.0.0.1" ]
+  [ "${lines[1]}" = 'LINE       - "127.0.0.1:8222:8222"' ]
+}
+
+@test "bind: greenfield with TLS route, RELAY_BIND=127.0.0.1 -> explicit bind wins, qualified port line" {
+  _bind_line greenfield relay.example.com admin@example.com letsencrypt RELAY_BIND=127.0.0.1
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 127.0.0.1" ]
+  [ "${lines[1]}" = 'LINE       - "127.0.0.1:8222:8222"' ]
+}
+
+@test "bind: greenfield with TLS route, RELAY_BIND=0.0.0.0 -> explicit bind wins, qualified port line" {
+  _bind_line greenfield relay.example.com admin@example.com letsencrypt RELAY_BIND=0.0.0.0
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 0.0.0.0" ]
+  [ "${lines[1]}" = 'LINE       - "0.0.0.0:8222:8222"' ]
+}
+
+@test "bind: port-only, RELAY_BIND absent -> default 127.0.0.1 (no fallback outside greenfield), qualified port line" {
+  _bind_line port-only "" "" letsencrypt
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 127.0.0.1" ]
+  [ "${lines[1]}" = 'LINE       - "127.0.0.1:8222:8222"' ]
+}
+
+@test "bind: port-only, RELAY_BIND=0.0.0.0 -> RELAY_BIND, qualified port line" {
+  _bind_line port-only "" "" letsencrypt RELAY_BIND=0.0.0.0
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "BIND 0.0.0.0" ]
+  [ "${lines[1]}" = 'LINE       - "0.0.0.0:8222:8222"' ]
 }
 
 # ─── agent_relay_ufw_ports: UFW port table ────────────────────────────────────
