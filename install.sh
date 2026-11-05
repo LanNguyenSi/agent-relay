@@ -419,6 +419,49 @@ agent_relay_write_env() {
   fi
 }
 
+# ── Public HTTPS route probe (warn only) ─────────────────────────────────────
+# The post-install /health probe runs `docker exec` inside the relay container,
+# which proves the relay answers itself but says nothing about the public route:
+# ACME issuance is asynchronous, and a domain that does not resolve, a blocked
+# port 80 or a typo in RELAY_DOMAIN leaves https://RELAY_DOMAIN dark while the
+# install still reports success. Probe the route from the host instead:
+# <url> <insecure 0|1> <seconds> [<interval>], one request every <interval>
+# seconds (default 3) for up to <seconds>. curl is preferred, wget is the
+# fallback. Returns 0 on the first success, 1 when the window expires, 2 when
+# the host has neither tool (the caller keeps the plain banner in that case;
+# a plain 1 is the only one that rewords it). Never fails the install.
+# Defined above the source-only guard so tests can shim curl/wget on PATH and
+# call it with a fast interval.
+agent_relay_probe_https_route() {
+  local url="$1" insecure="$2" seconds="$3" interval="${4:-3}"
+  local probe_tool deadline
+  local -a probe_cmd
+
+  if command -v curl >/dev/null 2>&1; then
+    probe_tool=curl
+    probe_cmd=(curl -fsS --max-time 5)
+    [ "$insecure" = "1" ] && probe_cmd+=(-k)
+  elif command -v wget >/dev/null 2>&1; then
+    probe_tool=wget
+    probe_cmd=(wget -q -O /dev/null)
+    [ "$insecure" = "1" ] && probe_cmd+=(--no-check-certificate)
+  else
+    warn "Neither curl nor wget is installed: cannot probe ${url}."
+    return 2
+  fi
+  probe_cmd+=("$url")
+
+  deadline=$(( $(date +%s) + seconds ))
+  while ! "${probe_cmd[@]}" >/dev/null 2>&1; do
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    if [ "$interval" != "0" ]; then
+      sleep "$interval"
+    fi
+  done
+  log "HTTPS route answered (${probe_tool})"
+  return 0
+}
+
 # ── Source-only guard ────────────────────────────────────────────────────────
 # Sourcing with INSTALL_SH_SOURCE_ONLY=1 stops here so tests can inject
 # id/docker shims and call the above functions directly without side effects.
@@ -827,6 +870,27 @@ if [ "$health_ok" != "1" ]; then
   err "Install finished but health check failed. See logs above."
 fi
 
+# Public HTTPS route probe (warn only) — runs only when this install
+# created a TLS route: existing-traefik always routes RELAY_DOMAIN through the
+# existing Traefik; greenfield only when the Traefik labels exist, i.e.
+# RELAY_DOMAIN plus TRAEFIK_EMAIL or TRAEFIK_CA=self-signed (install.sh has no
+# shared helper for that condition, so it is spelled out here exactly as in
+# agent_relay_write_relay_compose and in the URL choice below). Self-signed
+# only happens in greenfield, and there the probe must ignore the certificate.
+# The result never fails the install: it only rewords the banner below.
+HTTPS_ROUTE_RC=0
+if [ "$RELAY_MODE" = "existing-traefik" ] \
+   || { [ "$RELAY_MODE" = "greenfield" ] \
+        && [ -n "$RELAY_DOMAIN" ] \
+        && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }; }; then
+  route_insecure=0
+  if [ "$RELAY_MODE" = "greenfield" ] && [ "$TRAEFIK_CA" = "self-signed" ]; then
+    route_insecure=1
+  fi
+  info "Probing the public HTTPS route https://${RELAY_DOMAIN}/health (up to 30s)…"
+  agent_relay_probe_https_route "https://${RELAY_DOMAIN}/health" "$route_insecure" 30 || HTTPS_ROUTE_RC=$?
+fi
+
 # ── Step 7: Print connection info ──────────────────────────────────────────
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 HOST_IP="${HOST_IP:-<set-host-ip>}"
@@ -859,7 +923,15 @@ esac
 
 echo ""
 echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN} agent-relay is ready!${NC}"
+# rc 1 = the public route stayed dark for the whole window. rc 2 (no curl and
+# no wget on the host) already warned inside the probe, so the banner keeps the
+# plain ready line there.
+if [ "$HTTPS_ROUTE_RC" = "1" ]; then
+  echo -e "${YELLOW} agent-relay started, but the HTTPS route https://${RELAY_DOMAIN} is not answering yet:${NC}"
+  echo -e "   check DNS for RELAY_DOMAIN, that port 80 reaches this host (ACME), and \`docker logs traefik\`."
+else
+  echo -e "${GREEN} agent-relay is ready!${NC}"
+fi
 echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
 echo ""
 echo -e "  Mode:  ${CYAN}${RELAY_MODE}${NC}"
