@@ -5,11 +5,11 @@ services:
       - "8222:8222"
     environment:
       - PORT=8222
-      - AUTH_TOKEN=${AUTH_TOKEN:-dev-token}
+      - AUTH_TOKEN=${AUTH_TOKEN:?set AUTH_TOKEN before starting the relay (see docs/operations.md)}
       - APPS_DIR=/apps
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${APPS_DIR:-./apps}:/apps
+      - ${APPS_HOST_DIR:-./apps}:/apps
       - ${SSH_DIR:-/root/.ssh}:/root/.ssh:ro
     restart: unless-stopped
     logging:
