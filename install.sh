@@ -550,7 +550,9 @@ agent_relay_write_env() {
 # install still reports success. Probe the route from the host instead:
 # <url> <insecure 0|1> <seconds> [<interval>], one request every <interval>
 # seconds (default 3) for up to <seconds>. curl is preferred, wget is the
-# fallback. Returns 0 on the first success, 1 when the window expires, 2 when
+# fallback, and every attempt is bounded to 5 s on both (--max-time 5; wget
+# -T 5 -t 1) so one hanging request cannot block the window.
+# Returns 0 on the first success, 1 when the window expires, 2 when
 # the host has neither tool (the caller keeps the plain banner in that case;
 # a plain 1 is the only one that rewords it). Never fails the install.
 # Defined above the source-only guard so tests can shim curl/wget on PATH and
@@ -566,7 +568,7 @@ agent_relay_probe_https_route() {
     [ "$insecure" = "1" ] && probe_cmd+=(-k)
   elif command -v wget >/dev/null 2>&1; then
     probe_tool=wget
-    probe_cmd=(wget -q -O /dev/null)
+    probe_cmd=(wget -q -T 5 -t 1 -O /dev/null)
     [ "$insecure" = "1" ] && probe_cmd+=(--no-check-certificate)
   else
     warn "Neither curl nor wget is installed: cannot probe ${url}."
@@ -619,6 +621,47 @@ agent_relay_ufw_ports() {
       ;;
   esac
   return 0
+}
+
+# The post-install HTTPS route probe decision as data, so the call site holds
+# no condition of its own. Prints one word: "skip" (no TLS route was created,
+# do not probe), or the insecure flag "0" / "1" for agent_relay_probe_https_route.
+# Rules, highest winner first:
+#   - existing-traefik always routes RELAY_DOMAIN through the existing proxy:
+#     probe (0), whatever TRAEFIK_CA says (it is ignored outside greenfield).
+#     The proxy's certificate is the operator's own choice, so certificate
+#     checks stay on.
+#   - greenfield: probe only when a TLS route exists (the single predicate
+#     agent_relay_greenfield_tls_route: RELAY_DOMAIN plus TRAEFIK_EMAIL or
+#     TRAEFIK_CA=self-signed), otherwise skip. The certificate then comes from
+#     the TRAEFIK_CA resolver, and every CA other than the production
+#     letsencrypt one (staging, pebble, self-signed) serves a certificate the
+#     host does not trust, so the probe needs the insecure flag 1 there; only
+#     letsencrypt probes verified (0).
+#   - every other mode (port-only, unresolved auto): skip.
+# Uses globals: RELAY_MODE, RELAY_DOMAIN, TRAEFIK_EMAIL, TRAEFIK_CA. Prints
+# the word; always exits 0. Defined above the source-only guard so tests can
+# drive every row.
+agent_relay_https_probe_plan() {
+  case "$RELAY_MODE" in
+    existing-traefik)
+      printf '0'
+      ;;
+    greenfield)
+      if agent_relay_greenfield_tls_route; then
+        if [ "$TRAEFIK_CA" = "letsencrypt" ]; then
+          printf '0'
+        else
+          printf '1'
+        fi
+      else
+        printf 'skip'
+      fi
+      ;;
+    *)
+      printf 'skip'
+      ;;
+  esac
 }
 
 # ── Source-only guard ────────────────────────────────────────────────────────
@@ -1007,25 +1050,19 @@ if [ "$health_ok" != "1" ]; then
   err "Install finished but health check failed. See logs above."
 fi
 
-# Public HTTPS route probe (warn only) — runs only when this install
-# created a TLS route: existing-traefik always routes RELAY_DOMAIN through the
-# existing Traefik; greenfield only when the Traefik labels exist, i.e.
-# RELAY_DOMAIN plus TRAEFIK_EMAIL or TRAEFIK_CA=self-signed (install.sh has no
-# shared helper for that condition, so it is spelled out here exactly as in
-# agent_relay_write_relay_compose and in the URL choice below). Self-signed
-# only happens in greenfield, and there the probe must ignore the certificate.
-# The result never fails the install: it only rewords the banner below.
+# Public HTTPS route probe (warn only), runs only when this install created a
+# TLS route: agent_relay_https_probe_plan decides from RELAY_MODE, RELAY_DOMAIN,
+# TRAEFIK_EMAIL and TRAEFIK_CA (existing-traefik always, greenfield when the
+# Traefik labels exist) and prints the insecure flag to go with it: every
+# greenfield CA other than letsencrypt (staging, pebble, self-signed) serves a
+# certificate the host does not trust, so there the probe runs with certificate
+# checks off. The result never fails the install: it only rewords the banner
+# below.
 HTTPS_ROUTE_RC=0
-if [ "$RELAY_MODE" = "existing-traefik" ] \
-   || { [ "$RELAY_MODE" = "greenfield" ] \
-        && [ -n "$RELAY_DOMAIN" ] \
-        && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }; }; then
-  route_insecure=0
-  if [ "$RELAY_MODE" = "greenfield" ] && [ "$TRAEFIK_CA" = "self-signed" ]; then
-    route_insecure=1
-  fi
+probe_plan="$(agent_relay_https_probe_plan)"
+if [ "$probe_plan" != "skip" ]; then
   info "Probing the public HTTPS route https://${RELAY_DOMAIN}/health (up to 30s)…"
-  agent_relay_probe_https_route "https://${RELAY_DOMAIN}/health" "$route_insecure" 30 || HTTPS_ROUTE_RC=$?
+  agent_relay_probe_https_route "https://${RELAY_DOMAIN}/health" "$probe_plan" 30 || HTTPS_ROUTE_RC=$?
 fi
 
 # ── Step 7: Print connection info ──────────────────────────────────────────
@@ -1064,8 +1101,16 @@ echo -e "${CYAN}═════════════════════�
 # no wget on the host) already warned inside the probe, so the banner keeps the
 # plain ready line there.
 if [ "$HTTPS_ROUTE_RC" = "1" ]; then
+  # existing-traefik fronts the relay with the proxy detected on :80, so name
+  # that container (OWNER_NAME from the port 80 detection) when it has one.
+  if [ "$RELAY_MODE" = "existing-traefik" ] && [ -n "$OWNER_NAME" ]; then
+    proxy_logs_hint="docker logs ${OWNER_NAME}"
+  else
+    proxy_logs_hint="docker logs traefik"
+  fi
   echo -e "${YELLOW} agent-relay started, but the HTTPS route https://${RELAY_DOMAIN} is not answering yet:${NC}"
-  echo -e "   check DNS for RELAY_DOMAIN, that port 80 reaches this host (ACME), and \`docker logs traefik\`."
+  echo -e "   check DNS for RELAY_DOMAIN, that port 80 reaches this host (ACME), and \`${proxy_logs_hint}\`,"
+  echo -e "   or the host cannot reach its own public address (hairpin NAT): check from another machine."
 else
   echo -e "${GREEN} agent-relay is ready!${NC}"
 fi

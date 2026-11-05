@@ -1,11 +1,12 @@
 #!/usr/bin/env bats
-# Tests for agent_relay_probe_https_route() in install.sh — the warn-only host
-# probe of the public HTTPS route that runs after the in-container /health
-# probe.
+# Tests for agent_relay_probe_https_route() and agent_relay_https_probe_plan()
+# in install.sh: the warn-only host probe of the public HTTPS route that runs
+# after the in-container /health probe, and the decision that drives it.
 #
-# Source-only pattern only: the function lives above the INSTALL_SH_SOURCE_ONLY
-# guard, so these tests source install.sh and call it directly with curl/wget
-# shims on PATH (a fast interval and a 1 s window keep it quick).
+# Source-only pattern only: the functions live above the INSTALL_SH_SOURCE_ONLY
+# guard, so these tests source install.sh and call them directly with curl/wget
+# shims on PATH (a fast interval and a 2 s window keep it quick; 1 s would sit
+# on the 1 s resolution of date +%s and could expire before the first probe).
 
 INSTALL_SH="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/install.sh"
 
@@ -87,12 +88,12 @@ _calls() {
   [ "$(_calls)" -eq 3 ]
 }
 
-@test "curl never answers: returns 1 within the 1s window" {
+@test "curl never answers: returns 1 within the 2s window" {
   _make_shim curl always-fail
   local start=$SECONDS
   _run_sourced "
     PATH='${SHIM_DIR}':\$PATH
-    agent_relay_probe_https_route https://relay.example.com/health 0 1 0
+    agent_relay_probe_https_route https://relay.example.com/health 0 2 0
   "
   [ "$status" -eq 1 ]
   # Retried (more than one request) but stopped at the window, not ran forever.
@@ -105,7 +106,7 @@ _calls() {
   local start=$SECONDS
   _run_sourced "
     PATH='${SHIM_DIR}':\$PATH
-    agent_relay_probe_https_route https://relay.example.com/health 0 1
+    agent_relay_probe_https_route https://relay.example.com/health 0 2
   "
   [ "$status" -eq 1 ]
   # One request before the window, one after the 3s sleep: an interval of 0
@@ -150,7 +151,7 @@ _calls() {
   "
   [ "$status" -eq 0 ]
   [ "$(_calls)" -eq 1 ]
-  run grep -q -- '-q -O /dev/null https://relay.example.com/health' "$ARGV"
+  run grep -q -- '-q -T 5 -t 1 -O /dev/null https://relay.example.com/health' "$ARGV"
   [ "$status" -eq 0 ]
 }
 
@@ -177,4 +178,77 @@ _calls() {
   [ "$status" -eq 2 ]
   [[ "$output" == *"Neither curl nor wget"* ]]
   [ "$(_calls)" -eq 0 ]
+}
+
+# ─── probe plan (the call-site decision as data) ─────────────────────────────
+# agent_relay_https_probe_plan prints skip (no probe), 0 or 1 (the insecure
+# flag). Precedence: RELAY_MODE wins first (existing-traefik always probes with
+# 0, every other non-greenfield mode skips, whatever the other inputs say),
+# inside greenfield the TLS-route condition decides probe-vs-skip, and only
+# then TRAEFIK_CA decides the flag: 1 for every CA the host does not trust
+# (staging, pebble, self-signed), 0 only for letsencrypt.
+
+_plan() {
+  _run_sourced "
+    RELAY_MODE='$1'
+    RELAY_DOMAIN='$2'
+    TRAEFIK_EMAIL='$3'
+    TRAEFIK_CA='$4'
+    agent_relay_https_probe_plan
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "$5" ]
+}
+
+@test "plan: existing-traefik probes with certificate checks on (0)" {
+  _plan existing-traefik relay.example.com ops@example.com letsencrypt 0
+}
+
+@test "plan: existing-traefik ignores TRAEFIK_CA, still 0 (mode term wins)" {
+  _plan existing-traefik relay.example.com ops@example.com staging 0
+}
+
+@test "plan: greenfield letsencrypt with domain and email probes verified (0)" {
+  _plan greenfield relay.example.com ops@example.com letsencrypt 0
+}
+
+@test "plan: greenfield staging probes with certificate checks off (1)" {
+  _plan greenfield relay.example.com ops@example.com staging 1
+}
+
+@test "plan: greenfield pebble probes with certificate checks off (1)" {
+  _plan greenfield relay.example.com ops@example.com pebble 1
+}
+
+@test "plan: greenfield self-signed with domain probes with certificate checks off (1)" {
+  _plan greenfield relay.example.com '' self-signed 1
+}
+
+@test "plan: greenfield domain without email has no TLS route: skip" {
+  _plan greenfield relay.example.com '' letsencrypt skip
+}
+
+@test "plan: greenfield without domain has no TLS route: skip" {
+  _plan greenfield '' ops@example.com letsencrypt skip
+}
+
+@test "plan: port-only has no TLS route: skip" {
+  _plan port-only relay.example.com ops@example.com letsencrypt skip
+}
+
+@test "install.sh calls the plan and the probe exactly once, below the source-only guard" {
+  # The call site must ask the plan and hand its non-skip output to the probe
+  # exactly once: the trailing quote in each pattern matches only the real
+  # call, not the function definitions or the comments naming them.
+  run grep -n 'agent_relay_https_probe_plan)"' "$INSTALL_SH"
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  local call_line="${lines[0]%%:*}"
+  run grep -n 'agent_relay_probe_https_route "https://' "$INSTALL_SH"
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  local guard_line
+  guard_line="$(grep -n 'INSTALL_SH_SOURCE_ONLY:-}" = "1" \]' "$INSTALL_SH" | head -1 | cut -d: -f1)"
+  [ -n "$guard_line" ]
+  [ "$call_line" -gt "$guard_line" ]
 }
