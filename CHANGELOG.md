@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Dependency updates: `renovate.json` extends the shared `github>LanNguyenSi/renovate-config` preset (weekly grouped patch/minor pull requests, 7-day minimum release age, no automerge, majors only through the Dependency Dashboard).
+- **The dev compose reads the host apps directory from `APPS_HOST_DIR`.** The apps mount was `${APPS_DIR:-./apps}:/apps` while the same file sets `APPS_DIR=/apps` for the process and `.env.example` sets `APPS_DIR=/apps`, so a `.env` copied from `.env.example` mounted the host's `/apps` (usually empty) and the relay listed no apps. The mount is now `${APPS_HOST_DIR:-./apps}:/apps`, like `docker-compose.prod.example.yml`, and `APPS_DIR=/apps` stays the in-container value. Upgrade note: a dev setup that set `APPS_DIR` to a host path for the compose mount must set `APPS_HOST_DIR` to that path instead; `APPS_DIR` keeps its separate meaning for `npm run dev` on the host (see [docs/operations.md](docs/operations.md#docker)).
+
+### Security
+
+- **The dev `docker-compose.yml` fails closed without `AUTH_TOKEN`.** With `AUTH_TOKEN` unset the file fell back to the well-known token `dev-token` while publishing port 8222 on all interfaces and mounting `/var/run/docker.sock`, so a forgotten export (`make docker-up` reaches the same file) started a relay anyone on the network could drive. The entry now uses the `${AUTH_TOKEN:?...}` form, so `docker compose up` exits with a hint pointing at `docs/operations.md` instead of starting. Set `AUTH_TOKEN` in the shell or in `.env` before `docker compose up`.
 
 ### Documentation
 

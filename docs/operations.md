@@ -177,13 +177,14 @@ npm run dev            # starts on port 8222 with hot reload (tsx watch)
 ### Docker
 
 ```bash
-# Set AUTH_TOKEN in environment or .env file
+# The dev compose fails closed without a token: export it first (or set it in .env)
+export AUTH_TOKEN=change-me
 docker compose up --build
 ```
 
-If `AUTH_TOKEN` is set neither in the shell nor in `.env`, this compose file falls back to the token `dev-token` while publishing port 8222 on all interfaces with the Docker socket mounted. On a machine reachable from a network, set a real token or change the port mapping to `127.0.0.1:8222:8222`.
+`AUTH_TOKEN` fails closed: if it is set neither in the shell nor in `.env`, the `AUTH_TOKEN` entry in `docker-compose.yml` uses the `${AUTH_TOKEN:?...}` form, so `docker compose up` exits with a hint instead of falling back to a well-known token on a relay that publishes port 8222 on all interfaces with the Docker socket mounted. On a machine reachable from a network, also change the port mapping to `127.0.0.1:8222:8222`.
 
-The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management), the apps directory, and `/root/.ssh` read-only (so `git pull` can authenticate to private remotes over SSH). Override the SSH source path with `SSH_DIR` in the dev `docker-compose.yml`; the production `docker-compose.prod.example.yml` mounts it the same way. If your apps only use public or HTTPS git remotes, the SSH mount is harmless but unused. The compose file that `install.sh` generates has no SSH mount; see [VPS installer](#vps-installer).
+The `docker-compose.yml` mounts `/var/run/docker.sock` (for container management), the host apps directory `APPS_HOST_DIR` (default `./apps`) at `/apps` (the process inside the container reads it as `APPS_DIR=/apps`), and `/root/.ssh` read-only (so `git pull` can authenticate to private remotes over SSH). Override the apps source path with `APPS_HOST_DIR` and the SSH source path with `SSH_DIR` in the dev `docker-compose.yml`; the production `docker-compose.prod.example.yml` requires `APPS_HOST_DIR` the same way and mounts SSH identically. If your apps only use public or HTTPS git remotes, the SSH mount is harmless but unused. The compose file that `install.sh` generates has no SSH mount; see [VPS installer](#vps-installer).
 
 ### Zombie processes (defunct `[git]` entries)
 
