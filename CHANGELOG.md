@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Dependency updates: `renovate.json` extends the shared `github>LanNguyenSi/renovate-config` preset (weekly grouped patch/minor pull requests, 7-day minimum release age, no automerge, majors only through the Dependency Dashboard).
 
+### Fixed
+
+- **The greenfield TLS route is now one predicate, and the UFW hint names the port the relay is really reachable on.** The condition "a TLS route exists" (greenfield with `RELAY_DOMAIN` set together with `TRAEFIK_EMAIL` or `TRAEFIK_CA=self-signed`) was written twice in `install.sh`, once for the Traefik labels and once for the final summary; both now call one `agent_relay_greenfield_tls_route`, so the labels, the printed URL and the firewall hint cannot drift. The UFW hint built its port list from the mode alone and always named `80/tcp 443/tcp` for a greenfield install, even when there is no TLS route and the relay is published only on `RELAY_PORT` (or not at all, when the effective bind is `127.0.0.1`). The ports now come from a new `agent_relay_ufw_ports <mode> <tls_route> <bind> <port>`: `80/tcp 443/tcp` for a greenfield install with a TLS route or an `existing-traefik` install, `RELAY_PORT/tcp` for a greenfield install without a TLS route or a `port-only` install only when the effective bind is not `127.0.0.1`, and nothing for a loopback-only relay (which prints no hint).
+
 ### Documentation
 
 - **Rolling the relay back to a specific image is documented.** `docs/operations.md` gains a "Rolling back to a specific image" subsection: pin the `image:` line in `$RELAY_DIR/docker-compose.yml` to a `main-<sha>` or semver tag, `docker compose pull && docker compose up -d`, verify via `/health` (`revision` reports the build SHA); why self-update refuses while the image is pinned (exact `image:` match against the requested `latest`, and `main-<sha>`-only tags, so a semver pin can never be requested through it); and how to return to `:latest` (edit back, or re-run `install.sh`, which rewrites the line).

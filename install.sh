@@ -181,6 +181,16 @@ networks:
 TRAEFIK_EOF
 }
 
+# True (exit 0) when the greenfield config produces a TLS route: RELAY_DOMAIN is
+# set AND (TRAEFIK_EMAIL is set OR TRAEFIK_CA is self-signed). This is the single
+# source of truth for that condition; both agent_relay_write_relay_compose (which
+# decides whether to emit the Traefik labels) and the Step 7 summary (which
+# decides the HTTPS URL and GREENFIELD_TLS_ROUTE) call it so they can never drift.
+# Uses globals: RELAY_DOMAIN, TRAEFIK_EMAIL, TRAEFIK_CA.
+agent_relay_greenfield_tls_route() {
+  [ -n "$RELAY_DOMAIN" ] && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }
+}
+
 # Write relay docker-compose.yml to <relay_dir>/docker-compose.yml.
 # Uses globals: RELAY_MODE, RELAY_PORT, APPS_DIR, RELAY_DOMAIN, TRAEFIK_EMAIL,
 #               TRAEFIK_CA, TRAEFIK_NETWORK, TRAEFIK_CERTRESOLVER, RELAY_BIND.
@@ -196,7 +206,7 @@ agent_relay_write_relay_compose() {
         relay_cert_resolver="letsencrypt"
       fi
       # Labels are needed when RELAY_DOMAIN is set AND (TRAEFIK_EMAIL is set OR using self-signed).
-      if [ -n "$RELAY_DOMAIN" ] && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }; then
+      if agent_relay_greenfield_tls_route; then
         if [ -n "$relay_cert_resolver" ]; then
           relay_labels="    labels:
       - traefik.enable=true
@@ -417,6 +427,42 @@ agent_relay_write_env() {
     rm -f "$tmp"
     return 1
   fi
+}
+
+# Space-separated list of host firewall ports (ufw form, e.g. "80/tcp 443/tcp")
+# that must be open for the relay to be reachable, given:
+#   $1 mode         greenfield | existing-traefik | port-only
+#   $2 tls_route    1 when a greenfield TLS route exists, 0 otherwise (ignored by
+#                   the other modes)
+#   $3 bind         effective host bind of the published plain-HTTP port (the one
+#                   the compose port line actually uses)
+#   $4 port         RELAY_PORT
+# Rules: a TLS route (greenfield with route, or existing-traefik, whose existing
+# proxy fronts the relay) needs 80/443; a plain-HTTP bind that is not loopback
+# needs RELAY_PORT; a loopback-only relay (no route, bind 127.0.0.1) needs
+# nothing. Empty output means there is nothing to open, so the caller skips the
+# UFW hint. Always exits 0 (callers capture it in a command substitution under
+# set -e). Defined above the source-only guard so tests can exercise it directly.
+agent_relay_ufw_ports() {
+  local mode="$1" tls_route="$2" bind="$3" port="$4"
+  case "$mode" in
+    greenfield)
+      if [ "$tls_route" = "1" ]; then
+        printf '80/tcp 443/tcp'
+      elif [ "$bind" != "127.0.0.1" ]; then
+        printf '%s/tcp' "$port"
+      fi
+      ;;
+    existing-traefik)
+      printf '80/tcp 443/tcp'
+      ;;
+    port-only)
+      if [ "$bind" != "127.0.0.1" ]; then
+        printf '%s/tcp' "$port"
+      fi
+      ;;
+  esac
+  return 0
 }
 
 # ── Source-only guard ────────────────────────────────────────────────────────
@@ -836,7 +882,7 @@ case "$RELAY_MODE" in
     # The HTTPS URL is only true when the TLS route exists (same condition as
     # the Traefik labels in agent_relay_write_relay_compose); otherwise the
     # published plain-HTTP port is the only way in.
-    if [ -n "$RELAY_DOMAIN" ] && { [ -n "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; }; then
+    if agent_relay_greenfield_tls_route; then
       RELAY_URL="https://${RELAY_DOMAIN}"
       GREENFIELD_TLS_ROUTE=1
     else
@@ -929,18 +975,18 @@ echo ""
 # different failure shapes and the warning would drift from the
 # actual fix. File as follow-up if needed.
 if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
-  # Build the list of ports the relay needs based on mode.
-  ports_needed=""
-  case "$RELAY_MODE" in
-    greenfield|existing-traefik)
-      ports_needed="80/tcp 443/tcp"
-      ;;
-    port-only)
-      if [ "$RELAY_BIND" != "127.0.0.1" ]; then
-        ports_needed="${RELAY_PORT}/tcp"
-      fi
-      ;;
-  esac
+  # Effective host bind of the published plain-HTTP port, i.e. the one the relay
+  # compose port line uses (see agent_relay_write_relay_compose): a greenfield
+  # install with no TLS route and no explicit RELAY_BIND publishes on all
+  # interfaces; every other case publishes on RELAY_BIND.
+  bind_for_ufw="$RELAY_BIND"
+  if [ "$RELAY_MODE" = "greenfield" ] && [ "${GREENFIELD_TLS_ROUTE:-0}" = "0" ] && [ "$RELAY_BIND_SET" != "1" ]; then
+    bind_for_ufw="0.0.0.0"
+  fi
+  # Ports the host firewall must open so the relay is actually reachable: a TLS
+  # route fronts it on 80/443; a non-loopback plain-HTTP bind needs RELAY_PORT; a
+  # loopback-only relay needs nothing. Empty list means skip the hint.
+  ports_needed="$(agent_relay_ufw_ports "$RELAY_MODE" "${GREENFIELD_TLS_ROUTE:-}" "$bind_for_ufw" "$RELAY_PORT")"
 
   if [ -n "$ports_needed" ]; then
     missing=""
