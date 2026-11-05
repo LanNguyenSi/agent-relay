@@ -344,6 +344,9 @@ agent_relay_write_relay_compose() {
         # falls back to 0.0.0.0 only when RELAY_BIND was not set, and the bare
         # PORT:PORT line (all interfaces) is emitted only for that fallback; an
         # explicit RELAY_BIND, even 0.0.0.0, keeps the bind-qualified line.
+        # The first term is redundant with the second (the function returns
+        # 0.0.0.0 both for the fallback and for an explicit 0.0.0.0), so the
+        # qualified-vs-bare choice rests on RELAY_BIND_SET alone.
         if [ "$relay_bind" != "0.0.0.0" ] || [ "${RELAY_BIND_SET:-}" = "1" ]; then
           relay_port_line="${relay_bind}:${RELAY_PORT}:${RELAY_PORT}"
         else
