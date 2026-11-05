@@ -42,6 +42,9 @@
 #                          exists (RELAY_DOMAIN plus TRAEFIK_EMAIL or TRAEFIK_CA=self-signed) and
 #                          all interfaces otherwise (no other way in). An empty value counts as unset.
 #   SKIP_TRAEFIK=1         Back-compat alias for RELAY_MODE=port-only
+#   TRAEFIK_REWRITE=1      Greenfield re-run: let the installer rewrite an existing /opt/traefik/docker-compose.yml
+#                          that has an ACME resolver even though this run would write none (TRAEFIK_EMAIL empty
+#                          or TRAEFIK_CA=self-signed). Without it that re-run stops before writing anything.
 #   RELAY_FORCE_RECREATE=1 Remove an existing agent-relay container before `docker compose up` (use after a failed or conflicting earlier install)
 
 set -euo pipefail
@@ -161,7 +164,9 @@ services:
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=traefik-public"
       - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.asdefault=true"
       - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.asdefault=true"
       - "--ping=true"
       - "--ping.entrypoint=ping"
       - "--entrypoints.ping.address=:8082"
@@ -201,6 +206,10 @@ TRAEFIK_EOF
 #     only when its configuration changed.
 #   - one runs and the file does not exist: it is not the installer's Traefik;
 #     leave it alone and warn.
+# Before an existing file is rewritten it is copied to docker-compose.yml.bak.
+# An existing file with an ACME resolver is not rewritten into one without
+# (TRAEFIK_EMAIL empty or TRAEFIK_CA=self-signed) unless TRAEFIK_REWRITE=1: that
+# would drop the TLS resolver for every route on this Traefik.
 agent_relay_bootstrap_traefik() {
   local traefik_dir="$1"
   local compose_file="${traefik_dir}/docker-compose.yml"
@@ -225,11 +234,24 @@ agent_relay_bootstrap_traefik() {
     mkdir -p "$traefik_dir"
   fi
 
+  if [ -f "$compose_file" ]; then
+    if grep -q -e '--certificatesresolvers\.' "$compose_file" \
+      && { [ -z "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; } \
+      && [ "${TRAEFIK_REWRITE:-}" != "1" ]; then
+      err "${compose_file} has an ACME certificate resolver, but this run (TRAEFIK_EMAIL='${TRAEFIK_EMAIL}', TRAEFIK_CA='${TRAEFIK_CA}') would write none: Traefik would lose TLS for every route. Re-run with the TRAEFIK_EMAIL and TRAEFIK_CA values of the first install, or set TRAEFIK_REWRITE=1 to rewrite it anyway. Nothing was changed."
+    fi
+    cp -p "$compose_file" "${compose_file}.bak"
+    log "Previous ${compose_file} kept as ${compose_file}.bak"
+  fi
+
   # The compose file bind-mounts acme.json; a missing source would be created
-  # by docker as a directory.
-  if [ "$TRAEFIK_CA" != "self-signed" ] && [ ! -e "${traefik_dir}/acme.json" ]; then
-    touch "${traefik_dir}/acme.json"
-    chmod 600 "${traefik_dir}/acme.json"
+  # by docker as a directory. Traefik skips the resolver when the file is
+  # readable by others, so an existing regular file is tightened on every run.
+  if [ "$TRAEFIK_CA" != "self-signed" ]; then
+    [ -e "${traefik_dir}/acme.json" ] || touch "${traefik_dir}/acme.json"
+    if [ -f "${traefik_dir}/acme.json" ]; then
+      chmod 600 "${traefik_dir}/acme.json"
+    fi
   fi
 
   agent_relay_write_traefik_compose "$traefik_dir"

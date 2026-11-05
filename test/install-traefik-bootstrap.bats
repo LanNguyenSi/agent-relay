@@ -52,6 +52,24 @@ _up_calls() {
   grep -c "^compose -f ${TRAEFIK_DIR}/docker-compose.yml up -d\$" "$DOCKER_LOG" || true
 }
 
+# Fail the test when the pattern matches. A bare `! grep` in the middle of a
+# test never fails it (set -e ignores negated commands).
+_refute_grep() {
+  if grep -q "$@"; then
+    echo "unexpected match: $*" >&2
+    return 1
+  fi
+}
+
+# The entries of the "ports:" list of the Traefik service, one per line.
+_ports_entries() {
+  awk '
+    /^    ports:$/ { inports = 1; next }
+    inports && /^      - / { print; next }
+    inports { inports = 0 }
+  ' "$1"
+}
+
 _mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
@@ -66,7 +84,7 @@ _mode() {
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "already running, converging compose" ]]
-  ! grep -q 'stale' "${TRAEFIK_DIR}/docker-compose.yml"
+  _refute_grep 'stale' "${TRAEFIK_DIR}/docker-compose.yml"
   grep -q 'max-size: "10m"' "${TRAEFIK_DIR}/docker-compose.yml"
   grep -q 'healthcheck:' "${TRAEFIK_DIR}/docker-compose.yml"
   [ "$(_up_calls)" -eq 1 ]
@@ -93,6 +111,160 @@ _mode() {
   [ "$(cat "${TRAEFIK_DIR}/acme.json")" = "CERTDATA" ]
 }
 
+@test "traefik running + own compose file: an existing acme.json with mode 644 is tightened to 600" {
+  printf 'stale: true\n' > "${TRAEFIK_DIR}/docker-compose.yml"
+  printf 'CERTDATA' > "${TRAEFIK_DIR}/acme.json"
+  chmod 644 "${TRAEFIK_DIR}/acme.json"
+
+  _bootstrap 'traefik' letsencrypt admin@example.com
+
+  [ "$status" -eq 0 ]
+  [ "$(_mode "${TRAEFIK_DIR}/acme.json")" = "600" ]
+  [ "$(cat "${TRAEFIK_DIR}/acme.json")" = "CERTDATA" ]
+}
+
+@test "letsencrypt: acme.json that is a directory is not chmod'ed" {
+  printf 'stale: true\n' > "${TRAEFIK_DIR}/docker-compose.yml"
+  mkdir "${TRAEFIK_DIR}/acme.json"
+  chmod 755 "${TRAEFIK_DIR}/acme.json"
+
+  _bootstrap 'traefik' letsencrypt admin@example.com
+
+  [ "$status" -eq 0 ]
+  [ "$(_mode "${TRAEFIK_DIR}/acme.json")" = "755" ]
+}
+
+@test "self-signed: an existing acme.json is left alone" {
+  printf 'stale: true\n' > "${TRAEFIK_DIR}/docker-compose.yml"
+  printf 'CERTDATA' > "${TRAEFIK_DIR}/acme.json"
+  chmod 644 "${TRAEFIK_DIR}/acme.json"
+
+  _bootstrap 'traefik' self-signed ''
+
+  [ "$status" -eq 0 ]
+  [ "$(_mode "${TRAEFIK_DIR}/acme.json")" = "644" ]
+}
+
+# ─── converge guard: never drop an ACME resolver by accident ─────────────────
+
+# An existing file as the first install (letsencrypt, email set) wrote it.
+_seed_acme_compose() {
+  _write_traefik letsencrypt admin@example.com
+  touch "${TRAEFIK_DIR}/acme.json"
+  chmod 600 "${TRAEFIK_DIR}/acme.json"
+  cp "${TRAEFIK_DIR}/docker-compose.yml" "${SHIM_DIR}/original.yml"
+}
+
+# _bootstrap with TRAEFIK_REWRITE set to $4 (exported before the run).
+_bootstrap_rewrite() {
+  TRAEFIK_REWRITE="$4" _bootstrap "$1" "$2" "$3"
+}
+
+@test "guard: existing resolver + empty TRAEFIK_EMAIL: refused, file unchanged, no up, names the variables" {
+  _seed_acme_compose
+
+  _bootstrap 'traefik' letsencrypt ''
+
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "TRAEFIK_EMAIL" ]]
+  [[ "$output" =~ "TRAEFIK_CA" ]]
+  [[ "$output" =~ "TRAEFIK_REWRITE=1" ]]
+  cmp "${TRAEFIK_DIR}/docker-compose.yml" "${SHIM_DIR}/original.yml"
+  [ ! -e "${TRAEFIK_DIR}/docker-compose.yml.bak" ]
+  [ "$(_up_calls)" -eq 0 ]
+}
+
+@test "guard: existing resolver + TRAEFIK_CA=self-signed: refused, file unchanged, no up" {
+  _seed_acme_compose
+
+  _bootstrap 'traefik' self-signed 'admin@example.com'
+
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "TRAEFIK_REWRITE=1" ]]
+  cmp "${TRAEFIK_DIR}/docker-compose.yml" "${SHIM_DIR}/original.yml"
+  [ "$(_up_calls)" -eq 0 ]
+}
+
+@test "guard: refusal does not depend on whether traefik runs" {
+  _seed_acme_compose
+
+  _bootstrap '' letsencrypt ''
+
+  [ "$status" -eq 1 ]
+  cmp "${TRAEFIK_DIR}/docker-compose.yml" "${SHIM_DIR}/original.yml"
+  [ "$(_up_calls)" -eq 0 ]
+}
+
+@test "guard: TRAEFIK_REWRITE=1 overrides: backup written, file rewritten, up called" {
+  _seed_acme_compose
+
+  _bootstrap_rewrite 'traefik' letsencrypt '' 1
+
+  [ "$status" -eq 0 ]
+  cmp "${TRAEFIK_DIR}/docker-compose.yml.bak" "${SHIM_DIR}/original.yml"
+  _refute_grep 'certificatesresolvers' "${TRAEFIK_DIR}/docker-compose.yml"
+  [ "$(_up_calls)" -eq 1 ]
+}
+
+@test "guard: TRAEFIK_REWRITE with another value than 1 does not override" {
+  _seed_acme_compose
+
+  _bootstrap_rewrite 'traefik' letsencrypt '' yes
+
+  [ "$status" -eq 1 ]
+  cmp "${TRAEFIK_DIR}/docker-compose.yml" "${SHIM_DIR}/original.yml"
+  [ "$(_up_calls)" -eq 0 ]
+}
+
+@test "guard: existing resolver + email set + letsencrypt: no refusal, rewritten" {
+  _seed_acme_compose
+
+  _bootstrap 'traefik' staging admin@example.com
+
+  [ "$status" -eq 0 ]
+  grep -q 'acme-staging' "${TRAEFIK_DIR}/docker-compose.yml"
+  [ "$(_up_calls)" -eq 1 ]
+}
+
+@test "guard: existing file without a resolver + empty email: rewritten, no refusal" {
+  printf 'services:\n  traefik:\n    image: traefik:v3\n' > "${TRAEFIK_DIR}/docker-compose.yml"
+
+  _bootstrap 'traefik' letsencrypt ''
+
+  [ "$status" -eq 0 ]
+  grep -q 'healthcheck:' "${TRAEFIK_DIR}/docker-compose.yml"
+  [ "$(_up_calls)" -eq 1 ]
+}
+
+# ─── backup before a rewrite ─────────────────────────────────────────────────
+
+@test "backup: an existing file is kept as docker-compose.yml.bak and the path is logged" {
+  printf 'hand: edited\n' > "${TRAEFIK_DIR}/docker-compose.yml"
+
+  _bootstrap 'traefik' letsencrypt admin@example.com
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "${TRAEFIK_DIR}/docker-compose.yml.bak")" = "hand: edited" ]
+  [[ "$output" =~ "${TRAEFIK_DIR}/docker-compose.yml.bak" ]]
+}
+
+@test "backup: a previous .bak is overwritten" {
+  printf 'newer\n' > "${TRAEFIK_DIR}/docker-compose.yml"
+  printf 'older\n' > "${TRAEFIK_DIR}/docker-compose.yml.bak"
+
+  _bootstrap '' letsencrypt admin@example.com
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "${TRAEFIK_DIR}/docker-compose.yml.bak")" = "newer" ]
+}
+
+@test "backup: a first install (no existing file) writes no .bak" {
+  _bootstrap '' letsencrypt admin@example.com
+
+  [ "$status" -eq 0 ]
+  [ ! -e "${TRAEFIK_DIR}/docker-compose.yml.bak" ]
+}
+
 # ─── running + no compose file: not ours, leave alone ────────────────────────
 
 @test "traefik running + no compose file: nothing written, no up, warning names the path" {
@@ -104,7 +276,7 @@ _mode() {
   [ ! -e "${TRAEFIK_DIR}/docker-compose.yml" ]
   [ ! -e "${TRAEFIK_DIR}/acme.json" ]
   [ "$(_up_calls)" -eq 0 ]
-  ! grep -q '^compose ' "$DOCKER_LOG"
+  _refute_grep '^compose ' "$DOCKER_LOG"
 }
 
 @test "a container merely named like traefik does not count as running" {
@@ -183,8 +355,12 @@ _assert_ping_healthcheck() {
   grep -q 'retries: 3' "$f"
   grep -q 'start_period: 20s' "$f"
   # The ping entrypoint is internal: only 80 and 443 are published.
-  ! grep -q '8082:' "$f"
-  [ "$(grep -c '^      - "[0-9]*:[0-9]*"$' "$f")" -eq 2 ]
+  [ "$(_ports_entries "$f" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(_ports_entries "$f" | grep -cxF -e '      - "80:80"' -e '      - "443:443"')" -eq 2 ]
+  _refute_grep 8082 <(_ports_entries "$f")
+  # Routers without explicit entrypoints must not attach to ping.
+  grep -qxF -- '      - "--entrypoints.web.asdefault=true"' "$f"
+  grep -qxF -- '      - "--entrypoints.websecure.asdefault=true"' "$f"
 }
 
 @test "traefik compose (letsencrypt) has the ping healthcheck" {
@@ -228,5 +404,5 @@ _assert_ping_healthcheck() {
   [ -n "$guard_line" ]
   [ -n "$call_line" ]
   [ "$call_line" -gt "$guard_line" ]
-  ! grep -q 'Traefik already running"' "$INSTALL_SH"
+  _refute_grep 'Traefik already running"' "$INSTALL_SH"
 }
