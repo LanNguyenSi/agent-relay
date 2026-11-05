@@ -42,6 +42,9 @@
 #                          exists (RELAY_DOMAIN plus TRAEFIK_EMAIL or TRAEFIK_CA=self-signed) and
 #                          all interfaces otherwise (no other way in). An empty value counts as unset.
 #   SKIP_TRAEFIK=1         Back-compat alias for RELAY_MODE=port-only
+#   TRAEFIK_REWRITE=1      Greenfield re-run: let the installer rewrite an existing /opt/traefik/docker-compose.yml
+#                          that has an ACME resolver even though this run would write none (TRAEFIK_EMAIL empty
+#                          or TRAEFIK_CA=self-signed). Without it that re-run stops before changing the Traefik compose file.
 #   RELAY_FORCE_RECREATE=1 Remove an existing agent-relay container before `docker compose up` (use after a failed or conflicting earlier install)
 
 set -euo pipefail
@@ -147,12 +150,26 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      # The ping entrypoint (:8082) is internal only: it has no ports: mapping.
+      # The traefik healthcheck command is a separate process with its own static
+      # config, so it repeats the two flags that locate the ping endpoint.
+      test: ["CMD", "traefik", "healthcheck", "--ping", "--ping.entrypoint=ping", "--entrypoints.ping.address=:8082"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=traefik-public"
       - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.asdefault=true"
       - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.asdefault=true"
+      - "--ping=true"
+      - "--ping.entrypoint=ping"
+      - "--entrypoints.ping.address=:8082"
 $(if [ -n "$TRAEFIK_EMAIL" ] && [ "$TRAEFIK_CA" != "self-signed" ]; then
 cat <<ACME
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -215,6 +232,67 @@ agent_relay_relay_bind() {
   else
     printf '0.0.0.0'
   fi
+}
+
+# Bring the greenfield Traefik to the state the installer describes.
+# Uses the globals of agent_relay_write_traefik_compose plus TRAEFIK_CA.
+#   - no container named "traefik" runs: write the compose file and start it.
+#   - one runs and <traefik_dir>/docker-compose.yml exists (the installer's own
+#     file): rewrite the file and run "up -d", which recreates the container
+#     only when its configuration changed.
+#   - one runs and the file does not exist: it is not the installer's Traefik;
+#     leave it alone and warn.
+# Before an existing file is rewritten it is copied to docker-compose.yml.bak.
+# An existing file with an ACME resolver is not rewritten into one without
+# (TRAEFIK_EMAIL empty or TRAEFIK_CA=self-signed) unless TRAEFIK_REWRITE=1: that
+# would drop the TLS resolver for every route on this Traefik.
+agent_relay_bootstrap_traefik() {
+  local traefik_dir="$1"
+  local compose_file="${traefik_dir}/docker-compose.yml"
+  local running
+
+  if ! docker network inspect traefik-public &>/dev/null; then
+    docker network create traefik-public >/dev/null
+    log "Created traefik-public network"
+  else
+    log "traefik-public network exists"
+  fi
+
+  running="$(docker ps --format '{{.Names}}' || true)"
+  if printf '%s\n' "$running" | grep -qx 'traefik'; then
+    if [ ! -f "$compose_file" ]; then
+      warn "A Traefik container is running but ${compose_file} does not exist: this Traefik is not managed by the installer and will not be updated (log rotation, healthcheck)."
+      return 0
+    fi
+    log "Traefik already running, converging compose"
+  else
+    info "Starting Traefik..."
+    mkdir -p "$traefik_dir"
+  fi
+
+  if [ -f "$compose_file" ]; then
+    if grep -q -e '--certificatesresolvers\.' "$compose_file" \
+      && { [ -z "$TRAEFIK_EMAIL" ] || [ "$TRAEFIK_CA" = "self-signed" ]; } \
+      && [ "${TRAEFIK_REWRITE:-}" != "1" ]; then
+      err "${compose_file} has an ACME certificate resolver, but this run (TRAEFIK_EMAIL='${TRAEFIK_EMAIL}', TRAEFIK_CA='${TRAEFIK_CA}') would write none: Traefik would lose TLS for every route. Re-run with the TRAEFIK_EMAIL and TRAEFIK_CA values of the first install, or set TRAEFIK_REWRITE=1 to rewrite it anyway. The Traefik compose file was not changed."
+    fi
+    cp -p "$compose_file" "${compose_file}.bak"
+    log "Previous ${compose_file} kept as ${compose_file}.bak"
+  fi
+
+  # The compose file bind-mounts acme.json; a missing source would be created
+  # by docker as a directory. Traefik skips the resolver when the file is
+  # readable by others, so an existing regular file is tightened on every run.
+  if [ "$TRAEFIK_CA" != "self-signed" ]; then
+    [ -e "${traefik_dir}/acme.json" ] || touch "${traefik_dir}/acme.json"
+    if [ -f "${traefik_dir}/acme.json" ]; then
+      chmod 600 "${traefik_dir}/acme.json"
+    fi
+  fi
+
+  agent_relay_write_traefik_compose "$traefik_dir"
+  docker compose -f "$compose_file" up -d
+  log "Traefik is up to date"
 }
 
 # Write relay docker-compose.yml to <relay_dir>/docker-compose.yml.
@@ -753,29 +831,7 @@ esac
 # ── Step 5: Traefik bootstrap (greenfield only) ────────────────────────────
 if [ "$RELAY_MODE" = "greenfield" ]; then
   agent_relay_check_greenfield_compat
-  if ! docker network inspect traefik-public &>/dev/null; then
-    docker network create traefik-public >/dev/null
-    log "Created traefik-public network"
-  else
-    log "traefik-public network exists"
-  fi
-
-  TRAEFIK_DIR="/opt/traefik"
-  if docker ps --format '{{.Names}}' | grep -q '^traefik$'; then
-    log "Traefik already running"
-  else
-    info "Starting Traefik..."
-    mkdir -p "$TRAEFIK_DIR"
-    if [ "$TRAEFIK_CA" != "self-signed" ]; then
-      touch "$TRAEFIK_DIR/acme.json"
-      chmod 600 "$TRAEFIK_DIR/acme.json"
-    fi
-
-    agent_relay_write_traefik_compose "$TRAEFIK_DIR"
-
-    docker compose -f "$TRAEFIK_DIR/docker-compose.yml" up -d
-    log "Traefik started"
-  fi
+  agent_relay_bootstrap_traefik "/opt/traefik"
 fi
 
 # ── Step 6: agent-relay ────────────────────────────────────────────────────
