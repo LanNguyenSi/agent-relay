@@ -204,6 +204,25 @@ describe("stream deploy operation lock (check-then-act race)", () => {
     expect(isOperationLocked()).toBe(false);
   });
 
+  it("releases the lock when recordDeploy rejects inside the stream, so a self-update can start right after", async () => {
+    vi.spyOn(apps, "deployAppStreaming").mockResolvedValue(OK_RESULT as never);
+    mockRecordDeploy.mockRejectedValueOnce(new Error("history disk full"));
+
+    const res = await streamDeploy();
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("event: error");
+    expect(text).toContain("history disk full");
+    expect(text).not.toContain("event: done");
+    expect(mockRecordDeploy).toHaveBeenCalledTimes(1);
+
+    // The failure surfaced as an SSE `error` event through the same finally:
+    // no leaked lock, and an exclusive acquire succeeds immediately.
+    expect(isOperationLocked()).toBe(false);
+    testReleases.push(acquireOperationLock("self-update", RELAY_IMAGE));
+    expect(isOperationLocked()).toBe(true);
+  });
+
   it("releases the lock on the 404 config-error path and never opens the stream", async () => {
     mockLoadRelayConfig.mockRejectedValueOnce(new RelayConfigError("No .relay.yml found"));
     const deployStreaming = vi.spyOn(apps, "deployAppStreaming").mockResolvedValue(OK_RESULT as never);
