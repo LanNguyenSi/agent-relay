@@ -9,7 +9,12 @@
 # staging / pebble-with-email TLS routes and must agree with
 # agent_relay_relay_bind. The Step 7 summary and the UFW hint block live in the
 # installer main body (below the guard) and are reached only through these
-# functions.
+# functions. The call sites themselves cannot be executed here, so the last
+# tests pin them textually: the Step 5 greenfield bootstrap calls, the UFW
+# ports_needed call (mode, route flag, bind, port) and the banner's
+# HTTPS_ROUTE_RC condition each appear exactly once, below the guard. What
+# the lines do at run time (the empty-list skip, the banner text) stays
+# unexecuted.
 
 INSTALL_SH="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/install.sh"
 
@@ -272,4 +277,32 @@ _bind_line() {
   _ufw port-only 0 0.0.0.0 9000
   [ "$status" -eq 0 ]
   [ "$output" = "9000/tcp" ]
+}
+
+# Asserts that the exact line occurs once in install.sh, below the source-only
+# guard (the functions above it are tested by sourcing).
+_pin_below_guard() {
+  local line="$1" guard_line call_line
+  run grep -cxF -- "$line" "$INSTALL_SH"
+  [ "$output" = "1" ]
+  call_line="$(grep -nxF -- "$line" "$INSTALL_SH" | head -1 | cut -d: -f1)"
+  guard_line="$(grep -n 'INSTALL_SH_SOURCE_ONLY:-}" = "1" \]' "$INSTALL_SH" | head -1 | cut -d: -f1)"
+  [ -n "$call_line" ]
+  [ -n "$guard_line" ]
+  [ "$call_line" -gt "$guard_line" ]
+}
+
+@test "install.sh Step 5 calls the greenfield compat check and bootstrap once, below the guard" {
+  _pin_below_guard '  agent_relay_check_greenfield_compat'
+  _pin_below_guard '  agent_relay_bootstrap_traefik "/opt/traefik"'
+}
+
+@test "install.sh UFW hint asks agent_relay_ufw_ports with mode, route flag, shared bind and port, once, below the guard" {
+  _pin_below_guard '  ports_needed="$(agent_relay_ufw_ports "$RELAY_MODE" "${GREENFIELD_TLS_ROUTE:-}" "$(agent_relay_relay_bind)" "$RELAY_PORT")"'
+  _pin_below_guard '  if [ -n "$ports_needed" ]; then'
+}
+
+@test "install.sh Step 7 banner branches on HTTPS_ROUTE_RC once, below the guard" {
+  _pin_below_guard 'HTTPS_ROUTE_RC=0'
+  _pin_below_guard 'if [ "$HTTPS_ROUTE_RC" = "1" ]; then'
 }

@@ -310,6 +310,33 @@ describe("self-update engine and shared concurrency lock", () => {
       await expect(discoverSelfComposeConfig(["c1"])).resolves.toMatchObject({ service: "relay" });
     });
 
+    it("accepts a relative .env entry that resolves inside the compose dir", async () => {
+      mockDocker({
+        labels: { ...defaultLabels(), "com.docker.compose.project.environment_file": ".env" },
+      });
+      await expect(discoverSelfComposeConfig(["c1"])).resolves.toMatchObject({ service: "relay" });
+    });
+
+    it("refuses a mixed environment_file list when one entry is not the default .env", async () => {
+      mockDocker({
+        labels: {
+          ...defaultLabels(),
+          "com.docker.compose.project.environment_file": `${join(composeDir, ".env")},/etc/other.env`,
+        },
+      });
+      await expect(discoverSelfComposeConfig(["c1"])).rejects.toThrow(/started with --env-file/);
+    });
+
+    it("refuses an environment_file entry that escapes the compose dir with ../", async () => {
+      mockDocker({
+        labels: {
+          ...defaultLabels(),
+          "com.docker.compose.project.environment_file": "../.env",
+        },
+      });
+      await expect(discoverSelfComposeConfig(["c1"])).rejects.toThrow(/started with --env-file/);
+    });
+
     it("refuses an existing config file outside working_dir (traversal or sibling prefix) before reading it", async () => {
       const { mkdir } = await import("node:fs/promises");
       const outside = join(tempDir, "outside.yml");

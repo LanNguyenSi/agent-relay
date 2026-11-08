@@ -172,6 +172,9 @@ export async function reconcileSelfUpdateState(): Promise<SelfUpdateStateRecord 
   let status: SelfUpdateStateRecord["status"] | null = null;
   let error: string | undefined;
 
+  // `currentRevision !== "unknown"` is defence in depth: targetKnown already
+  // excludes an "unknown" target, so equality with it implies a known current
+  // revision and no test can tell the clause apart.
   if (currentRevision !== "unknown" && targetKnown && currentRevision === record.targetRevision) {
     status = "succeeded";
   } else {
