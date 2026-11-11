@@ -1,11 +1,41 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdir, rm, readFile, stat } from "node:fs/promises";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { resolve } from "node:path";
 import { env } from "../config/env.js";
 import { parseEnv, serializeEnv, readAppEnv, writeAppEnv } from "./env.js";
 
 // APPS_DIR is read once at module load (vitest.setup.ts seeds it), so tests
 // have to work within that directory instead of switching to a fresh tmpdir.
+
+// When set, the mocked `open` below runs this first (and awaits it) for any
+// call whose flags contain "w", with the path being opened as the argument.
+// Lets a test plant a file at the exact temp path writeAppEnv is about to
+// open; that name contains a random UUID and is otherwise unknowable.
+let plantAtOpenPath: ((path: string) => Promise<void>) | null = null;
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...original,
+    open: async (...args: Parameters<typeof original.open>) => {
+      const [filePath, flags] = args;
+      if (plantAtOpenPath !== null && typeof flags === "string" && flags.includes("w")) {
+        await plantAtOpenPath(String(filePath));
+      }
+      return original.open(...args);
+    },
+  };
+});
 
 describe("parseEnv", () => {
   it("parses a typical .env file", () => {
@@ -81,16 +111,40 @@ describe("serializeEnv", () => {
 
 describe("readAppEnv / writeAppEnv", () => {
   const base = env.APPS_DIR;
+  const dir = resolve(base, "demo");
+  const outsideDir = resolve(base, "outside");
+
+  // A file outside the app dir that a planted symlink points at; it must
+  // never be opened for writing by writeAppEnv.
+  async function makeOutsideFile(name: string, contents: string): Promise<string> {
+    await mkdir(outsideDir, { recursive: true });
+    const path = resolve(outsideDir, name);
+    await writeFile(path, contents, "utf8");
+    await chmod(path, 0o644);
+    return path;
+  }
+
+  async function outsideMode(path: string): Promise<string> {
+    const s = await stat(path);
+    return (s.mode & 0o777).toString(8);
+  }
+
+  async function tmpLeftovers(): Promise<string[]> {
+    return (await readdir(dir)).filter((n) => n.includes(".tmp"));
+  }
 
   beforeEach(async () => {
     await mkdir(base, { recursive: true });
     // Clean any leftovers from a previous run before mkdir-ing the app dir.
-    await rm(resolve(base, "demo"), { recursive: true, force: true });
-    await mkdir(resolve(base, "demo"));
+    await rm(dir, { recursive: true, force: true });
+    await rm(outsideDir, { recursive: true, force: true });
+    await mkdir(dir);
   });
 
   afterEach(async () => {
-    await rm(resolve(base, "demo"), { recursive: true, force: true });
+    plantAtOpenPath = null;
+    await rm(dir, { recursive: true, force: true });
+    await rm(outsideDir, { recursive: true, force: true });
   });
 
   it("returns [] when .env is missing", async () => {
@@ -133,5 +187,84 @@ describe("readAppEnv / writeAppEnv", () => {
     await expect(writeAppEnv("demo", [{ key: "1bad", value: "x" }])).rejects.toThrow();
     const after = await readFile(resolve(base, "demo", ".env"), "utf8");
     expect(after).toBe(before);
+  });
+
+  it("refuses a pre-existing `.env.tmp` symlink pointing outside the app dir", async () => {
+    // The old fixed temp name `.env.tmp`: a tracked symlink at that name in
+    // the app checkout used to make writeAppEnv write the env body (which
+    // holds secrets) into the link's target outside the app dir.
+    const outside = await makeOutsideFile("victim", "OUTSIDE-ORIGINAL");
+    await symlink(outside, resolve(dir, ".env.tmp"));
+    await writeAppEnv("demo", [{ key: "SECRET_TOKEN", value: "hunter2" }]);
+    expect(await readFile(outside, "utf8")).toBe("OUTSIDE-ORIGINAL");
+    expect(await outsideMode(outside)).toBe("644");
+    expect(await readFile(resolve(dir, ".env"), "utf8")).toBe("SECRET_TOKEN=hunter2\n");
+    expect(await outsideMode(resolve(dir, ".env"))).toBe("600");
+  });
+
+  it("is unaffected by a stale regular `.env.tmp` leftover (left alone)", async () => {
+    // Decision: the stale leftover is left alone. The unique temp name means
+    // writeAppEnv never touches `.env.tmp` anymore, whatever created it owns
+    // it; deleting an arbitrary app-dir path would be a new side effect.
+    await writeFile(resolve(dir, ".env.tmp"), "STALE-LEFTOVER", "utf8");
+    await writeAppEnv("demo", [{ key: "A", value: "1" }]);
+    expect(await readFile(resolve(dir, ".env"), "utf8")).toBe("A=1\n");
+    expect(await readFile(resolve(dir, ".env.tmp"), "utf8")).toBe("STALE-LEFTOVER");
+  });
+
+  it("replaces a `.env` symlink itself with a regular file, not its target", async () => {
+    // rename() swaps the link for the new regular file instead of writing
+    // through it: the link is just a file in the app checkout, and the
+    // secrets land in a file the relay owns.
+    const outside = await makeOutsideFile("link-target", "OUTSIDE-ORIGINAL");
+    await symlink(outside, resolve(dir, ".env"));
+    await writeAppEnv("demo", [{ key: "SECRET_TOKEN", value: "hunter2" }]);
+    const link = await lstat(resolve(dir, ".env"));
+    expect(link.isSymbolicLink()).toBe(false);
+    expect(link.isFile()).toBe(true);
+    expect(await readFile(resolve(dir, ".env"), "utf8")).toBe("SECRET_TOKEN=hunter2\n");
+    expect(await outsideMode(resolve(dir, ".env"))).toBe("600");
+    expect(await readFile(outside, "utf8")).toBe("OUTSIDE-ORIGINAL");
+  });
+
+  it("leaves no temp file behind after a successful write", async () => {
+    await writeAppEnv("demo", [{ key: "A", value: "1" }]);
+    expect(await tmpLeftovers()).toEqual([]);
+  });
+
+  it("removes its temp file and rethrows when the rename fails", async () => {
+    // A non-empty directory at `.env` makes the final rename fail.
+    await mkdir(resolve(dir, ".env"));
+    await writeFile(resolve(dir, ".env", "occupied"), "x", "utf8");
+    await expect(writeAppEnv("demo", [{ key: "A", value: "1" }])).rejects.toThrow();
+    expect(await tmpLeftovers()).toEqual([]);
+  });
+
+  it("fails with EEXIST when a symlink sits at the exact temp path, without following it", async () => {
+    // The exclusive create (`wx`): open() fails on any existing path,
+    // symlink included, so no env body is ever written through a planted
+    // link. The temp name is random, so the link is planted via the mocked
+    // open at the path about to be opened.
+    const outside = await makeOutsideFile("victim", "OUTSIDE-ORIGINAL");
+    plantAtOpenPath = (p) => symlink(outside, p);
+    await expect(writeAppEnv("demo", [{ key: "SECRET_TOKEN", value: "hunter2" }])).rejects.toThrow(
+      /EEXIST/,
+    );
+    plantAtOpenPath = null;
+    expect(await readFile(outside, "utf8")).toBe("OUTSIDE-ORIGINAL");
+    expect(await outsideMode(outside)).toBe("644");
+    expect((await readdir(dir)).filter((n) => n === ".env")).toEqual([]);
+  });
+
+  it("writes mode 0600 even when the umask masks the open mode", async () => {
+    // The mode is forced via the handle's chmod, not by path (which could
+    // follow a symlink), so a masking umask cannot leave the secrets readable.
+    const prevUmask = process.umask(0o277);
+    try {
+      await writeAppEnv("demo", [{ key: "A", value: "1" }]);
+    } finally {
+      process.umask(prevUmask);
+    }
+    expect(await outsideMode(resolve(dir, ".env"))).toBe("600");
   });
 });
