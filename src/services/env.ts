@@ -11,7 +11,8 @@
  * key is not a valid identifier and lines without `=` are all dropped. Teams that rely on commented .env files should keep
  * the comments elsewhere (e.g. `.env.example`). Documented in docs.
  */
-import { readFile, writeFile, chmod, rename } from "node:fs/promises";
+import { open, readFile, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { safeAppDir } from "./apps.js";
 
@@ -84,16 +85,33 @@ export async function readAppEnv(name: string): Promise<EnvEntry[]> {
   return parseEnv(contents);
 }
 
-// Write the full set of entries atomically: write to .env.tmp, chmod 0600,
-// then rename. Prevents a half-written file if the process dies mid-write
-// and keeps secrets at rw------- so non-root users on the box can't read
-// them via a volume mount that mishandles permissions.
+// Write the full set of entries atomically: create a uniquely named temp
+// file in the app dir exclusively (`wx` = O_CREAT|O_EXCL, which fails on any
+// existing path, symlink included, so a link planted in the app checkout
+// cannot redirect the write), write and fsync through the handle, force the
+// mode to 0600 on the handle (immune to umask, and never chmod by path,
+// which would follow a symlink), then rename. Prevents a half-written file
+// if the process dies mid-write and keeps secrets at rw------- so non-root
+// users on the box can't read them via a volume mount that mishandles
+// permissions. If `.env` itself is a symlink, rename replaces the link, not
+// its target: the link is just a file in the app checkout and the secrets
+// land in a fresh regular file the relay owns. A failed write removes the
+// temp file it created (best effort, by its exact path) and rethrows.
 export async function writeAppEnv(name: string, entries: EnvEntry[]): Promise<void> {
   const dir = await safeAppDir(name);
   const path = resolve(dir, ".env");
-  const tmp = resolve(dir, ".env.tmp");
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const body = serializeEnv(entries);
-  await writeFile(tmp, body, { encoding: "utf8", mode: 0o600 });
-  await chmod(tmp, 0o600);
-  await rename(tmp, path);
+  const handle = await open(tmp, "wx", 0o600);
+  try {
+    await handle.chmod(0o600);
+    await handle.writeFile(body, "utf8");
+    await handle.sync();
+    await handle.close();
+    await rename(tmp, path);
+  } catch (err) {
+    await handle.close().catch(() => undefined);
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }
