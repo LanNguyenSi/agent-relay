@@ -594,6 +594,9 @@ async function rollbackIfEnabled(
   // means a listener building its own step log from the stream (rather than
   // waiting for the final result) already has the rollback steps even if
   // the connection dies before `done`.
+  // (The stream route now also sends a periodic heartbeat comment, so the
+  // connection no longer depends on step events to stay alive; the early
+  // emit stays useful for that step log.)
   function emit(step: DeployStep) {
     steps.push(step);
     onStep?.(step);
