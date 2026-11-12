@@ -30,6 +30,11 @@
 #   RELAY_MODE             auto | greenfield | existing-traefik | port-only  (default auto)
 #   TRAEFIK_NETWORK        Docker network to attach to in existing-traefik mode (default traefik-public)
 #   TRAEFIK_CERTRESOLVER   ACME resolver name on the existing Traefik (default letsencrypt)
+#   TRAEFIK_IMAGE          Image for the greenfield Traefik (default traefik:v3.7.18). Written
+#                          verbatim as the compose image: line, so it must be non-empty and
+#                          contain no whitespace or newline. A greenfield re-run with a new
+#                          value converges the running Traefik; the installer never upgrades
+#                          the image on its own.
 #   TRAEFIK_CA             TLS provider for greenfield Traefik (default letsencrypt):
 #                            letsencrypt  Let's Encrypt production CA (default)
 #                            staging      Let's Encrypt staging CA (for testing; untrusted cert)
@@ -64,6 +69,11 @@ else
 fi
 TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-traefik-public}"
 TRAEFIK_CERTRESOLVER="${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+# Pinned default: the greenfield compose must never float on a major tag.
+# ${VAR-default} (no colon) instead of ${VAR:-default} so an explicitly empty
+# TRAEFIK_IMAGE stays empty and agent_relay_validate_traefik_image rejects it
+# instead of silently falling back to the default.
+TRAEFIK_IMAGE="${TRAEFIK_IMAGE-traefik:v3.7.18}"
 TRAEFIK_CA="${TRAEFIK_CA:-letsencrypt}"
 PEBBLE_URL="${PEBBLE_URL:-}"
 # RELAY_BIND_SET=1 only for an explicitly set, non-empty RELAY_BIND (empty counts as
@@ -131,18 +141,35 @@ validate_value() {
   [[ "$value" =~ ^${pattern}$ ]] || err "${name}='${value}' has invalid characters (expected: ${pattern})."
 }
 
+# TRAEFIK_IMAGE is written verbatim as the generated compose image: line, so a
+# space or newline there breaks the YAML and an empty value drops the image.
+# That makes empty an error rather than "use the default", which is exactly
+# what validate_value's empty-skip means, so this var gets its own check;
+# unset still gets the default from the assignment above.
+agent_relay_validate_traefik_image() {
+  case "${TRAEFIK_IMAGE:-}" in
+    "")            err "TRAEFIK_IMAGE must not be empty (use an image reference like traefik:v3.7.18)." ;;
+    *[[:space:]]*) err "TRAEFIK_IMAGE='${TRAEFIK_IMAGE}' must not contain whitespace or newlines (it is written verbatim into the Traefik compose file)." ;;
+  esac
+  # Image reference characters only, starting with a letter or digit: anything
+  # else (YAML indicators such as * & ! { % @ or a compose ${...}) would break
+  # or silently change the generated compose file.
+  [[ "$TRAEFIK_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] \
+    || err "TRAEFIK_IMAGE='${TRAEFIK_IMAGE}' is not an image reference (allowed: letters, digits and . _ : / @ -, starting with a letter or digit)."
+}
+
 # ── Greenfield compose writers ───────────────────────────────────────────────
 # Extracted as named functions so tests can source this file with
 # INSTALL_SH_SOURCE_ONLY=1 and exercise compose generation with controlled env.
 
 # Write Traefik docker-compose.yml to <traefik_dir>/docker-compose.yml.
-# Uses globals: TRAEFIK_EMAIL, TRAEFIK_CA, PEBBLE_URL.
+# Uses globals: TRAEFIK_EMAIL, TRAEFIK_CA, PEBBLE_URL, TRAEFIK_IMAGE.
 agent_relay_write_traefik_compose() {
   local traefik_dir="$1"
   cat > "${traefik_dir}/docker-compose.yml" <<TRAEFIK_EOF
 services:
   traefik:
-    image: traefik:v3
+    image: ${TRAEFIK_IMAGE}
     container_name: traefik
     restart: unless-stopped
     logging:
@@ -691,6 +718,7 @@ validate_value RELAY_BIND          "$RELAY_BIND"          '[0-9a-fA-F:.]+'
 validate_value TRAEFIK_EMAIL       "$TRAEFIK_EMAIL"       '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+'
 validate_value RELAY_PORT          "$RELAY_PORT"          '[0-9]+'
 validate_value PEBBLE_URL          "$PEBBLE_URL"          '[A-Za-z0-9._:/~?=&%-]+'
+agent_relay_validate_traefik_image
 
 case "$TRAEFIK_CA" in
   letsencrypt|staging|pebble|self-signed) ;;
@@ -876,7 +904,7 @@ case "$RELAY_MODE" in
   greenfield)
     if [ -n "$RELAY_DOMAIN" ] && [ -z "$TRAEFIK_EMAIL" ] && [ "$TRAEFIK_CA" != "self-signed" ]; then
       warn "RELAY_DOMAIN='${RELAY_DOMAIN}' but TRAEFIK_EMAIL is empty — Let's Encrypt will not issue a certificate."
-      warn "Set TRAEFIK_EMAIL=you@example.com and re-run, or leave RELAY_DOMAIN unset for port-only mode."
+      warn "Set TRAEFIK_EMAIL=you@example.com and re-run, or use RELAY_MODE=port-only for a loopback bind; leaving RELAY_DOMAIN unset alone keeps greenfield and serves plain HTTP on all interfaces."
     fi
     if [ "$TRAEFIK_CA" = "pebble" ] && [ -z "$PEBBLE_URL" ]; then
       err "TRAEFIK_CA=pebble requires PEBBLE_URL (the URL of your Pebble CA server, e.g. https://pebble:14000/dir)."
