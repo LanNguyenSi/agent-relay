@@ -40,6 +40,15 @@
   "overrides": {
     "postcss": "^8.5.18",
     "protobufjs": "^7.5.8",
-    "uuid": "^14.0.0"
+    "uuid": "^14.0.0",
+    "eslint": {
+      "minimatch": "11.0.4"
+    },
+    "@eslint/config-array": {
+      "minimatch": "11.0.4"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.4"
+    }
   }
 }
