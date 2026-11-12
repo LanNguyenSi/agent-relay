@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   chmod,
   lstat,
@@ -12,7 +14,9 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 import { env } from "../config/env.js";
-import { parseEnv, serializeEnv, readAppEnv, writeAppEnv } from "./env.js";
+import { parseEnv, serializeEnv, readAppEnv, writeAppEnv, EnvFileUnusableError } from "./env.js";
+
+const execFileAsync = promisify(execFile);
 
 // APPS_DIR is read once at module load (vitest.setup.ts seeds it), so tests
 // have to work within that directory instead of switching to a fresh tmpdir.
@@ -149,6 +153,45 @@ describe("readAppEnv / writeAppEnv", () => {
 
   it("returns [] when .env is missing", async () => {
     expect(await readAppEnv("demo")).toEqual([]);
+  });
+
+  it("refuses a `.env` symlink to a file outside the app dir and does not return its contents", async () => {
+    // The read mirror of the write-side link tests: a tracked
+    // `.env -> /some/host/file` must not make the relay (root in its
+    // container) leak the target. O_NOFOLLOW turns the open into ELOOP.
+    const outside = await makeOutsideFile("host-secrets", "HOST_SECRET=leaked\n");
+    await symlink(outside, resolve(dir, ".env"));
+    const err = await readAppEnv("demo").catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(EnvFileUnusableError);
+    // The message reaches API callers: no link target, no file content.
+    expect((err as Error).message).not.toContain(outside);
+    expect((err as Error).message).not.toContain("leaked");
+  });
+
+  it("refuses a `.env` symlink to a directory", async () => {
+    await mkdir(outsideDir, { recursive: true });
+    await symlink(outsideDir, resolve(dir, ".env"));
+    await expect(readAppEnv("demo")).rejects.toBeInstanceOf(EnvFileUnusableError);
+  });
+
+  it("refuses a dangling `.env` symlink (not the missing-file [] path)", async () => {
+    // O_NOFOLLOW rejects the link itself, so a dangling target never turns
+    // into the ENOENT "no .env yet" answer.
+    await symlink(resolve(outsideDir, "does-not-exist"), resolve(dir, ".env"));
+    await expect(readAppEnv("demo")).rejects.toBeInstanceOf(EnvFileUnusableError);
+  });
+
+  it("refuses a directory named `.env`", async () => {
+    await mkdir(resolve(dir, ".env"));
+    await expect(readAppEnv("demo")).rejects.toBeInstanceOf(EnvFileUnusableError);
+  });
+
+  it("refuses a FIFO named `.env` without hanging", async () => {
+    // A plain O_RDONLY open of a FIFO blocks until a writer opens it;
+    // readAppEnv adds O_NONBLOCK so open() returns and the isFile check
+    // refuses it. Without O_NONBLOCK this test would time out.
+    await execFileAsync("mkfifo", [resolve(dir, ".env")]);
+    await expect(readAppEnv("demo")).rejects.toBeInstanceOf(EnvFileUnusableError);
   });
 
   it("round-trips write→read and persists file at 0600", async () => {
