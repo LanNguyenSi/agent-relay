@@ -151,6 +151,11 @@ agent_relay_validate_traefik_image() {
     "")            err "TRAEFIK_IMAGE must not be empty (use an image reference like traefik:v3.7.18)." ;;
     *[[:space:]]*) err "TRAEFIK_IMAGE='${TRAEFIK_IMAGE}' must not contain whitespace or newlines (it is written verbatim into the Traefik compose file)." ;;
   esac
+  # Image reference characters only, starting with a letter or digit: anything
+  # else (YAML indicators such as * & ! { % @ or a compose ${...}) would break
+  # or silently change the generated compose file.
+  [[ "$TRAEFIK_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] \
+    || err "TRAEFIK_IMAGE='${TRAEFIK_IMAGE}' is not an image reference (allowed: letters, digits and . _ : / @ -, starting with a letter or digit)."
 }
 
 # ── Greenfield compose writers ───────────────────────────────────────────────

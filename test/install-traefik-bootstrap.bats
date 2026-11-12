@@ -493,6 +493,21 @@ _run_image_validation() {
   [[ "$output" =~ "whitespace" ]]
 }
 
+@test "validate TRAEFIK_IMAGE: YAML-significant or interpolating values rejected" {
+  for v in '*x' '!tag' '&a' '{a:b}' '%x' '@x' '-x' 'x${HOME}' 'traefik:v3#c'; do
+    _run_image_validation "TRAEFIK_IMAGE='$v'"
+    [ "$status" -eq 1 ] || { echo "accepted: $v"; return 1; }
+    [[ "$output" =~ "is not an image reference" ]] || { echo "wrong message for $v: $output"; return 1; }
+  done
+}
+
+@test "validate TRAEFIK_IMAGE: registry, digest and port forms accepted" {
+  for v in 'docker.io/library/traefik:v3.7.18' 'registry.example.com:5000/traefik:v3.7.18' 'traefik@sha256:0123abcd'; do
+    _run_image_validation "TRAEFIK_IMAGE='$v'"
+    [ "$status" -eq 0 ] || { echo "rejected: $v: $output"; return 1; }
+  done
+}
+
 @test "validate TRAEFIK_IMAGE: value with a newline rejected" {
   _run_image_validation "TRAEFIK_IMAGE=\$'traefik:v3.7.18\nlatest'"
   [ "$status" -eq 1 ]
