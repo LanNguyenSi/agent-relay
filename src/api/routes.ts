@@ -10,6 +10,21 @@ import { readCpuUsage } from "../services/cpu.js";
 
 export const api = new Hono();
 
+/**
+ * Interval of the SSE comment line (`: ping`) the `stream=true` deploy sends
+ * while the deploy runs. A single step can stay silent for minutes, and a
+ * reverse proxy with an idle/read timeout (nginx `proxy_read_timeout` is 60 s
+ * by default) would drop the connection before `done` ships.
+ */
+export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+
+let sseHeartbeatIntervalMs = SSE_HEARTBEAT_INTERVAL_MS;
+
+/** Test hook: shorten the heartbeat interval. Call without an argument to restore the default. */
+export function setSseHeartbeatIntervalForTests(ms?: number): void {
+  sseHeartbeatIntervalMs = ms ?? SSE_HEARTBEAT_INTERVAL_MS;
+}
+
 const DEPLOY_ID_RULE = "deployId must be 1-128 characters from [A-Za-z0-9._:-]";
 
 type DeployIdResult = { ok: true; deployId: string | undefined } | { ok: false; error: string };
@@ -162,6 +177,7 @@ api.post("/apps/:name/deploy", async (c) => {
       if (err instanceof apps.DeployConflictError) return c.json({ error: err.message }, 409); throw err;
     }
     let cancelled = false;
+    let stopHeartbeat: (() => void) | undefined;
     return new Response(
       new ReadableStream({
         async start(controller) {
@@ -170,6 +186,15 @@ api.post("/apps/:name/deploy", async (c) => {
             if (cancelled) return;
             controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
           }
+
+          // A comment line, not an event: SSE consumers ignore it, so clients
+          // that switch on event names are unaffected.
+          let finished = false;
+          const heartbeat = setInterval(() => {
+            if (cancelled || finished) return;
+            controller.enqueue(encoder.encode(": ping\n\n"));
+          }, sseHeartbeatIntervalMs);
+          stopHeartbeat = () => clearInterval(heartbeat);
 
           try {
             const result = await apps.deployAppStreaming(
@@ -187,6 +212,8 @@ api.post("/apps/:name/deploy", async (c) => {
           } catch (err) {
             send("error", { message: err instanceof Error ? err.message : String(err) });
           } finally {
+            finished = true;
+            clearInterval(heartbeat);
             releaseStreamLock?.();
           }
           if (!cancelled) controller.close();
@@ -197,6 +224,7 @@ api.post("/apps/:name/deploy", async (c) => {
           // here: the deploy keeps running to its end, and the stream's
           // finally releases it once the deploy settles.
           cancelled = true;
+          stopHeartbeat?.();
         },
       }),
       {
