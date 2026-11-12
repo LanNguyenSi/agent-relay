@@ -338,6 +338,9 @@ api.get("/apps/:name/env", async (c) => {
     return c.json({ entries });
   } catch (err) {
     if (err instanceof RelayConfigError) return c.json({ error: err.message }, 404);
+    // A symlinked or non-regular `.env` (409, service's generic message:
+    // it carries no link target and no file content).
+    if (err instanceof appEnv.EnvFileUnusableError) return c.json({ error: err.message }, 409);
     throw err;
   }
 });

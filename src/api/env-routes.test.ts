@@ -4,7 +4,7 @@
  * covered separately in `src/services/env.test.ts`.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { api } from "./routes.js";
 import { env } from "../config/env.js";
@@ -27,6 +27,7 @@ describe("/api/apps/:name/env", () => {
   });
   afterEach(async () => {
     await rm(resolve(BASE, APP), { recursive: true, force: true });
+    await rm(resolve(BASE, "outside-routes"), { recursive: true, force: true });
   });
 
   it("rejects requests without a bearer token", async () => {
@@ -38,6 +39,18 @@ describe("/api/apps/:name/env", () => {
     const res = await request(`/apps/${APP}/env`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ entries: [] });
+  });
+
+  it("GET refuses a `.env` symlink with 409 and leaks nothing", async () => {
+    await mkdir(resolve(BASE, "outside-routes"), { recursive: true });
+    const outside = resolve(BASE, "outside-routes", "host-secrets");
+    await writeFile(outside, "HOST_SECRET=leaked\n", "utf8");
+    await symlink(outside, resolve(BASE, APP, ".env"));
+    const res = await request(`/apps/${APP}/env`);
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).not.toContain(outside);
+    expect(text).not.toContain("leaked");
   });
 
   it("PUT writes and GET reads back", async () => {

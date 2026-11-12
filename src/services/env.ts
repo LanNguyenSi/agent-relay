@@ -11,7 +11,7 @@
  * key is not a valid identifier and lines without `=` are all dropped. Teams that rely on commented .env files should keep
  * the comments elsewhere (e.g. `.env.example`). Documented in docs.
  */
-import { open, readFile, rename, rm } from "node:fs/promises";
+import { constants, open, rename, rm, type FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { safeAppDir } from "./apps.js";
@@ -72,17 +72,48 @@ function quoteIfNeeded(value: string): string {
   return '"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
 }
 
+// A `.env` that readAppEnv refuses to read: a symlink (O_NOFOLLOW turns the
+// open into ELOOP, dangling targets included) or a non-regular file that
+// still opens (directory, FIFO, device). The message is deliberately generic
+// (no path, no link target, no content) because the route returns it to
+// API callers. Decision: an error mapped to 409, not an empty list: an empty
+// list would make a compromised app look like it has no env vars and let the
+// next PUT rename-replace the link (writeAppEnv writes to a fresh file),
+// silently hiding the plant from the operator.
+export class EnvFileUnusableError extends Error {
+  constructor(name: string) {
+    super(`Refusing to read ${name}'s .env: it is a symlink or not a regular file`);
+    this.name = "EnvFileUnusableError";
+  }
+}
+
+// Read <appDir>/.env without following symlinks: an app checkout that
+// tracks `.env -> /some/host/file` must not let the relay (root in its
+// container) leak any file it can read. O_NOFOLLOW makes the open fail with
+// ELOOP on a symlink instead of resolving it; O_NONBLOCK keeps the open of a
+// FIFO from blocking until a writer appears (a plain O_RDONLY open of a FIFO
+// waits); the fstat on the handle then rejects everything that opened but is
+// not a regular file. A missing .env keeps its long-standing meaning: an
+// empty list. The handle is closed in a `finally`, including on refusal.
 export async function readAppEnv(name: string): Promise<EnvEntry[]> {
   const dir = await safeAppDir(name);
   const path = resolve(dir, ".env");
-  let contents: string;
+  let handle: FileHandle;
   try {
-    contents = await readFile(path, "utf8");
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return [];
+    if (code === "ELOOP") throw new EnvFileUnusableError(name);
     throw err;
   }
-  return parseEnv(contents);
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) throw new EnvFileUnusableError(name);
+    return parseEnv(await handle.readFile("utf8"));
+  } finally {
+    await handle.close();
+  }
 }
 
 // Write the full set of entries atomically: create a uniquely named temp
