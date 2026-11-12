@@ -232,6 +232,9 @@ api.post("/apps/:name/deploy", async (c) => {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           "Connection": "keep-alive",
+          // Tells nginx not to buffer this response, so pings and events
+          // reach the client without operator config.
+          "X-Accel-Buffering": "no",
         },
       },
     );

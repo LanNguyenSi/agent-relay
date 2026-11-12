@@ -141,10 +141,16 @@ describe("stream deploy heartbeat", () => {
     const handles: Array<ReturnType<typeof setInterval>> = [];
     const realSet = globalThis.setInterval;
     const realClear = globalThis.clearInterval;
-    // Keep the timer alive after cancel: only the cancelled guard can then
-    // stop the callback from enqueuing into the dead controller.
+    let ticksAfterCancel = 0;
+    let cancelledNow = false;
+    // Keep the timer alive after cancel and count its ticks: only the
+    // cancelled guard can then stop the callback from enqueuing into the
+    // dead controller.
     vi.spyOn(globalThis, "setInterval").mockImplementation(((fn: () => void, ms: number) => {
-      const h = realSet(fn, ms);
+      const h = realSet(() => {
+        if (cancelledNow) ticksAfterCancel++;
+        fn();
+      }, ms);
       handles.push(h);
       return h;
     }) as never);
@@ -162,9 +168,12 @@ describe("stream deploy heartbeat", () => {
       const reader = res.body!.getReader();
       await readUntil(reader, (t) => t.includes(": ping"));
       await reader.cancel();
+      cancelledNow = true;
 
-      // Let the still-armed timer fire a few more times.
-      await new Promise<void>((resolve) => realSet(resolve, INTERVAL_MS * 6));
+      // Wait until the still-armed timer has fired at least twice after cancel.
+      await vi.waitFor(() => expect(ticksAfterCancel).toBeGreaterThanOrEqual(2));
+      // One more macrotask so a throw from the last tick would surface.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       expect(errors).toEqual([]);
 
       deployGate.open();
@@ -173,5 +182,12 @@ describe("stream deploy heartbeat", () => {
       process.off("uncaughtException", onUncaught);
       for (const h of handles) realClear(h);
     }
+  });
+
+  it("marks the stream unbuffered for nginx", async () => {
+    vi.spyOn(apps, "deployAppStreaming").mockResolvedValue(OK_RESULT as never);
+    const res = await streamDeploy();
+    expect(res.headers.get("X-Accel-Buffering")).toBe("no");
+    await res.text();
   });
 });
