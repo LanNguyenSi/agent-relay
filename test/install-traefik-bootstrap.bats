@@ -406,3 +406,144 @@ _assert_ping_healthcheck() {
   [ "$call_line" -gt "$guard_line" ]
   _refute_grep 'Traefik already running"' "$INSTALL_SH"
 }
+
+# ─── Traefik image: pinned default, TRAEFIK_IMAGE override, validation ───────
+
+# Write the Traefik compose after sourcing install.sh with TRAEFIK_IMAGE=$1
+# already in the environment; $1 = UNSET leaves the variable unset so the
+# installer's own default applies. install.sh assigns ${TRAEFIK_IMAGE-default},
+# so a set-but-empty value survives the source instead of falling back.
+_write_traefik_image() {
+  local pre='unset TRAEFIK_IMAGE'
+  if [ "$1" != UNSET ]; then
+    pre="export TRAEFIK_IMAGE='$1'"
+  fi
+  bash -c "
+    ${pre}
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    TRAEFIK_EMAIL=admin@example.com
+    TRAEFIK_CA=letsencrypt
+    PEBBLE_URL=
+    agent_relay_write_traefik_compose '${TRAEFIK_DIR}'
+  " 2>&1
+}
+
+# Source install.sh, run the bash fragment $1 (assigns TRAEFIK_IMAGE), then the
+# validator; stdout+stderr merged into $output.
+_run_image_validation() {
+  run bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    ${1}
+    agent_relay_validate_traefik_image
+    echo 'validation passed'
+  " 2>&1
+}
+
+@test "traefik compose pins image traefik:v3.7.18 by default (no floating :v3 tag)" {
+  _write_traefik_image UNSET
+  grep -qxF -- '    image: traefik:v3.7.18' "${TRAEFIK_DIR}/docker-compose.yml"
+  _refute_grep -E '^    image: traefik:v3$' "${TRAEFIK_DIR}/docker-compose.yml"
+}
+
+@test "TRAEFIK_IMAGE=traefik:v3.7.17 is written to the compose as given" {
+  _write_traefik_image traefik:v3.7.17
+  grep -qxF -- '    image: traefik:v3.7.17' "${TRAEFIK_DIR}/docker-compose.yml"
+  _refute_grep 'traefik:v3.7.18' "${TRAEFIK_DIR}/docker-compose.yml"
+}
+
+@test "image default: TRAEFIK_IMAGE unset -> source applies traefik:v3.7.18" {
+  run bash -c "unset TRAEFIK_IMAGE; INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'; echo TRAEFIK_IMAGE=\$TRAEFIK_IMAGE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TRAEFIK_IMAGE=traefik:v3.7.18" ]]
+}
+
+@test "image default: TRAEFIK_IMAGE set -> env value wins over the default" {
+  run bash -c "export TRAEFIK_IMAGE=traefik:v3.7.17; INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'; echo TRAEFIK_IMAGE=\$TRAEFIK_IMAGE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TRAEFIK_IMAGE=traefik:v3.7.17" ]]
+}
+
+@test "image default: TRAEFIK_IMAGE set empty -> stays empty (no silent fallback to the default)" {
+  run bash -c "export TRAEFIK_IMAGE=; INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'; echo \"[\$TRAEFIK_IMAGE]\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == "[]" ]]
+}
+
+@test "validate TRAEFIK_IMAGE: default accepted" {
+  _run_image_validation "true"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "validation passed" ]]
+}
+
+@test "validate TRAEFIK_IMAGE: plain image reference accepted" {
+  _run_image_validation "TRAEFIK_IMAGE=traefik:v3.7.17"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "validation passed" ]]
+}
+
+@test "validate TRAEFIK_IMAGE: empty rejected with a clear message" {
+  _run_image_validation "TRAEFIK_IMAGE=''"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "TRAEFIK_IMAGE must not be empty" ]]
+}
+
+@test "validate TRAEFIK_IMAGE: value with a space rejected" {
+  _run_image_validation "TRAEFIK_IMAGE='traefik: latest'"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "whitespace" ]]
+}
+
+@test "validate TRAEFIK_IMAGE: value with a newline rejected" {
+  _run_image_validation "TRAEFIK_IMAGE=\$'traefik:v3.7.18\nlatest'"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "whitespace" ]]
+}
+
+# ─── greenfield empty-TRAEFIK_EMAIL warning text (Step 4, main body) ─────────
+
+# Run the full installer with a non-root id shim (uid 1000, docker info ok →
+# NONROOT=1), RELAY_MODE=greenfield, RELAY_DOMAIN set and TRAEFIK_EMAIL empty:
+# it prints the Step 4 warnings and then stops at the Step 5 requires-root
+# check, so nothing is written anywhere.
+_greenfield_email_warning_run() {
+  printf '#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo 1000 && exit 0\nexec id "$@"\n' \
+    > "${SHIM_DIR}/id"
+  chmod +x "${SHIM_DIR}/id"
+  run bash -c "
+    export PATH='${SHIM_DIR}:${PATH}'
+    export HOME='${SHIM_DIR}/home'
+    export DOCKER_LOG='${DOCKER_LOG}'
+    RELAY_MODE=greenfield RELAY_DOMAIN=relay.example.com TRAEFIK_EMAIL= \
+      bash '${INSTALL_SH}'
+  " 2>&1
+}
+
+@test "greenfield + RELAY_DOMAIN + empty TRAEFIK_EMAIL: warning names RELAY_MODE=port-only and the plain-HTTP trap" {
+  _greenfield_email_warning_run
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "requires root" ]]
+  [[ "$output" =~ "TRAEFIK_EMAIL is empty" ]]
+  [[ "$output" =~ "use RELAY_MODE=port-only" ]]
+  [[ "$output" =~ "plain HTTP on all interfaces" ]]
+}
+
+@test "the false advice to leave RELAY_DOMAIN unset for port-only mode is gone" {
+  _refute_grep "leave RELAY_DOMAIN unset" "$INSTALL_SH"
+  _refute_grep "unset for port-only" "$INSTALL_SH"
+}
+
+@test "installer run: invalid TRAEFIK_IMAGE fails in the main body before Step 1" {
+  printf '#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo 1000 && exit 0\nexec id "$@"\n' \
+    > "${SHIM_DIR}/id"
+  chmod +x "${SHIM_DIR}/id"
+  run bash -c "
+    export PATH='${SHIM_DIR}:${PATH}'
+    export HOME='${SHIM_DIR}/home'
+    export DOCKER_LOG='${DOCKER_LOG}'
+    RELAY_MODE=port-only TRAEFIK_IMAGE='traefik: latest' bash '${INSTALL_SH}'
+  " 2>&1
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "must not contain whitespace" ]]
+  # Validation runs in the pre-checks, before the Docker step even starts.
+  _refute_grep 'Docker already installed' <<<"$output"
+}
