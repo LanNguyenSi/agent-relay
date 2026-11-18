@@ -37,6 +37,12 @@ is the only health check that runs during a deploy:
   service's own container**. The first `exitCode === 0` wins; after
   exhausting every service/port combination `maxRetries` times, it reports
   failure.
+- **Per-attempt timeouts**: the in-container fetch aborts after 5 s
+  (`AbortSignal.timeout(5000)` in the snippet, `engine.ts:478`) and the
+  `docker compose exec` running it is capped at 15 s
+  (`PROBE_EXEC_TIMEOUT_MS`, `engine.ts:417`, passed to the exec at
+  `engine.ts:483`), so a wedged probe counts as one failed attempt instead
+  of inheriting the 300 s step default.
 
 `docs/operations.md`'s Deploy lifecycle section describes exactly this behavior.
 

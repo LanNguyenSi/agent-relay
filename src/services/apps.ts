@@ -239,7 +239,8 @@ export function validateBranch(branch: string): string {
 }
 
 export function clampLogLines(lines?: number): number {
-  const floored = Math.floor(lines ?? 50); return !Number.isFinite(floored) || floored < 1 ? 50 : Math.min(floored, MAX_LOG_LINES);
+  const floored = Math.floor(lines ?? 50);
+  return !Number.isFinite(floored) || floored < 1 ? 50 : Math.min(floored, MAX_LOG_LINES);
 }
 
 export async function listApps(): Promise<Array<{ name: string; configured: boolean; health?: string; commit?: string; upstream?: UpstreamInfo }>> {
