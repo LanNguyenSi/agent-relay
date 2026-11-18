@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The deploy health probe can no longer hold the deploy lock for minutes.** Each in-container probe fetch now aborts after 5 s (`AbortSignal.timeout(5000)`), and the `docker compose exec` that runs it gets a 15 s timeout instead of the 300 s step default, so a wedged service counts as one failed attempt and the retry loop moves on. A probe whose exec timed out is reported as a timeout in the health-check failure detail.
+- **App log requests clamp a bad `lines` value before it reaches docker.** `clampLogLines` now falls back to the 50-line default for `undefined`, `NaN`, `Infinity` and any value that floors below 1 (negatives, zero, fractions), floors fractions down, and still caps at 1000, so `?lines=abc`, `?lines=-1` and `?lines=0` all become `--tail=50` rather than an invalid `docker compose logs --tail`. The MCP `relay_logs` schema now also rejects non-integer and below-1 values (`z.number().int().min(1).max(1000)`).
+- **JSON request bodies on the `/api` routes are capped at 16 MiB.** Hono's `bodyLimit` runs before the route handlers and answers an oversized body with `413 { "error": "Request body too large" }` without parsing it. The limit is the smallest power of two above the largest legitimate body (the env PUT: 500 entries of up to 128-byte keys and 32 KiB values). The `/mcp` transport is mounted outside Hono and is not covered by this cap.
+
 ## [0.9.0] - 2026-11-17
 
 ### Added

@@ -242,7 +242,7 @@ Read an app's `.env` as a flat list of key/value entries. Returns an empty list 
 
 ### `PUT /api/apps/:name/env`
 
-Replace an app's `.env` with the supplied entries (full overwrite, written atomically at mode `0600`). The body must be `{ "entries": [ { "key", "value" } ] }`; both `key` and `value` must be strings. Validation limits: at most 500 entries, key length 1..128, value length up to 32768 characters, keys must match `[A-Za-z_][A-Za-z0-9_]*`, and duplicate keys are rejected (`400` on any violation). Returns the written entries.
+Replace an app's `.env` with the supplied entries (full overwrite, written atomically at mode `0600`). The body must be `{ "entries": [ { "key", "value" } ] }`; both `key` and `value` must be strings. Validation limits: at most 500 entries, key length 1..128, value length up to 32768 characters, keys must match `[A-Za-z_][A-Za-z0-9_]*`, and duplicate keys are rejected (`400` on any violation). Returns the written entries. Independently of these per-field limits, every `/api` request body is capped at 16 MiB (sized to admit a maximum-size env write) and anything larger is answered `413 { "error": "Request body too large" }` before a route parses it; the `/mcp` transport is mounted outside this cap.
 
 Comments and every line that `GET` skips are removed on write, so a `GET` followed by a `PUT` drops them; keep canonical comments in `.env.example` instead.
 

@@ -415,6 +415,19 @@ describe("relay_logs", () => {
     await expectInputRejected("relay_logs", { app: "x", lines: 1001 });
     expect(mockFetchLogs).not.toHaveBeenCalled();
   });
+
+  it("lines schema: rejects -1 (below the minimum) and 1.5 (non-integer)", async () => {
+    await expectInputRejected("relay_logs", { app: "x", lines: -1 });
+    await expectInputRejected("relay_logs", { app: "x", lines: 1.5 });
+    expect(mockFetchLogs).not.toHaveBeenCalled();
+  });
+
+  it("lines schema: accepts the 1 lower boundary", async () => {
+    mockFetchLogs.mockResolvedValue({ app: "x", lines: 1, logs: "" } as never);
+
+    await callTool("relay_logs", { app: "x", lines: 1 });
+    expect(mockFetchLogs).toHaveBeenCalledWith("x", 1, undefined);
+  });
 });
 
 // ── relay_preflight ──────────────────────────────────────────────────────────
