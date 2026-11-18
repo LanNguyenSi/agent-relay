@@ -60,6 +60,11 @@ jobs:
           # `LanNguyenSi`. `docker/metadata-action` handles the
           # lowercasing automatically via github.repository.
           images: ghcr.io/${{ github.repository_owner }}/agent-relay
+          # metadata-action's default `latest=auto` adds `:latest` to every
+          # non-prerelease semver tag; turn it off so only the explicit
+          # default-branch entry below pushes `:latest`.
+          flavor: |
+            latest=false
           tags: |
             # push:branch → `main` gets `:latest` + `:main-<sha>`
             type=raw,value=latest,enable={{is_default_branch}}

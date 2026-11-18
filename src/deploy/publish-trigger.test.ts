@@ -48,19 +48,20 @@ describe("publish workflow trigger", () => {
 // are serialized per ref, and only the default branch pushes `:latest`, so a
 // v* tag build that finishes after a newer main build cannot roll it back,
 // and no run of one ref can supersede a queued run of another.
-type MetaStep = { id?: string; with?: { tags?: string } };
-const metadataTags = (): string[] => {
+type MetaStep = { id?: string; with?: { tags?: string; flavor?: string } };
+const metaStep = (): MetaStep | undefined => {
   const wf = load(readFileSync(resolve(root, ".github/workflows/publish.yml"), "utf8")) as {
     jobs: Record<string, { steps: MetaStep[] }>;
   };
-  const step = Object.values(wf.jobs)
+  return Object.values(wf.jobs)
     .flatMap((job) => job.steps)
     .find((s) => s.id === "meta");
-  return (step?.with?.tags ?? "")
+};
+const metadataTags = (): string[] =>
+  (metaStep()?.with?.tags ?? "")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
-};
 
 describe("publish workflow :latest ownership", () => {
   it("serializes runs per ref and never cancels a running publish", () => {
@@ -71,6 +72,11 @@ describe("publish workflow :latest ownership", () => {
   it("pushes :latest only from the default branch", () => {
     const latest = metadataTags().filter((line) => /value=latest\b/.test(line));
     expect(latest).toEqual(["type=raw,value=latest,enable={{is_default_branch}}"]);
+  });
+
+  it("turns off metadata-action's automatic latest for semver tags", () => {
+    const flavor = (metaStep()?.with?.flavor ?? "").split("\n").map((line) => line.trim());
+    expect(flavor).toContain("latest=false");
   });
 
   it("still pushes the semver tags for a v* tag build", () => {
