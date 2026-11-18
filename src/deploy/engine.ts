@@ -444,7 +444,7 @@ async function runHealthCheck(
   // Try each running service with node fetch, with retries for startup time
   const healthStep = await runStep(stepName, async () => {
     const maxRetries = 5;
-    const delayMs = process.env.NODE_ENV === "test" ? 0 : 5000;
+    const delayMs = healthCheckRetryDelayMs;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
@@ -500,6 +500,23 @@ async function runHealthCheck(
   steps.push(healthStep);
 
   return healthStep.status === "success";
+}
+
+// Health-check retry delay. Production always uses the default; the module-
+// level setter is the only override and is called from tests alone (a
+// parameter would widen the public DeployOptions surface for a test-only
+// concern, and runHealthCheck is module-private: the tests drive it through
+// deploy()). It used to be `process.env.NODE_ENV === "test" ? 0 : 5000`,
+// which made a NODE_ENV=test environment silently turn the deploy health
+// check's pause between attempts into 0; production code no longer reads
+// NODE_ENV. Declared after runHealthCheck (which reads it) to keep that
+// function's line span stable for the docs' line citations.
+export const HEALTH_CHECK_RETRY_DELAY_MS = 5000;
+let healthCheckRetryDelayMs = HEALTH_CHECK_RETRY_DELAY_MS;
+
+/** Test-only override for the health-check retry delay (0 to skip waiting). */
+export function setHealthCheckRetryDelayMsForTests(delayMs: number): void {
+  healthCheckRetryDelayMs = delayMs;
 }
 
 /**
