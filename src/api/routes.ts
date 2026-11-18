@@ -7,6 +7,7 @@ import * as appEnv from "../services/env.js";
 import { recordDeploy, getHistory } from "../services/history.js";
 import { isValidDeployId } from "../services/deploy-id.js";
 import { readCpuUsage } from "../services/cpu.js";
+import { runShell } from "../deploy/exec.js";
 
 export const api = new Hono();
 
@@ -80,17 +81,34 @@ api.get("/health", (c) => {
 });
 
 // ── GET /api/system — host CPU/RAM/Disk metrics ────────────────────────────
-api.get("/system", async (c) => {
-  const { execSync } = await import("node:child_process");
-  try {
-    const cpu = await readCpuUsage();
-    const mem = execSync("free -m | awk '/Mem:/{printf \"%d %d\", $3, $2}'", { timeout: 5000 }).toString().trim().split(" ");
-    const disk = execSync("df -h / | awk 'NR==2{printf \"%s %s %s\", $3, $2, $5}'", { timeout: 5000 }).toString().trim().split(" ");
 
+/**
+ * Per-command timeout for the `free` and `df` shell pipelines. They run
+ * through `runShell` (execFile based) instead of `execSync`: a synchronous
+ * child process inside this async handler would block the event loop for up
+ * to its timeout, stalling every other request (deploys, health, MCP).
+ * `runShell` reports a killed process with a non-zero `exitCode`, which maps
+ * to the same 500 the old throw-on-timeout path produced.
+ */
+const SYSTEM_CMD_TIMEOUT_MS = 5_000;
+
+api.get("/system", async (c) => {
+  try {
+    const [cpu, mem, disk] = await Promise.all([
+      readCpuUsage(),
+      runShell(`free -m | awk '/Mem:/{printf "%d %d", $3, $2}'`, process.cwd(), { timeoutMs: SYSTEM_CMD_TIMEOUT_MS }),
+      runShell(`df -h / | awk 'NR==2{printf "%s %s %s", $3, $2, $5}'`, process.cwd(), { timeoutMs: SYSTEM_CMD_TIMEOUT_MS }),
+    ]);
+    if (mem.exitCode !== 0 || disk.exitCode !== 0) {
+      return c.json({ error: "Failed to collect system metrics" }, 500);
+    }
+
+    const memOut = mem.stdout.trim().split(" ");
+    const diskOut = disk.stdout.trim().split(" ");
     return c.json({
       cpu: { usage: cpu },
-      memory: { usedMb: parseInt(mem[0]) || 0, totalMb: parseInt(mem[1]) || 0 },
-      disk: { used: disk[0] || "?", total: disk[1] || "?", percent: disk[2] || "?" },
+      memory: { usedMb: parseInt(memOut[0]) || 0, totalMb: parseInt(memOut[1]) || 0 },
+      disk: { used: diskOut[0] || "?", total: diskOut[1] || "?", percent: diskOut[2] || "?" },
       uptime: process.uptime(),
     });
   } catch {

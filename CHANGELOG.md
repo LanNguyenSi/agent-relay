@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /api/system` no longer blocks the event loop.** The handler ran the `free` and `df` pipelines through `execSync` (5 s timeout each) inside an async request, so one slow command froze the whole relay (deploys, health checks, MCP) for up to 10 s. Both commands now run through `runShell` in `deploy/exec.ts` (the same `execFile`-based helper the deploy steps use), in parallel, with the same 5 s per-command timeout. The JSON response is unchanged: same fields, the same `0` and `"?"` fallbacks on empty output, and the same 500 `{ "error": "Failed to collect system metrics" }` when a command fails or times out.
+
 ## [0.9.0] - 2026-11-17
 
 ### Added
