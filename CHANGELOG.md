@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **An empty `PORT=` no longer starts the relay on a random port.** The empty string coerced to `0`, which means "listen on any free port", while the container healthcheck treats an empty `PORT` as unset and probes 8222, so the relay answered on a port nothing was probing. An empty or whitespace-only `PORT` now counts as unset and uses the default `8222`, and the value must parse as an integer from 1 to 65535: `0`, negative, fractional, `65536` and non-numeric values stop the relay at start-up with a `PORT` configuration error instead of listening somewhere unexpected (see [docs/operations.md](docs/operations.md#runtime-environment-variables)).
+
+- **The deploy health-check retry delay no longer depends on `NODE_ENV`.** `NODE_ENV=test` in the relay's own environment turned the pause between the 5 health-check attempts into 0, so a relay started that way hammered a still-starting container with no pause at all. The delay is now the constant `HEALTH_CHECK_RETRY_DELAY_MS` (5000 ms), overridable only by a test-only setter; production code never reads `NODE_ENV`, so every deployment waits the same 5 s between attempts whatever the environment says (see [docs/operations.md](docs/operations.md#deploy-lifecycle)).
+
+- **A `v*` tag build no longer pushes `:latest`, so it cannot roll `:latest` back behind `main`.** Main and tag builds run in different concurrency groups (`publish-${{ github.ref }}`), so they could run at the same time, and both pushed `:latest`: a tag build that finished after a newer main build left `:latest` on the older release commit, which the installer and the relay self-update then pulled. Only the default branch pushes `:latest` now; a tag build pushes its semver tags (`:0.2.0`, `:0.2`). Behaviour change: pushing a `v*` tag no longer moves `:latest` by itself; the merge to `main` that the tag points at already published it. Runs stay serialized per ref, so a release tag run is never superseded by a main run.
+
 ### Removed
 
 - **`dockerode` and `@types/dockerode` are no longer dependencies.** Nothing in `src/` imports them, and `Dockerfile` installs with `npm ci --omit=dev`, so the runtime package only bloated the production image while its types sat in dev. No behavior change.
@@ -16,14 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Documentation
 
 - **`docs/operations.md` gained a "Small VPS" subsection.** Relay builds run on the host through docker and an app build can use a lot of memory; on a 1 to 2 GB VPS the guidance is to add swap, cap the app with `mem_limit` in the app's own compose file, and run one deploy at a time, since the relay does not serialize deploys of different apps. The `PORT` row of the runtime environment variables table now states that an empty value counts as unset (default `8222`) and which values are rejected at start-up.
-
-### - **An empty `PORT=` no longer starts the relay on a random port.** The empty string coerced to `0`, which means "listen on any free port", while the container healthcheck treats an empty `PORT` as unset and probes 8222, so the relay answered on a port nothing was probing. An empty or whitespace-only `PORT` now counts as unset and uses the default `8222`, and the value must parse as an integer from 1 to 65535: `0`, negative, fractional, `65536` and non-numeric values stop the relay at start-up with a `PORT` configuration error instead of listening somewhere unexpected (see [docs/operations.md](docs/operations.md#runtime-environment-variables)).
-
-- **The deploy health-check retry delay no longer depends on `NODE_ENV`.** `NODE_ENV=test` in the relay's own environment turned the pause between the 5 health-check attempts into 0, so a relay started that way hammered a still-starting container with no pause at all. The delay is now the constant `HEALTH_CHECK_RETRY_DELAY_MS` (5000 ms), overridable only by a test-only setter; production code never reads `NODE_ENV`, so every deployment waits the same 5 s between attempts whatever the environment says (see [docs/operations.md](docs/operations.md#deploy-lifecycle)).
-
-### - **A `v*` tag build no longer pushes `:latest`, so it cannot roll `:latest` back behind `main`.** Main and tag builds run in different concurrency groups (`publish-${{ github.ref }}`), so they could run at the same time, and both pushed `:latest`: a tag build that finished after a newer main build left `:latest` on the older release commit, which the installer and the relay self-update then pulled. Only the default branch pushes `:latest` now; a tag build pushes its semver tags (`:0.2.0`, `:0.2`). Behaviour change: pushing a `v*` tag no longer moves `:latest` by itself; the merge to `main` that the tag points at already published it. Runs stay serialized per ref, so a release tag run is never superseded by a main run.
-
-
 
 ## [0.9.0] - 2026-11-17
 
