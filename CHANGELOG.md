@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `v*` tag build no longer pushes `:latest`, so it cannot roll `:latest` back behind `main`.** Main and tag builds run in different concurrency groups (`publish-${{ github.ref }}`), so they could run at the same time, and both pushed `:latest`: a tag build that finished after a newer main build left `:latest` on the older release commit, which the installer and the relay self-update then pulled. Only the default branch pushes `:latest` now; a tag build pushes its semver tags (`:0.2.0`, `:0.2`). Behaviour change: pushing a `v*` tag no longer moves `:latest` by itself; the merge to `main` that the tag points at already published it. Runs stay serialized per ref, so a release tag run is never superseded by a main run.
+
+### Removed
+
+- **`dockerode` and `@types/dockerode` are no longer dependencies.** Nothing in `src/` imports them, and `Dockerfile` installs with `npm ci --omit=dev`, so the runtime package only bloated the production image while its types sat in dev. No behavior change.
+
 ## [0.9.0] - 2026-11-17
 
 ### Added
