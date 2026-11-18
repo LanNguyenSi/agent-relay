@@ -96,6 +96,7 @@ api.get("/system", async (c) => {
   try {
     const [cpu, mem, disk] = await Promise.all([
       readCpuUsage(),
+      // runShell: fixed command strings chosen here, no external input (trust boundary: docs/okf/exec-trust-boundary.md)
       runShell(`free -m | awk '/Mem:/{printf "%d %d", $3, $2}'`, process.cwd(), { timeoutMs: SYSTEM_CMD_TIMEOUT_MS }),
       runShell(`df -h / | awk 'NR==2{printf "%s %s %s", $3, $2, $5}'`, process.cwd(), { timeoutMs: SYSTEM_CMD_TIMEOUT_MS }),
     ]);
