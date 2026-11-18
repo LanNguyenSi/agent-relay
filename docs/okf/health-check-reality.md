@@ -26,8 +26,11 @@ sources:
 `compose up`, as step `rollback: health check`, against the pre-deploy config)
 is the only health check that runs during a deploy:
 
-- **Fixed retry count and delay**: `maxRetries = 5`, flat `delayMs = 5000`
-  between attempts (`0` under `NODE_ENV=test`) — no exponential backoff.
+- **Fixed retry count and delay**: `maxRetries = 5`, flat
+  `HEALTH_CHECK_RETRY_DELAY_MS = 5000` between attempts — no exponential
+  backoff. Production always uses the constant; only the module-level
+  `setHealthCheckRetryDelayMsForTests` setter (called from tests alone)
+  overrides it, and `delayMs` no longer reads `NODE_ENV`.
 - **No direct HTTP fetch from the relay process.** Each attempt lists the
   compose project's running services (`docker compose -f <compose_file> ps
   --services --status running`), then for each service tries each candidate

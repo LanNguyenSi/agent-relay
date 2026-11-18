@@ -10,12 +10,15 @@ const root = resolve(__dirname, "../..");
 
 type PushTrigger = { branches?: string[]; tags?: string[]; "paths-ignore"?: string[]; paths?: string[] };
 
-const trigger = (): PushTrigger => {
-  const wf = load(readFileSync(resolve(root, ".github/workflows/publish.yml"), "utf8")) as {
-    on: { push: PushTrigger; workflow_dispatch?: unknown };
-  };
-  return wf.on.push;
+type PublishWorkflow = {
+  on: { push: PushTrigger; workflow_dispatch?: unknown };
+  concurrency?: { group?: string; "cancel-in-progress"?: boolean };
 };
+
+const workflow = (): PublishWorkflow =>
+  load(readFileSync(resolve(root, ".github/workflows/publish.yml"), "utf8")) as PublishWorkflow;
+
+const trigger = (): PushTrigger => workflow().on.push;
 
 describe("publish workflow trigger", () => {
   it("ignores exactly the documentation-only paths", () => {
@@ -38,5 +41,47 @@ describe("publish workflow trigger", () => {
       expect(["Dockerfile", "package.json", "package-lock.json", "tsconfig.json"]).not.toContain(pattern);
       expect(pattern).not.toMatch(/^\*\*/);
     }
+  });
+});
+
+// Pins how the Publish workflow keeps `:latest` on main's newest build: runs
+// are serialized per ref, and only the default branch pushes `:latest`, so a
+// v* tag build that finishes after a newer main build cannot roll it back,
+// and no run of one ref can supersede a queued run of another.
+type MetaStep = { id?: string; with?: { tags?: string; flavor?: string } };
+const metaStep = (): MetaStep | undefined => {
+  const wf = load(readFileSync(resolve(root, ".github/workflows/publish.yml"), "utf8")) as {
+    jobs: Record<string, { steps: MetaStep[] }>;
+  };
+  return Object.values(wf.jobs)
+    .flatMap((job) => job.steps)
+    .find((s) => s.id === "meta");
+};
+const metadataTags = (): string[] =>
+  (metaStep()?.with?.tags ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+
+describe("publish workflow :latest ownership", () => {
+  it("serializes runs per ref and never cancels a running publish", () => {
+    expect(workflow().concurrency?.group).toBe("publish-${{ github.ref }}");
+    expect(workflow().concurrency?.["cancel-in-progress"]).toBe(false);
+  });
+
+  it("pushes :latest only from the default branch", () => {
+    const latest = metadataTags().filter((line) => /value=latest\b/.test(line));
+    expect(latest).toEqual(["type=raw,value=latest,enable={{is_default_branch}}"]);
+  });
+
+  it("turns off metadata-action's automatic latest for semver tags", () => {
+    const flavor = (metaStep()?.with?.flavor ?? "").split("\n").map((line) => line.trim());
+    expect(flavor).toContain("latest=false");
+  });
+
+  it("still pushes the semver tags for a v* tag build", () => {
+    const tags = metadataTags();
+    expect(tags).toContain("type=semver,pattern={{version}}");
+    expect(tags).toContain("type=semver,pattern={{major}}.{{minor}}");
   });
 });

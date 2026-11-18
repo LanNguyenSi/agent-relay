@@ -12,7 +12,7 @@ curl -sSL https://raw.githubusercontent.com/LanNguyenSi/agent-relay/main/install
 
 Without env vars on a host where :80 is free, this selects `greenfield` without a domain, which serves the relay as plain HTTP on port 8222 on all interfaces (with a domain and a TLS route, the plain port binds `127.0.0.1` instead). See [Install modes](#install-modes).
 
-The installer pulls the published Docker image from `ghcr.io/lannguyensi/agent-relay:latest`, built and pushed by `.github/workflows/publish.yml` on every `v*` tag and on every merge to `main` that changes more than documentation (a push whose changed files all match `docs/**`, root-level `*.md` or `LICENSE` does not publish). The image must be **public** for the unauthenticated pull to work; after the first workflow run on a fresh repository, a maintainer must flip the package visibility once at [github.com/users/LanNguyenSi/packages/container/agent-relay/settings](https://github.com/users/LanNguyenSi/packages/container/agent-relay/settings) (GitHub defaults new packages to Private). If you see `denied` from the pull step, that is almost always the cause.
+The installer pulls the published Docker image from `ghcr.io/lannguyensi/agent-relay:latest`, built and pushed by `.github/workflows/publish.yml` on every merge to `main` that changes more than documentation (a push whose changed files all match `docs/**`, root-level `*.md` or `LICENSE` does not publish). A `v*` tag publishes only its semver tags, such as `:0.2.0`, and never moves `:latest`. The image must be **public** for the unauthenticated pull to work; after the first workflow run on a fresh repository, a maintainer must flip the package visibility once at [github.com/users/LanNguyenSi/packages/container/agent-relay/settings](https://github.com/users/LanNguyenSi/packages/container/agent-relay/settings) (GitHub defaults new packages to Private). If you see `denied` from the pull step, that is almost always the cause.
 
 The published image is built for `linux/amd64` only, so on an arm64 host the pull fails. There, build the image from source with `docker-compose.prod.example.yml` (it uses `build: .`) instead of the installer. That file joins the external `traefik-public` network (the name the installer uses; create it with `docker network create traefik-public` if no Traefik owns it yet) and refuses to start until `APPS_HOST_DIR` is set to the host directory of your app repos, which it mounts at `/apps` (see [APPS_DIR host/container contract](#apps_dir-hostcontainer-contract)).
 
@@ -230,7 +230,7 @@ For the repository's dev `docker-compose.yml` (no `container_name`), run `docker
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AUTH_TOKEN` | Yes | -- | Bearer token for API and MCP authentication |
-| `PORT` | No | `8222` | HTTP server port |
+| `PORT` | No | `8222` | HTTP server port. An empty or whitespace-only `PORT` counts as unset and uses `8222` (it does not mean "random port"); the value must parse as an integer from 1 to 65535 (`0`, `1.5`, `65536` and `abc` make the relay exit at start-up with a `PORT:` configuration error; write the port as plain decimal digits, since the container healthcheck uses the raw value) |
 | `APPS_DIR` | No | `/apps` | Directory containing app directories, as seen by the relay process. The installer bind-mounts the host `APPS_DIR` (see [Installer environment variables](#installer-environment-variables)) onto `/apps` and writes `APPS_DIR=/apps` into the relay's `.env`, so this rarely needs overriding |
 | `RELAY_REVISION` | No | `"unknown"` | Build commit SHA reported as `revision` on `GET /health` and `GET /api/health`. Baked into the published GHCR image at build time (`ARG RELAY_REVISION=""` / `ENV RELAY_REVISION=$RELAY_REVISION` in `Dockerfile`, set from `github.sha` by `.github/workflows/publish.yml`); local or development runs without `RELAY_REVISION` (or with an empty/whitespace value) report `revision: "unknown"` |
 | `RELAY_BUILD_CACHE_KEEP` | No | `168h` | Docker build cache retention window applied after a successful deploy (`docker builder prune -f --filter until=<value>`). Digits followed by `h` or `m` only (e.g. `90m`, `168h`); an empty value counts as unset, an invalid value logs a warning and uses the default. See [Disk and build cache](#disk-and-build-cache) |
@@ -375,3 +375,14 @@ pruned layers are rebuilt.
 The existing cache on a host is untouched by this (the prune only ever
 runs after successful deploys); clear it once on the host with a one-off
 `docker builder prune -f -a`.
+
+### Small VPS
+
+Every relay deploy builds its app image on the host through docker (see
+[Disk and build cache](#disk-and-build-cache)), and an app build can use a
+lot of memory, more than a small machine has. On a 1 to 2 GB VPS: add swap
+so a build peak does not take the relay or the running apps down with it,
+cap the app with `mem_limit` in the app's own compose file, and run one
+deploy at a time, because the relay does not serialize deploys of different
+apps (see [Runtime state and troubleshooting](#runtime-state-and-troubleshooting))
+and concurrent builds compete for the same memory.

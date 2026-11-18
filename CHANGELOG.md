@@ -9,9 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`GET /api/system` no longer blocks the event loop.** The handler ran the `free` and `df` pipelines through `execSync` (5 s timeout each) inside an async request, so one slow command froze the whole relay (deploys, health checks, MCP) for up to 10 s. Both commands now run through `runShell` in `deploy/exec.ts` (the same `execFile`-based helper the deploy steps use), in parallel, with the same 5 s per-command timeout. The JSON response is unchanged: same fields, the same `0` and `"?"` fallbacks on empty output, and the same 500 `{ "error": "Failed to collect system metrics" }` when a command fails or times out.
+
+- **An empty `PORT=` no longer starts the relay on a random port.** The empty string coerced to `0`, which means "listen on any free port", while the container healthcheck treats an empty `PORT` as unset and probes 8222, so the relay answered on a port nothing was probing. An empty or whitespace-only `PORT` now counts as unset and uses the default `8222`, and the value must parse as an integer from 1 to 65535: `0`, negative, fractional, `65536` and non-numeric values stop the relay at start-up with a `PORT` configuration error instead of listening somewhere unexpected (see [docs/operations.md](docs/operations.md#runtime-environment-variables)).
+
+- **The deploy health-check retry delay no longer depends on `NODE_ENV`.** `NODE_ENV=test` in the relay's own environment turned the pause between the 5 health-check attempts into 0, so a relay started that way hammered a still-starting container with no pause at all. The delay is now the constant `HEALTH_CHECK_RETRY_DELAY_MS` (5000 ms), overridable only by a test-only setter; production code never reads `NODE_ENV`, so every deployment waits the same 5 s between attempts whatever the environment says (see [docs/operations.md](docs/operations.md#deploy-lifecycle)).
+
+- **A `v*` tag build no longer pushes `:latest`, so it cannot roll `:latest` back behind `main`.** Main and tag builds run in different concurrency groups (`publish-${{ github.ref }}`), so they could run at the same time, and both pushed `:latest`: a tag build that finished after a newer main build left `:latest` on the older release commit, which the installer and the relay self-update then pulled. Only the default branch pushes `:latest` now; a tag build pushes its semver tags (`:0.2.0`, `:0.2`). Behaviour change: pushing a `v*` tag no longer moves `:latest` by itself; the merge to `main` that the tag points at already published it. Runs stay serialized per ref, so a release tag run is never superseded by a main run.
+
 - **The deploy health probe can no longer hold the deploy lock for minutes.** Each in-container probe fetch now aborts after 5 s (`AbortSignal.timeout(5000)`), and the `docker compose exec` that runs it gets a 15 s timeout instead of the 300 s step default, so a wedged service counts as one failed attempt and the retry loop moves on. A probe whose exec timed out is reported as a timeout in the health-check failure detail.
+
 - **App log requests clamp a bad `lines` value before it reaches docker.** `clampLogLines` now falls back to the 50-line default for `undefined`, `NaN`, `Infinity` and any value that floors below 1 (negatives, zero, fractions), floors fractions down, and still caps at 1000, so `?lines=abc`, `?lines=-1` and `?lines=0` all become `--tail=50` rather than an invalid `docker compose logs --tail`. The MCP `relay_logs` schema now also rejects non-integer and below-1 values (`z.number().int().min(1).max(1000)`).
+
 - **JSON request bodies on the `/api` routes are capped at 16 MiB.** Hono's `bodyLimit` runs inside the `/api` router after the auth middleware and before the route handlers, so an unauthenticated request is answered 401 before any of its body is buffered (a chunked over-limit body would otherwise pin ~16 MiB per anonymous connection) and an authenticated oversized body is answered `413 { "error": "Request body too large" }` without being parsed. The limit is the smallest power of two above a maximum-size env write of ASCII values without JSON escapes (the env PUT: 500 entries of up to 128-byte keys and 32 KiB values); a maximum-size write whose values carry non-ASCII characters or `"` can be about twice as large in bytes. The `/mcp` transport is mounted outside Hono and is not covered by this cap; the MCP SDK applies its own 4 MiB request limit there.
+
+### Removed
+
+- **`dockerode` and `@types/dockerode` are no longer dependencies.** Nothing in `src/` imports them, and `Dockerfile` installs with `npm ci --omit=dev`, so the runtime package only bloated the production image while its types sat in dev. No behavior change.
+
+### Documentation
+
+- **`docs/operations.md` gained a "Small VPS" subsection.** Relay builds run on the host through docker and an app build can use a lot of memory; on a 1 to 2 GB VPS the guidance is to add swap, cap the app with `mem_limit` in the app's own compose file, and run one deploy at a time, since the relay does not serialize deploys of different apps. The `PORT` row of the runtime environment variables table now states that an empty value counts as unset (default `8222`) and which values are rejected at start-up.
 
 ## [0.9.0] - 2026-11-17
 

@@ -2,7 +2,8 @@
  * Additional HTTP-layer tests for routes.ts covering:
  * - SSE-streaming deploy path (step / done / blocked / error events + recordDeploy side-effect)
  * - Rollback 400-vs-404 mapping (RelayConfigError→404, generic Error→400)
- * - GET /system execSync 500 fallback
+ * - GET /system async metric collection (500 fallbacks, empty-output
+ *   fallbacks, per-command timeout wiring, event loop stays free)
  * - GET /deploys listing
  *
  * Env routes and the non-streaming blocked-deploy shape are covered in their
@@ -48,23 +49,26 @@ vi.mock("../services/history.js", () => ({
   getHistory: vi.fn(),
 }));
 
-// child_process execSync is imported dynamically inside the /system handler.
-vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
-}));
+// The /system handler runs the free/df pipelines through runShell; only the
+// shell entry is stubbed, the rest of the exec module stays real so the
+// engine's runExec imports keep resolving.
+vi.mock("../deploy/exec.js", async () => {
+  const actual = await vi.importActual<typeof import("../deploy/exec.js")>("../deploy/exec.js");
+  return { ...actual, runShell: vi.fn() };
+});
 
 vi.mock("../services/cpu.js", () => ({
   readCpuUsage: vi.fn(),
 }));
 
-import { execSync } from "node:child_process";
+import { runShell } from "../deploy/exec.js";
 import { readCpuUsage } from "../services/cpu.js";
 
 const mockDeployAppStreaming = vi.mocked(apps.deployAppStreaming);
 const mockRollbackApp = vi.mocked(apps.rollbackApp);
 const mockRecordDeploy = vi.mocked(historyMod.recordDeploy);
 const mockGetHistory = vi.mocked(historyMod.getHistory);
-const mockExecSync = vi.mocked(execSync);
+const mockRunShell = vi.mocked(runShell);
 const mockReadCpuUsage = vi.mocked(readCpuUsage);
 const mockLoadRelayConfig = vi.mocked(relayMod.loadRelayConfig);
 
@@ -383,13 +387,60 @@ describe("POST /api/apps/:name/rollback — error mapping", () => {
   });
 });
 
-// ── GET /system — execSync 500 fallback ──────────────────────────────────────
+// ── GET /system — async metric collection ────────────────────────────────────
+
+type ExecStub = { stdout: string; stderr: string; exitCode: number; killReason?: "timeout" | "maxbuffer" };
+
+function execOk(stdout: string): ExecStub {
+  return { stdout, stderr: "", exitCode: 0 };
+}
+
+const MEM_OK = execOk("1024 4096");
+const DISK_OK = execOk("50G 200G 25%");
 
 describe("GET /api/system", () => {
-  it("returns 500 with error message when execSync throws", async () => {
-    mockExecSync.mockImplementation(() => {
-      throw new Error("command not found");
-    });
+  it("returns 500 with error message when a command exits non-zero", async () => {
+    mockRunShell.mockResolvedValue({ stdout: "", stderr: "free: not found", exitCode: 127 });
+
+    const res = await request("/system");
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Failed to collect system metrics");
+  });
+
+  it("returns 500 when only the disk command exits non-zero", async () => {
+    mockRunShell
+      .mockResolvedValueOnce(MEM_OK)
+      .mockResolvedValueOnce({ stdout: "", stderr: "df: /: cannot read", exitCode: 1 });
+
+    const res = await request("/system");
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Failed to collect system metrics");
+  });
+
+  it("returns 500 when the memory command times out and passes the 5 s timeout to both commands", async () => {
+    mockRunShell
+      .mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 1, killReason: "timeout" })
+      .mockResolvedValueOnce(DISK_OK);
+
+    const res = await request("/system");
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Failed to collect system metrics");
+    expect(mockRunShell).toHaveBeenCalledWith(
+      expect.stringContaining("free"), process.cwd(), { timeoutMs: 5_000 },
+    );
+    expect(mockRunShell).toHaveBeenCalledWith(
+      expect.stringContaining("df"), process.cwd(), { timeoutMs: 5_000 },
+    );
+  });
+
+  it("returns 500 when a measurement rejects unexpectedly", async () => {
+    mockRunShell.mockRejectedValue(new Error("spawn /bin/sh ENOENT"));
 
     const res = await request("/system");
 
@@ -400,9 +451,9 @@ describe("GET /api/system", () => {
 
   it("returns 200 with system metrics on success", async () => {
     mockReadCpuUsage.mockResolvedValueOnce(37.5);
-    mockExecSync
-      .mockReturnValueOnce(Buffer.from("1024 4096"))    // mem used total
-      .mockReturnValueOnce(Buffer.from("50G 200G 25%")); // disk used total percent
+    mockRunShell
+      .mockResolvedValueOnce(MEM_OK)  // mem used total
+      .mockResolvedValueOnce(DISK_OK); // disk used total percent
 
     const res = await request("/system");
 
@@ -417,6 +468,89 @@ describe("GET /api/system", () => {
     expect(body.memory.totalMb).toBe(4096);
     expect(body.disk.used).toBe("50G");
     expect(body.disk.percent).toBe("25%");
+  });
+
+  it("falls back to 0 and \"?\" when both commands print nothing", async () => {
+    mockReadCpuUsage.mockResolvedValueOnce(0);
+    mockRunShell.mockResolvedValue(execOk(""));
+
+    const res = await request("/system");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      memory: { usedMb: number; totalMb: number };
+      disk: { used: string; total: string; percent: string };
+    };
+    expect(body.memory.usedMb).toBe(0);
+    expect(body.memory.totalMb).toBe(0);
+    expect(body.disk.used).toBe("?");
+    expect(body.disk.total).toBe("?");
+    expect(body.disk.percent).toBe("?");
+  });
+
+  it("falls back per field when a command prints only part of its output", async () => {
+    mockReadCpuUsage.mockResolvedValueOnce(0);
+    mockRunShell
+      .mockResolvedValueOnce(execOk("1024"))
+      .mockResolvedValueOnce(execOk("50G 200G"));
+
+    const res = await request("/system");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      memory: { usedMb: number; totalMb: number };
+      disk: { used: string; total: string; percent: string };
+    };
+    expect(body.memory.usedMb).toBe(1024);
+    expect(body.memory.totalMb).toBe(0);
+    expect(body.disk.used).toBe("50G");
+    expect(body.disk.total).toBe("200G");
+    expect(body.disk.percent).toBe("?");
+  });
+
+  it("runs both shell measurements in parallel", async () => {
+    const pending: Array<(r: ExecStub) => void> = [];
+    mockRunShell.mockImplementation(() => new Promise<ExecStub>((resolve) => pending.push(resolve)));
+    mockReadCpuUsage.mockResolvedValue(0);
+
+    const systemPromise = request("/system");
+    // Both measurements are in flight at the same time; neither can start
+    // before the other returns when the handler awaits them sequentially.
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[0](MEM_OK);
+    pending[1](DISK_OK);
+
+    const res = await systemPromise;
+    expect(res.status).toBe(200);
+  });
+
+  it("does not block the event loop: /health is served while /system waits on a measurement", async () => {
+    const settled: string[] = [];
+    let releaseMem: (r: ExecStub) => void = () => {};
+    mockRunShell.mockImplementation((cmd) =>
+      cmd.includes("free")
+        ? new Promise<ExecStub>((resolve) => { releaseMem = resolve; })
+        : Promise.resolve(DISK_OK));
+    mockReadCpuUsage.mockResolvedValue(0);
+
+    const systemPromise = Promise.resolve(request("/system")).then((res) => {
+      settled.push("system");
+      return res;
+    });
+    const healthRes = await Promise.resolve(request("/health")).then((res) => {
+      settled.push("health");
+      return res;
+    });
+
+    expect(healthRes.status).toBe(200);
+    // A synchronous measurement would have run to completion (or failed)
+    // before the event loop could serve /health.
+    expect(settled).toEqual(["health"]);
+
+    releaseMem(MEM_OK);
+    const systemRes = await systemPromise;
+    expect(systemRes.status).toBe(200);
+    expect(settled).toEqual(["health", "system"]);
   });
 });
 

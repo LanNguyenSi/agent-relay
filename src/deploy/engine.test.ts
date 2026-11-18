@@ -42,6 +42,7 @@ import {
   acquireOperationLock,
   acquireOperationEntry,
   resetOperationLockForTests,
+  setHealthCheckRetryDelayMsForTests,
 } from "./engine.js";
 import { runShell, runExec } from "./exec.js";
 import { loadRelayConfig } from "../config/relay.js";
@@ -87,6 +88,13 @@ beforeEach(() => {
       { name: "health_defined", passed: true, message: "ok", critical: true },
     ],
   });
+
+  // Health-check retry delay: production ships the 5000 ms default and the
+  // engine no longer reads NODE_ENV, so every retry-loop test here opts
+  // into a 0 delay explicitly to stay fast. The default itself (5000 ms
+  // under NODE_ENV=test with no override) is pinned in
+  // engine.health-delay.test.ts, which never calls this setter.
+  setHealthCheckRetryDelayMsForTests(0);
 });
 
 describe("deploy — default flow", () => {
