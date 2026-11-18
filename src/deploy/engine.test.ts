@@ -1580,7 +1580,7 @@ describe("deploy — custom command flow", () => {
       }
       if (command === "docker" && args.includes("node") && args.includes("-e")) {
         const jsSnippet = args.at(-1) ?? "";
-        const match = jsSnippet.match(/fetch\('http:\/\/localhost:\d+(\/[^']+)'\)/);
+        const match = jsSnippet.match(/fetch\('http:\/\/localhost:\d+(\/[^']+)',/);
         if (match) probedPath = match[1]!;
         return { stdout: "", stderr: "", exitCode: 0 };
       }
@@ -2021,5 +2021,54 @@ describe("deploy - post-deploy build cache prune", () => {
       expect(pruneCalls()[0]?.[1]).toEqual(["builder", "prune", "-f", "--filter", "until=168h"]);
       expect(warnSpy).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Deploy-robustness pass: the probe fetch is capped in-container AND the
+// surrounding exec is capped, so one wedged probe can no longer hold the
+// deploy lock for the full 300 s step default.
+describe("health probe bounds", () => {
+  it("caps the probe fetch (AbortSignal.timeout) and the probe exec (timeoutMs 15000)", async () => {
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+    expect(result.success).toBe(true);
+
+    const probeCall = mockRunExec.mock.calls.find(
+      ([cmd, args]) => cmd === "docker" && args.includes("node") && args.includes("-e"),
+    );
+    // In-container fetch carries a 5 s AbortSignal.
+    expect(probeCall?.[1].at(-1)).toContain("AbortSignal.timeout(5000)");
+    // The exec around that fetch gets its own 15 s budget, not the 300 s default.
+    expect(probeCall?.[3]).toEqual({ timeoutMs: 15_000 });
+  });
+
+  it("counts a timed-out probe exec as a failed attempt and reports the timeout in the failure detail", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        // execFile killed the probe at its timeout: no output, non-zero exit.
+        return { stdout: "", stderr: "", exitCode: 1, killReason: "timeout" as const };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    expect(result.success).toBe(false);
+    const healthStep = result.steps.find((s) => s.name === "health check");
+    expect(healthStep?.status).toBe("failure");
+    // The loop kept going past the timed-out probe (5 attempts × the service),
+    // then surfaced the timeout as the last probe's detail.
+    expect(healthStep?.output).toContain("exec timed out after 15000 ms");
   });
 });

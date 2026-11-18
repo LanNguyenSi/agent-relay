@@ -20,7 +20,9 @@ export function createApp(): Hono {
     c.json({ status: "ok", version: RELAY_VERSION, revision: getRelayRevision() }),
   );
 
-  // Authenticated API
+  // Authenticated API; its body cap (src/api/body-limit.ts) is registered
+  // inside the /api router, after auth, so an unauthenticated request is
+  // answered 401 before any of its body is buffered.
   app.route("/api", api);
   // Marks a pending self-update record succeeded once this process runs the target revision.
   void reconcileSelfUpdateState().catch(() => {});

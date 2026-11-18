@@ -97,7 +97,7 @@ export function createMcpServer(): McpServer {
     "Get recent docker compose logs for an app.",
     {
       app: z.string().min(1).describe("App directory name"),
-      lines: z.number().max(1000).optional().describe("Number of log lines (default: 50, max: 1000)"),
+      lines: z.number().int().min(1).max(1000).optional().describe("Number of log lines (default: 50, max: 1000)"),
       service: z.string().regex(SERVICE_NAME, "Invalid service name").optional().describe("Specific service name"),
     },
     async ({ app, lines, service }) => {

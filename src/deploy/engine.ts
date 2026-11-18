@@ -408,6 +408,14 @@ const HEALTH_FAILURE_LOG_MAX_CHARS = 4000;
 // whatever the in-container fetch call happened to print.
 const PROBE_DETAIL_MAX_CHARS = 300;
 
+// Per-attempt ceiling on the `docker compose exec` that runs one health
+// probe. The in-container fetch is itself capped at 5 s by
+// AbortSignal.timeout(5000) in the snippet; this exec budget is that 5 s
+// fetch plus container exec start-up headroom. Without it the probe inherits
+// exec.ts's DEFAULT_STEP_TIMEOUT_MS (300 s), so a single wedged probe held
+// the deploy lock for up to 5 minutes before the loop moved on.
+export const PROBE_EXEC_TIMEOUT_MS = 15_000;
+
 /**
  * Presentation of one health-check run. The deploy path uses the defaults;
  * the auto-rollback tail passes its own step name and message prefixes so
@@ -467,17 +475,20 @@ async function runHealthCheck(
           // hardening for the probe output this file now depends on for
           // diagnostics — not confirmed as the root cause of the empty
           // health-check output it was added for.
-          const jsSnippet = `fetch('http://localhost:${port}${healthPath}').then(r=>{process.stdout.write('HTTP_STATUS='+r.status+'\\n',()=>process.exit(r.ok?0:1))}).catch(e=>{process.stdout.write('PROBE_ERROR='+(e&&e.message?e.message:String(e))+'\\n',()=>process.exit(1))})`;
+          const jsSnippet = `fetch('http://localhost:${port}${healthPath}',{signal:AbortSignal.timeout(5000)}).then(r=>{process.stdout.write('HTTP_STATUS='+r.status+'\\n',()=>process.exit(r.ok?0:1))}).catch(e=>{process.stdout.write('PROBE_ERROR='+(e&&e.message?e.message:String(e))+'\\n',()=>process.exit(1))})`;
           const check = await runExec(
             "docker",
             ["compose", "-f", config.compose_file, "exec", "-T", service, "node", "-e", jsSnippet],
             appDir,
+            { timeoutMs: PROBE_EXEC_TIMEOUT_MS },
           );
           lastProbeService = `${service}:${port}${healthPath}`;
-          lastProbeDetail = ((check.stdout + " " + check.stderr).trim() || `exit code ${check.exitCode}`).slice(
-            0,
-            PROBE_DETAIL_MAX_CHARS,
-          );
+          lastProbeDetail = check.killReason === "timeout"
+            ? `exec timed out after ${PROBE_EXEC_TIMEOUT_MS} ms`
+            : ((check.stdout + " " + check.stderr).trim() || `exit code ${check.exitCode}`).slice(
+                0,
+                PROBE_DETAIL_MAX_CHARS,
+              );
           if (check.exitCode === 0) {
             return { stdout: `${successPrefix}Health check passed: ${service}:${port}${healthPath} (attempt ${attempt + 1})`, stderr: "", exitCode: 0 };
           }

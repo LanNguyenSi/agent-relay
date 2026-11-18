@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { safeAppDir, validateBranch, fetchLogs, rollbackApp, rollbackPhaseOf } from "./apps.js";
+import { safeAppDir, validateBranch, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf } from "./apps.js";
 import { env } from "../config/env.js";
 import type { RelayConfig } from "../config/relay.js";
 
@@ -384,6 +384,27 @@ describe("fetchLogs — compose_file passed as literal arg-array element", () =>
     expect(args[dashFIdx + 1]).toBe("docker-compose.prod.yml");
     // Service name is the final element when provided
     expect(args.at(-1)).toBe("backend");
+  });
+});
+
+// clampLogLines guards the `docker compose logs --tail=${n}` argument: a
+// negative or NaN value reaching docker is a runtime error, so every non-
+// positive / non-finite input falls back to the 50-line default, fractions
+// floor down, and everything is capped at 1000. Infinity is non-finite, so it
+// is treated like NaN and resolves to the 50-line default (not 1000).
+describe("clampLogLines", () => {
+  it.each([
+    ["undefined", undefined, 50],
+    ["NaN", NaN, 50],
+    ["negative -5", -5, 50],
+    ["zero", 0, 50],
+    ["one", 1, 1],
+    ["fraction 2.7 floors", 2.7, 2],
+    ["at the cap", 1000, 1000],
+    ["over the cap clamps", 1001, 1000],
+    ["Infinity is non-finite", Infinity, 50],
+  ] as const)("%s -> %i", (_label, input, expected) => {
+    expect(clampLogLines(input)).toBe(expected);
   });
 });
 

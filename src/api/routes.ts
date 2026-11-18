@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { isAuthorized } from "../config/auth.js";
+import { API_MAX_BODY_BYTES } from "./body-limit.js";
 import { getRelayRevision, RELAY_VERSION } from "../config/version.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import * as apps from "../services/apps.js";
@@ -74,6 +76,21 @@ api.use("*", async (c, next) => {
   }
   return next();
 });
+
+// Body cap, registered AFTER auth on purpose: for a chunked body (no
+// Content-Length) bodyLimit buffers the stream up to the limit before
+// next(), so registering it before auth would let an unauthenticated
+// client pin ~16 MiB per open connection before the 401. After auth, an
+// unauthorized request is answered before any of its body is read, and an
+// authorized oversized body is answered with 413 JSON before a route
+// handler parses it.
+api.use(
+  "*",
+  bodyLimit({
+    maxSize: API_MAX_BODY_BYTES,
+    onError: (c) => c.json({ error: "Request body too large" }, 413),
+  }),
+);
 
 // ── GET /api/health ─────────────────────────────────────────────────────────
 api.get("/health", (c) => {
