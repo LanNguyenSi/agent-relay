@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Active development is on `main`. The supported distribution is the `ghcr.io/lannguyensi/agent-relay:latest` Docker image for `linux/amd64` (published from `main` and on `v*` tags). Older tags and SHAs are not patched.
+Active development is on `main`. The supported distribution is the `ghcr.io/lannguyensi/agent-relay:latest` Docker image for `linux/amd64`, published on merges to `main` (a merge that changes only documentation does not republish). A `v*` tag publishes only its semver tags, such as `:0.2.0` and `:0.2`, and never moves `:latest`. Older tags and SHAs are not patched.
 
 agent-relay sits on the network path between deployer and VPS targets, so vulnerabilities are treated as serious by default.
 
