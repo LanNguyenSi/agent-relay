@@ -403,6 +403,7 @@ describe("readAppEnv / writeAppEnv", () => {
         ".env.1.abc.tmp",
         ".env.local",
         `.env.abc.${uuid}.tmp`,
+        `.env..${uuid}.tmp`,
         `.env.123.${uuid}.tmp.bak`,
         `x.env.123.${uuid}.tmp`,
         `.env.123.${uuid.toUpperCase()}.tmp`,
@@ -441,16 +442,39 @@ describe("readAppEnv / writeAppEnv", () => {
       expect(await readAppEnv("demo")).toEqual([{ key: "A", value: "1" }]);
     });
 
-    it("keeps going after one entry fails and sweeps the others", async () => {
-      const bad = await plant(staleName(), old);
-      const good = await plant(staleName(), old);
+    it("keeps going after one entry fails and sweeps the others, whatever the order", async () => {
+      const paths: string[] = [];
+      for (let i = 0; i < 4; i++) paths.push(await plant(staleName(), old));
+      let failed = false;
       lstatOverride = async (p, real) => {
-        if (basename(p) === basename(bad)) throw new Error("boom");
+        if (!failed && /\.tmp$/.test(p)) {
+          failed = true;
+          throw new Error("boom");
+        }
         return real();
       };
       await write();
-      expect(await readdir(dir)).not.toContain(good.split("/").pop());
-      expect(await readFile(bad, "utf8")).toBe("LEFTOVER=secret\n");
+      expect(failed).toBe(true);
+      const left = (await readdir(dir)).filter((n) => n !== ".env");
+      expect(left).toHaveLength(1);
+    });
+
+    it("uses a 10 minute threshold: a just-written and a 9 minute old leftover survive", async () => {
+      expect(STALE_ENV_TMP_AGE_MS).toBe(10 * 60 * 1000);
+      const fresh = resolve(dir, staleName());
+      await writeFile(fresh, "FRESH", { mode: 0o600 });
+      const nine = await plant(staleName(), 9 * 60 * 1000);
+      await write();
+      expect(await readFile(fresh, "utf8")).toBe("FRESH");
+      expect(await readFile(nine, "utf8")).toBe("LEFTOVER=secret\n");
+    });
+
+    it("leaves a FIFO with a matching name alone", async () => {
+      const fifo = resolve(dir, staleName());
+      await execFileAsync("mkfifo", [fifo]);
+      await age(fifo, old);
+      await write();
+      expect((await lstat(fifo)).isFIFO()).toBe(true);
     });
   });
 });

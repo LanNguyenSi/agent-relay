@@ -153,7 +153,7 @@ async function sweepStaleEnvTmp(dir: string): Promise<void> {
   } catch {
     // unreadable dir: the write below reports its own errors
   }
-  if (removed > 0) console.warn(`removed ${removed} stale .env temp file(s) left by an interrupted write`);
+  if (removed > 0) console.warn(`[env] removed ${removed} stale .env temp file(s) left by an interrupted write`);
 }
 
 // Write the full set of entries atomically: create a uniquely named temp
