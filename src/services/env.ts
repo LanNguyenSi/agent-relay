@@ -11,7 +11,7 @@
  * key is not a valid identifier and lines without `=` are all dropped. Teams that rely on commented .env files should keep
  * the comments elsewhere (e.g. `.env.example`). Documented in docs.
  */
-import { constants, open, rename, rm, type FileHandle } from "node:fs/promises";
+import { constants, lstat, open, readdir, rename, rm, unlink, type FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { safeAppDir } from "./apps.js";
@@ -116,6 +116,46 @@ export async function readAppEnv(name: string): Promise<EnvEntry[]> {
   }
 }
 
+// Leftovers of a writeAppEnv that died between creating its temp file and
+// renaming it keep the secrets at mode 0600. They are swept before the next
+// write, but only when older than this, so a concurrent writer's live temp
+// file is never removed.
+export const STALE_ENV_TMP_AGE_MS = 10 * 60 * 1000;
+
+// Exactly the names writeAppEnv generates: `.env.<pid>.<uuid>.tmp`.
+const ENV_TMP_NAME =
+  /^\.env\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
+
+// Best effort: removes stale temp leftovers directly inside `dir` (no
+// recursion). An entry goes only if lstat (never following a link) shows a
+// regular file owned by this process's uid and older than the threshold;
+// removal is unlink by that exact path. Every error is swallowed, and at most
+// a count is logged (never names or contents).
+async function sweepStaleEnvTmp(dir: string): Promise<void> {
+  let removed = 0;
+  try {
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    const now = Date.now();
+    for (const name of await readdir(dir)) {
+      if (!ENV_TMP_NAME.test(name)) continue;
+      try {
+        const path = resolve(dir, name);
+        const st = await lstat(path);
+        if (!st.isFile()) continue;
+        if (uid === undefined || st.uid !== uid) continue;
+        if (!(now - st.mtimeMs > STALE_ENV_TMP_AGE_MS)) continue;
+        await unlink(path);
+        removed += 1;
+      } catch {
+        // gone mid-sweep or not removable: skip it
+      }
+    }
+  } catch {
+    // unreadable dir: the write below reports its own errors
+  }
+  if (removed > 0) console.warn(`removed ${removed} stale .env temp file(s) left by an interrupted write`);
+}
+
 // Write the full set of entries atomically: create a uniquely named temp
 // file in the app dir exclusively (`wx` = O_CREAT|O_EXCL, which fails on any
 // existing path, symlink included, so a link planted in the app checkout
@@ -127,10 +167,12 @@ export async function readAppEnv(name: string): Promise<EnvEntry[]> {
 // permissions. If `.env` itself is a symlink, rename replaces the link, not
 // its target: the link is just a file in the app checkout and the secrets
 // land in a fresh regular file the relay owns. A failed write removes the
-// temp file it created (best effort, by its exact path) and rethrows.
+// temp file it created (best effort, by its exact path) and rethrows; stale
+// temp files of earlier crashed writes are swept first.
 export async function writeAppEnv(name: string, entries: EnvEntry[]): Promise<void> {
   const dir = await safeAppDir(name);
   const path = resolve(dir, ".env");
+  await sweepStaleEnvTmp(dir);
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const body = serializeEnv(entries);
   const handle = await open(tmp, "wx", 0o600);
