@@ -4,17 +4,28 @@ import { promisify } from "node:util";
 import {
   chmod,
   lstat,
+  lutimes,
   mkdir,
   readFile,
   readdir,
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
+import { basename, resolve } from "node:path";
 import { env } from "../config/env.js";
-import { parseEnv, serializeEnv, readAppEnv, writeAppEnv, EnvFileUnusableError } from "./env.js";
+import {
+  parseEnv,
+  serializeEnv,
+  readAppEnv,
+  writeAppEnv,
+  EnvFileUnusableError,
+  STALE_ENV_TMP_AGE_MS,
+} from "./env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,10 +38,23 @@ const execFileAsync = promisify(execFile);
 // open; that name contains a random UUID and is otherwise unknowable.
 let plantAtOpenPath: ((path: string) => Promise<void>) | null = null;
 
+// When set, replace lstat's result / make readdir fail for the sweep tests.
+let lstatOverride: ((path: string, real: () => Promise<Stats>) => Promise<Stats>) | null = null;
+let readdirFails = false;
+
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...original,
+    lstat: async (...args: Parameters<typeof original.lstat>) => {
+      const real = () => original.lstat(...args) as Promise<Stats>;
+      if (lstatOverride !== null) return lstatOverride(String(args[0]), real);
+      return original.lstat(...args);
+    },
+    readdir: async (...args: Parameters<typeof original.readdir>) => {
+      if (readdirFails) throw new Error("readdir boom");
+      return (original.readdir as (...a: unknown[]) => unknown)(...args);
+    },
     open: async (...args: Parameters<typeof original.open>) => {
       const [filePath, flags] = args;
       if (plantAtOpenPath !== null && typeof flags === "string" && flags.includes("w")) {
@@ -147,6 +171,8 @@ describe("readAppEnv / writeAppEnv", () => {
 
   afterEach(async () => {
     plantAtOpenPath = null;
+    lstatOverride = null;
+    readdirFails = false;
     await rm(dir, { recursive: true, force: true });
     await rm(outsideDir, { recursive: true, force: true });
   });
@@ -309,5 +335,146 @@ describe("readAppEnv / writeAppEnv", () => {
       process.umask(prevUmask);
     }
     expect(await outsideMode(resolve(dir, ".env"))).toBe("600");
+  });
+
+  describe("sweep of stale temp leftovers", () => {
+    const staleName = () => `.env.123.${randomUUID()}.tmp`;
+    const age = async (path: string, ms: number) => {
+      const t = new Date(Date.now() - ms);
+      await utimes(path, t, t);
+    };
+    const plant = async (name: string, ms: number, contents = "LEFTOVER=secret\n") => {
+      const path = resolve(dir, name);
+      await writeFile(path, contents, { mode: 0o600 });
+      await age(path, ms);
+      return path;
+    };
+    const old = STALE_ENV_TMP_AGE_MS + 60_000;
+    const write = () => writeAppEnv("demo", [{ key: "A", value: "1" }]);
+
+    it("removes an old regular leftover and keeps the write working", async () => {
+      await plant(staleName(), old);
+      await write();
+      expect(await readdir(dir)).toEqual([".env"]);
+      expect(await readAppEnv("demo")).toEqual([{ key: "A", value: "1" }]);
+    });
+
+    it("leaves a symlink with a matching name and its target alone", async () => {
+      const outside = await makeOutsideFile("target", "KEEP");
+      await age(outside, old);
+      const link = resolve(dir, staleName());
+      await symlink(outside, link);
+      const t = new Date(Date.now() - old);
+      await lutimes(link, t, t);
+      await write();
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe("KEEP");
+    });
+
+    it("leaves a directory with a matching name alone", async () => {
+      const d = resolve(dir, staleName());
+      await mkdir(d);
+      await writeFile(resolve(d, "inner"), "x");
+      await age(d, old);
+      await write();
+      expect(await readFile(resolve(d, "inner"), "utf8")).toBe("x");
+    });
+
+    it("leaves a fresh leftover (younger than the threshold) alone", async () => {
+      const path = await plant(staleName(), STALE_ENV_TMP_AGE_MS - 60_000);
+      await write();
+      expect(await readFile(path, "utf8")).toBe("LEFTOVER=secret\n");
+    });
+
+    it("leaves a file owned by another uid alone", async () => {
+      const path = await plant(staleName(), old);
+      lstatOverride = async (p, real) => {
+        const st = await real();
+        return basename(p) === basename(path) ? (Object.assign(Object.create(st), { uid: st.uid + 1 }) as Stats) : st;
+      };
+      await write();
+      expect(await readFile(path, "utf8")).toBe("LEFTOVER=secret\n");
+    });
+
+    it("leaves non-matching names alone", async () => {
+      const uuid = randomUUID();
+      const names = [
+        ".env.tmp",
+        ".env.1.abc.tmp",
+        ".env.local",
+        `.env.abc.${uuid}.tmp`,
+        `.env..${uuid}.tmp`,
+        `.env.123.${uuid}.tmp.bak`,
+        `x.env.123.${uuid}.tmp`,
+        `.env.123.${uuid.toUpperCase()}.tmp`,
+        `app.123.${uuid}.tmp`,
+      ];
+      const paths: string[] = [];
+      for (const n of names) paths.push(await plant(n, old));
+      await write();
+      for (const p of paths) expect(await readFile(p, "utf8")).toBe("LEFTOVER=secret\n");
+    });
+
+    it("does not recurse into subdirectories", async () => {
+      await mkdir(resolve(dir, "sub"));
+      const path = resolve(dir, "sub", staleName());
+      await writeFile(path, "x");
+      await age(path, old);
+      await write();
+      expect(await readFile(path, "utf8")).toBe("x");
+    });
+
+    it("swallows a readdir error and still writes", async () => {
+      readdirFails = true;
+      await write();
+      readdirFails = false;
+      expect(await readAppEnv("demo")).toEqual([{ key: "A", value: "1" }]);
+    });
+
+    it("swallows an lstat error (entry gone mid-sweep) and still writes", async () => {
+      const path = await plant(staleName(), old);
+      lstatOverride = async () => {
+        throw Object.assign(new Error("gone"), { code: "ENOENT" });
+      };
+      await write();
+      lstatOverride = null;
+      expect(await readFile(path, "utf8")).toBe("LEFTOVER=secret\n");
+      expect(await readAppEnv("demo")).toEqual([{ key: "A", value: "1" }]);
+    });
+
+    it("keeps going after one entry fails and sweeps the others, whatever the order", async () => {
+      const paths: string[] = [];
+      for (let i = 0; i < 4; i++) paths.push(await plant(staleName(), old));
+      let failed = false;
+      lstatOverride = async (p, real) => {
+        if (!failed && /\.tmp$/.test(p)) {
+          failed = true;
+          throw new Error("boom");
+        }
+        return real();
+      };
+      await write();
+      expect(failed).toBe(true);
+      const left = (await readdir(dir)).filter((n) => n !== ".env");
+      expect(left).toHaveLength(1);
+    });
+
+    it("uses a 10 minute threshold: a just-written and a 9 minute old leftover survive", async () => {
+      expect(STALE_ENV_TMP_AGE_MS).toBe(10 * 60 * 1000);
+      const fresh = resolve(dir, staleName());
+      await writeFile(fresh, "FRESH", { mode: 0o600 });
+      const nine = await plant(staleName(), 9 * 60 * 1000);
+      await write();
+      expect(await readFile(fresh, "utf8")).toBe("FRESH");
+      expect(await readFile(nine, "utf8")).toBe("LEFTOVER=secret\n");
+    });
+
+    it("leaves a FIFO with a matching name alone", async () => {
+      const fifo = resolve(dir, staleName());
+      await execFileAsync("mkfifo", [fifo]);
+      await age(fifo, old);
+      await write();
+      expect((await lstat(fifo)).isFIFO()).toBe(true);
+    });
   });
 });
