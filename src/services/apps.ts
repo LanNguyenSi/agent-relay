@@ -139,8 +139,8 @@ async function resolveSymlinkChain(base: string, raw: string, depth = 0): Promis
 
 const APP_NAME = /^[a-zA-Z0-9_-]+$/;
 const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
-const SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
-const BRANCH_NAME = /^[a-zA-Z0-9._/-]+$/;
+const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const BRANCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const MAX_LOG_LINES = 1000;
 
 export async function safeAppDir(name: string): Promise<string> {

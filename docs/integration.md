@@ -144,7 +144,7 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `stream` (query) | `boolean` | `false` | When `true`, returns an SSE (Server-Sent Events) stream of deploy steps instead of a single JSON response |
-| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing. Must match `[a-zA-Z0-9._/-]+`; any other value (or a non-string) is rejected with `400` before the deploy starts, on both the regular and the `stream=true` path |
+| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing. Must match `[A-Za-z0-9][A-Za-z0-9._/-]*` (the first character must be a letter or digit, so a value git could read as an option, e.g. `--prune`, is rejected); any other value (or a non-string) is rejected with `400` before the deploy starts, on both the regular and the `stream=true` path |
 | `force` (body) | `boolean` | `false` | Skip non-critical preflight checks. Warning: a forced deploy is not gated on uncommitted local changes, and if it then auto-rolls back (`git reset --hard`), uncommitted changes in the app checkout are lost. Commit or remove them first |
 | `X-Deploy-Id` (header) or `deployId` (body) | `string` | none | Optional caller-supplied correlation id, stored in the history entry as `deployId` and returned in `GET /api/deploys` and `recentDeploys`. 1-128 characters from `[A-Za-z0-9._:-]`. If both header and body carry one they must match. An invalid or mismatched id returns `400 { "error": "..." }` before anything is deployed (also in `stream=true` mode, as a plain JSON 400 and not an SSE stream). When absent, the history entry has no `deployId` field. A blocked deploy records no entry, so no `deployId` is stored for it |
 
@@ -177,7 +177,7 @@ Recent Docker Compose logs.
 | Query param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `lines` | `number` | `50` | Number of log lines (max 1000) |
-| `service` | `string` | -- | Filter to a specific service name |
+| `service` | `string` | -- | Filter to a specific service name. Must match `[A-Za-z0-9][A-Za-z0-9_-]*` (the first character must be a letter or digit, so a value docker could read as an option, e.g. `--follow`, is rejected with `400`) |
 
 ```json
 { "app": "my-app", "lines": 50, "logs": "..." }
@@ -279,7 +279,7 @@ Deploy an app: git pull, compose build, compose up, health check. Auto-rollback 
 | Input | Type | Required | Description |
 |-------|------|----------|-------------|
 | `app` | `string` | Yes | App directory name under `APPS_DIR` |
-| `branch` | `string` | No | Git branch to pull. Defaults to the app's currently checked-out branch (falls back to `main`) |
+| `branch` | `string` | No | Git branch to pull. Defaults to the app's currently checked-out branch (falls back to `main`). Must match `[A-Za-z0-9][A-Za-z0-9._/-]*` (first character a letter or digit, so `--prune` and similar are rejected) |
 | `force` | `boolean` | No | Skip non-critical preflight checks |
 
 ### `relay_status`
@@ -309,7 +309,7 @@ Recent Docker Compose logs.
 |-------|------|----------|-------------|
 | `app` | `string` | Yes | App directory name |
 | `lines` | `number` | No | Number of log lines (default: 50, max: 1000) |
-| `service` | `string` | No | Specific service name |
+| `service` | `string` | No | Specific service name. Must match `[A-Za-z0-9][A-Za-z0-9_-]*` (first character a letter or digit, so `--follow` and similar are rejected) |
 
 ### `relay_preflight`
 

@@ -15,7 +15,7 @@ function err(message: string): ToolResult {
 }
 
 const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
-const SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
+const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 export function createMcpServer(): McpServer {
   const server = new McpServer({

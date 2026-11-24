@@ -110,6 +110,20 @@ describe("getUpstream state decision", () => {
     expect(u.reason).toMatch(/detached/);
   });
 
+  // Option-injection guard: a checkout left on a branch whose name starts with
+  // `-` would be a git option if it reached an argv. getUpstream must report it
+  // via the existing "not a valid branch name" unknown result and never run
+  // ls-remote for it. `--prune` uses only characters the previous regex allowed
+  // (letters and dashes), so it pins the leading-alnum rule specifically: the
+  // old pattern accepted it, the new one rejects it.
+  it("is unknown (not a valid branch name) when the checkout branch starts with a dash", async () => {
+    const calls = stubGit({ branch: "--prune" });
+    const u = await getUpstream("/apps/x");
+    expect(u).toMatchObject({ state: "unknown", branch: null });
+    expect(u.reason).toMatch(/not a valid branch name/);
+    expect(calls.filter((c) => c[1] === "ls-remote")).toHaveLength(0);
+  });
+
   it("is unknown when the deployed commit cannot be read", async () => {
     stubGit({ head: "" });
     const u = await getUpstream("/apps/x");

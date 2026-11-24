@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **Branch and service names must start with a letter or digit.** A caller-supplied branch reaches git's argv through `git pull origin <branch>`, and a caller-supplied service name is appended to the end of `docker compose logs ... <service>`, so a value beginning with `-` (for example `--prune`, `--update-head-ok`, `-f`, `--follow`, `--timestamps`) would have been read by git or docker as an option rather than a name. The branch pattern (`apps.ts` and `upstream.ts`) is now `[A-Za-z0-9][A-Za-z0-9._/-]*` and the service pattern (`apps.ts` and the MCP `relay_logs` schema) is `[A-Za-z0-9][A-Za-z0-9_-]*`, so the first character must be a letter or digit. The HTTP `GET /api/apps/:name/logs?service=` route answers `400` before any exec, the MCP schema rejects the value with its existing custom message, and a checkout whose own branch starts with `-` is reported as the existing "not a valid branch name" unknown upstream result. Legitimate names are unchanged: `main`, `feat/x`, `release/v1.0.0`, `web`, `my_svc-1` all still pass (see [docs/integration.md](docs/integration.md)).
+
 ### Fixed
 
 - **Leftover `.env.<pid>.<uuid>.tmp` files from an interrupted env write are swept.** A relay that died between creating the temp file and renaming it left a 0600 file holding the secrets behind in the app directory. `writeAppEnv` now removes such leftovers (exact generated name, directly in the app dir, no recursion) before writing, but only regular files owned by the relay's uid and older than 10 minutes (`STALE_ENV_TMP_AGE_MS`); symlinks, directories, foreign-owned and fresh files, and every other name are left alone. The sweep is best effort: any error is swallowed (at most a count is logged) and the write proceeds.

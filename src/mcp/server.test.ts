@@ -395,6 +395,16 @@ describe("relay_logs", () => {
     expect(mockFetchLogs).not.toHaveBeenCalled();
   });
 
+  // Option-injection guard: `--follow` is a real docker compose logs option, so
+  // the schema must reject a leading-dash service name with the custom message
+  // rather than forwarding it to fetchLogs.
+  it("SERVICE_NAME schema: rejects a leading-dash option with the custom message", async () => {
+    const text = await expectInputRejected("relay_logs", { app: "x", service: "--follow" });
+    expect(text).toContain("Invalid service name");
+    expect(text).toContain("at service");
+    expect(mockFetchLogs).not.toHaveBeenCalled();
+  });
+
   it("SERVICE_NAME reject message keeps the custom regex text on the wire", async () => {
     const text = await expectInputRejected("relay_logs", {
       app: "x",

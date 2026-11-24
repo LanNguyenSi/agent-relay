@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { safeAppDir, validateBranch, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf } from "./apps.js";
+import { safeAppDir, validateBranch, validateServiceName, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf } from "./apps.js";
 import { env } from "../config/env.js";
 import type { RelayConfig } from "../config/relay.js";
 
@@ -50,6 +50,35 @@ describe("validateBranch", () => {
     expect(() => validateBranch("main$(whoami)")).toThrow("Invalid branch name");
     expect(() => validateBranch("main`id`")).toThrow("Invalid branch name");
     expect(() => validateBranch("main\nrm -rf /")).toThrow("Invalid branch name");
+  });
+
+  // Option-injection guard: a caller-supplied branch reaches git's argv via
+  // `git pull origin <branch>` (deploy/engine.ts), so a value git reads as a
+  // flag (any leading dash) must be rejected, not passed through. `git pull
+  // origin --prune` / `--update-head-ok` are real option-injection payloads.
+  it("rejects branch names that git would read as options (leading dash)", () => {
+    expect(() => validateBranch("--prune")).toThrow("Invalid branch name");
+    expect(() => validateBranch("--update-head-ok")).toThrow("Invalid branch name");
+    expect(() => validateBranch("-v")).toThrow("Invalid branch name");
+    expect(() => validateBranch("-")).toThrow("Invalid branch name");
+  });
+});
+
+// validateServiceName guards the value fetchLogs appends to the end of the
+// `docker compose logs ... <service>` argv, so a leading-dash name (which
+// docker reads as an option, e.g. `--follow`) must be rejected.
+describe("validateServiceName", () => {
+  it("accepts well-formed service names", () => {
+    expect(validateServiceName("web")).toBe("web");
+    expect(validateServiceName("my_svc-1")).toBe("my_svc-1");
+    expect(validateServiceName("0backend")).toBe("0backend");
+  });
+
+  it("rejects service names that docker would read as options (leading dash)", () => {
+    expect(() => validateServiceName("-f")).toThrow("Invalid service name");
+    expect(() => validateServiceName("--follow")).toThrow("Invalid service name");
+    expect(() => validateServiceName("--timestamps")).toThrow("Invalid service name");
+    expect(() => validateServiceName("-")).toThrow("Invalid service name");
   });
 });
 
