@@ -11,7 +11,7 @@ description: >-
   in docs/operations.md's Deploy lifecycle section; README.md keeps only a
   pointer to it.
 tags: [health-check, dead-code, docs-drift, deploy]
-timestamp: 2026-11-18T07:06:51Z
+timestamp: 2026-11-24T10:39:42Z
 sources:
   - src/deploy/engine.ts
   - docs/operations.md
@@ -29,7 +29,8 @@ is the only health check that runs during a deploy:
 - **Retry count and delay per app, flat**: `maxRetries` is `.relay.yml`
   `health_retries` (1-30, default `HEALTH_CHECK_RETRIES_DEFAULT` = 5) and the
   pause between attempts is `health_interval_seconds` (1-60, default
-  `HEALTH_CHECK_RETRY_DELAY_MS` = 5000 ms), no exponential backoff. The
+  `HEALTH_CHECK_INTERVAL_SECONDS_DEFAULT` = 5 s, `engine.ts` `healthRetryDelayMs`),
+  no exponential backoff. The
   module-level `setHealthCheckRetryDelayMsForTests` setter (called from tests
   alone) wins over the config when set, and `delayMs` does not read `NODE_ENV`.
 - **No direct HTTP fetch from the relay process.** Each attempt lists the

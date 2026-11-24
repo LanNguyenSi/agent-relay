@@ -16,7 +16,7 @@ deliberately do not duplicate them.
 ## Modules
 
 - [Health check reality](health-check-reality.md), the wired inline health
-  check in `engine.ts` (fixed retries, docker-compose-exec probing).
+  check in `engine.ts` (per-app retries, docker-compose-exec probing).
 
 ## Invariants
 
