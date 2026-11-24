@@ -103,3 +103,89 @@ describe("health-check retry delay default", () => {
     expect(timerDelays).toEqual([HEALTH_CHECK_RETRY_DELAY_MS]);
   });
 });
+
+// `health_interval_seconds` alone and `health_retries` +
+// `health_interval_seconds` together, observable here because this file
+// never calls setHealthCheckRetryDelayMsForTests, so the config (not the
+// test override) drives the timer. The absent case is the test above:
+// 5 attempts at HEALTH_CHECK_RETRY_DELAY_MS.
+describe("health interval from .relay.yml", () => {
+  function stubTimers(delays: number[]) {
+    vi.stubGlobal(
+      "setTimeout",
+      (fn: () => void, delayMs?: number) => {
+        delays.push(delayMs ?? 0);
+        fn();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      },
+    );
+  }
+
+  function mockProbes(failFirstOnly: boolean) {
+    let probes = 0;
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        probes += 1;
+        if (!failFirstOnly) {
+          return { stdout: "HTTP_STATUS=503", stderr: "", exitCode: 1 };
+        }
+        return probes === 1
+          ? { stdout: "HTTP_STATUS=503", stderr: "", exitCode: 1 }
+          : { stdout: "HTTP_STATUS=200", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+    return () => probes;
+  }
+
+  it("waits health_interval_seconds (not the 5 s default) between attempts when only the interval is set", async () => {
+    const timerDelays: number[] = [];
+    stubTimers(timerDelays);
+    mockRunShell.mockResolvedValue({ stdout: "ok", stderr: "", exitCode: 0 });
+    mockLoadRelayConfig.mockResolvedValue({
+      ...baseConfig,
+      health_interval_seconds: 9,
+    });
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+    const probes = mockProbes(true);
+
+    const result = await deploy({ appDir: "/app", config: { ...baseConfig, health_interval_seconds: 9 }, branch: "main" });
+
+    expect(result.success).toBe(true);
+    expect(probes()).toBe(2);
+    expect(timerDelays).toEqual([9000]);
+    expect(timerDelays).not.toEqual([HEALTH_CHECK_RETRY_DELAY_MS]);
+  });
+
+  it("uses both health_retries and health_interval_seconds together when set", async () => {
+    const timerDelays: number[] = [];
+    stubTimers(timerDelays);
+    mockRunShell.mockResolvedValue({ stdout: "ok", stderr: "", exitCode: 0 });
+    const config: RelayConfig = {
+      ...baseConfig,
+      rollback: false, // no second health loop from the rollback tail
+      health_retries: 2,
+      health_interval_seconds: 4,
+    };
+    mockLoadRelayConfig.mockResolvedValue(config);
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+    const probes = mockProbes(false);
+
+    const result = await deploy({ appDir: "/app", config, branch: "main" });
+
+    expect(result.success).toBe(false);
+    // 2 attempts -> exactly one inter-attempt pause, at the configured 4 s.
+    expect(probes()).toBe(2);
+    expect(timerDelays).toEqual([4000]);
+    expect(result.steps.find((s) => s.name === "health check")?.output).toContain("after 2 attempts");
+  });
+});

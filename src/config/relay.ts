@@ -52,6 +52,18 @@ export const relayConfigSchema = z.object({
     .min(1, "step_timeout_seconds must be at least 1")
     .max(7200, "step_timeout_seconds must be at most 7200")
     .optional(),
+  health_retries: z
+    .number({ error: "health_retries must be a number" })
+    .int("health_retries must be an integer")
+    .min(1, "health_retries must be at least 1")
+    .max(30, "health_retries must be at most 30")
+    .optional(),
+  health_interval_seconds: z
+    .number({ error: "health_interval_seconds must be a number" })
+    .int("health_interval_seconds must be an integer")
+    .min(1, "health_interval_seconds must be at least 1")
+    .max(60, "health_interval_seconds must be at most 60")
+    .optional(),
 });
 
 export type RelayConfig = z.infer<typeof relayConfigSchema>;
