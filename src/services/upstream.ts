@@ -37,7 +37,7 @@ export const upstreamTuning = {
   detailBudgetMs: 3_000,
 };
 
-const BRANCH_NAME = /^[a-zA-Z0-9._/-]+$/;
+const BRANCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const SHA = /^[0-9a-f]{40}$/;
 
 interface RemoteOutcome {

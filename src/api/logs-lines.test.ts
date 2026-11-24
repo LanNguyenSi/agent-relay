@@ -56,3 +56,36 @@ describe("GET /api/apps/:name/logs: lines query clamped before --tail", () => {
     expect(args).toContain("--tail=250");
   });
 });
+
+// Option-injection guard at the route boundary: a leading-dash `service` query
+// would be a docker compose logs option (`-f`, `--follow`) at the end of the
+// exec argv. The route must answer 400 from validateServiceName's throw without
+// ever calling runExec.
+describe("GET /api/apps/:name/logs: leading-dash service rejected with 400 before exec", () => {
+  async function getLogsWithService(service: string): Promise<Response> {
+    return api.fetch(
+      new Request(`http://test/apps/demo/logs?service=${encodeURIComponent(service)}`, {
+        headers: { Authorization: AUTH },
+      }),
+    );
+  }
+
+  it("answers 400 for ?service=-f without calling exec", async () => {
+    const res = await getLogsWithService("-f");
+    expect(res.status).toBe(400);
+    expect(mockRunExec).not.toHaveBeenCalled();
+  });
+
+  it("answers 400 for ?service=--follow without calling exec", async () => {
+    const res = await getLogsWithService("--follow");
+    expect(res.status).toBe(400);
+    expect(mockRunExec).not.toHaveBeenCalled();
+  });
+
+  it("passes a valid service through to the exec argv", async () => {
+    const res = await getLogsWithService("web");
+    expect(res.status).toBe(200);
+    const [, args] = mockRunExec.mock.calls[0]!;
+    expect(args.at(-1)).toBe("web");
+  });
+});
