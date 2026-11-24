@@ -2,8 +2,8 @@
 type: module
 title: Health check reality — the wired inline check (divergence resolved)
 description: >-
-  The deploy path runs engine.ts's inline runHealthCheck (fixed 5 retries /
-  5000ms delay, docker compose exec + node -e fetch inside each service
+  The deploy path runs engine.ts's inline runHealthCheck (5 attempts and a
+  5 s delay by default, tunable per app in .relay.yml, docker compose exec + node -e fetch inside each service
   container, hardcoded ports unless health_port is set). The formerly
   documented divergence, a fully tested but never-imported
   exponential-backoff module in src/deploy/health.ts, was resolved in PR #71
@@ -26,11 +26,12 @@ sources:
 `compose up`, as step `rollback: health check`, against the pre-deploy config)
 is the only health check that runs during a deploy:
 
-- **Fixed retry count and delay**: `maxRetries = 5`, flat
-  `HEALTH_CHECK_RETRY_DELAY_MS = 5000` between attempts — no exponential
-  backoff. Production always uses the constant; only the module-level
-  `setHealthCheckRetryDelayMsForTests` setter (called from tests alone)
-  overrides it, and `delayMs` no longer reads `NODE_ENV`.
+- **Retry count and delay per app, flat**: `maxRetries` is `.relay.yml`
+  `health_retries` (1-30, default `HEALTH_CHECK_RETRIES_DEFAULT` = 5) and the
+  pause between attempts is `health_interval_seconds` (1-60, default
+  `HEALTH_CHECK_RETRY_DELAY_MS` = 5000 ms), no exponential backoff. The
+  module-level `setHealthCheckRetryDelayMsForTests` setter (called from tests
+  alone) wins over the config when set, and `delayMs` does not read `NODE_ENV`.
 - **No direct HTTP fetch from the relay process.** Each attempt lists the
   compose project's running services (`docker compose -f <compose_file> ps
   --services --status running`), then for each service tries each candidate
