@@ -2072,3 +2072,158 @@ describe("health probe bounds", () => {
     expect(healthStep?.output).toContain("exec timed out after 15000 ms");
   });
 });
+
+// The auto-detected branch (`git rev-parse --abbrev-ref HEAD`) reaches
+// `git pull origin <branch>` in the engine, so it goes through the same
+// validation as a caller-supplied one: an invalid detection fails the
+// `git pull` step with the validator's message and never reaches argv.
+// There is no fallback to "main" - a silent default could deploy code
+// nobody checked out.
+describe("deploy - branch validation of the auto-detected branch", () => {
+  function mockDetectedBranch(detected: string) {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: detected, stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+  }
+  const gitPullCalls = () =>
+    mockRunExec.mock.calls.filter(([c, a]) => c === "git" && a[0] === "pull");
+
+  for (const [label, detected] of [
+    ["a leading dash (git option injection)", "--prune"],
+    ["detached HEAD", "HEAD"],
+    ["empty output", ""],
+  ] as const) {
+    it(`fails the git pull step on ${label} and runs no git pull`, async () => {
+      mockDetectedBranch(detected);
+
+      const result = await deploy({ appDir: "/app", config: baseConfig });
+
+      expect(result.success).toBe(false);
+      const pullStep = result.steps.find((s) => s.name === "git pull");
+      expect(pullStep?.status).toBe("failure");
+      expect(pullStep?.output).toContain("Invalid branch name");
+      expect(gitPullCalls()).toHaveLength(0);
+      // Nothing past the pull ran either.
+      expect(result.steps.find((s) => s.name === "compose build")).toBeUndefined();
+    });
+  }
+
+  it("defence in depth: an engine caller-supplied invalid branch is rejected too", async () => {
+    // The HTTP/MCP entrypoints validate first (services/apps.ts); this pins
+    // the engine's own guard for any caller that bypasses them.
+    const result = await deploy({ appDir: "/app", config: baseConfig, branch: "--update-head-ok" });
+
+    expect(result.success).toBe(false);
+    expect(result.steps.find((s) => s.name === "git pull")?.status).toBe("failure");
+    expect(gitPullCalls()).toHaveLength(0);
+  });
+
+  it("pulls an auto-detected valid branch", async () => {
+    mockDetectedBranch("feat/x\n");
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    expect(result.success).toBe(true);
+    const pullCall = gitPullCalls();
+    expect(pullCall).toHaveLength(1);
+    expect(pullCall[0]![1]).toEqual(["pull", "origin", "feat/x"]);
+  });
+});
+
+// `health_retries` / `health_interval_seconds` precedence, per input:
+// - retries alone: this file (the 0-delay test override is active here, so
+//   only the attempt count is under test);
+// - interval alone and both fields together: engine.health-delay.test.ts
+//   (that file never calls the override setter, so the timer is observable);
+// - absent defaults: existing tests here (5 attempts) and there (5000 ms);
+// - the test-only delay override still wins over `health_interval_seconds`
+//   (asserted in the last test below).
+describe("deploy - health_retries from .relay.yml", () => {
+  function mockFailingProbes() {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "HTTP_STATUS=503", stderr: "", exitCode: 1 };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+  }
+  const probeCount = () =>
+    mockRunExec.mock.calls.filter(
+      ([c, a]) => c === "docker" && a.includes("node") && a.includes("-e"),
+    ).length;
+
+  it("runs health_retries attempts and reports the count", async () => {
+    const config: RelayConfig = {
+      ...baseConfig,
+      rollback: false, // keep the rollback tail from running a second health loop
+      health_port: 3000, // one port per attempt, so probes == attempts
+      health_retries: 2,
+    };
+    mockLoadRelayConfig.mockResolvedValue(config);
+    mockFailingProbes();
+
+    const result = await deploy({ appDir: "/app", config });
+
+    expect(result.success).toBe(false);
+    expect(probeCount()).toBe(2);
+    const healthStep = result.steps.find((s) => s.name === "health check");
+    expect(healthStep?.output).toContain("after 2 attempts");
+  });
+
+  it("keeps the 5-attempt default when health_retries is absent", async () => {
+    const config: RelayConfig = { ...baseConfig, rollback: false, health_port: 3000 };
+    mockLoadRelayConfig.mockResolvedValue(config);
+    mockFailingProbes();
+
+    const result = await deploy({ appDir: "/app", config });
+
+    expect(result.success).toBe(false);
+    expect(probeCount()).toBe(5);
+    const healthStep = result.steps.find((s) => s.name === "health check");
+    expect(healthStep?.output).toContain("after 5 attempts");
+  });
+
+  it("the test-only delay override still wins over health_interval_seconds", async () => {
+    // beforeEach set the override to 0; the config asks for 45 s. The
+    // recorded timer delays must be the override, never the config value.
+    const config: RelayConfig = {
+      ...baseConfig,
+      rollback: false,
+      health_port: 3000,
+      health_retries: 2,
+      health_interval_seconds: 45,
+    };
+    mockLoadRelayConfig.mockResolvedValue(config);
+    mockFailingProbes();
+
+    const timerDelays: number[] = [];
+    vi.stubGlobal("setTimeout", (fn: () => void, delayMs?: number) => {
+      timerDelays.push(delayMs ?? 0);
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+    try {
+      const result = await deploy({ appDir: "/app", config });
+      expect(result.success).toBe(false);
+      expect(probeCount()).toBe(2);
+      expect(timerDelays).toEqual([0]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

@@ -82,6 +82,25 @@ describe("POST /api/apps/:name/deploy — invalid branch", () => {
       });
       expect(res.status).toBe(400);
     });
+
+    // Leading-dash regression: git would read `--prune` as an option in
+    // `git pull origin --prune`. The route must answer 400 before any
+    // deploy (and therefore before any exec).
+    it(`rejects a leading-dash branch with 400 (${label})`, async () => {
+      const deploy = vi.spyOn(apps, "deployApp");
+      const deployStreaming = vi.spyOn(apps, "deployAppStreaming");
+
+      const res = await request(`/apps/demo/deploy${query}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: "--prune" }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "Invalid branch name" });
+      expect(deploy).not.toHaveBeenCalled();
+      expect(deployStreaming).not.toHaveBeenCalled();
+    });
   }
 
   it("still deploys with a valid branch", async () => {

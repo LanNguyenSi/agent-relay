@@ -29,7 +29,7 @@ export function createMcpServer(): McpServer {
     "Deploy an app: git pull, compose build, compose up, health check. Auto-rollback on failure.",
     {
       app: z.string().min(1).describe("App directory name under APPS_DIR"),
-      branch: z.string().optional().describe("Git branch to pull (default: the app's currently checked-out branch, falling back to main)"),
+      branch: z.string().optional().describe("Git branch to pull (default: the app's currently checked-out branch; a detached or unresolvable HEAD fails the deploy)"),
       force: z.boolean().optional().describe("Skip non-critical preflight checks"),
     },
     async ({ app, branch, force }) => {

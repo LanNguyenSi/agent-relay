@@ -6,7 +6,7 @@ import { deploy, stepExecOptions, DeployConflictError, acquireOperationLock, acq
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
 import { getUpstreamWithin, upstreamTuning, type UpstreamInfo } from "./upstream.js";
-
+import { validateBranch as validateBranchName } from "./branch-name.js";
 // Preflight used to run here before git pull. That meant a commit that
 // *fixed* a broken .relay.yml (wrong compose_file, missing `command:`,
 // etc.) failed preflight against the still-broken pre-pull copy on
@@ -140,7 +140,8 @@ async function resolveSymlinkChain(base: string, raw: string, depth = 0): Promis
 const APP_NAME = /^[a-zA-Z0-9_-]+$/;
 const COMMIT_REF = /^[a-fA-F0-9]{4,40}$|^HEAD~\d{1,3}$/;
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const BRANCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+// The BRANCH_NAME regex moved to ./branch-name.ts so src/deploy/engine.ts
+// can validate the auto-detected branch without importing this module.
 const MAX_LOG_LINES = 1000;
 
 export async function safeAppDir(name: string): Promise<string> {
@@ -234,8 +235,9 @@ export function validateServiceName(name: string): string {
 }
 
 export function validateBranch(branch: string): string {
-  if (!BRANCH_NAME.test(branch)) throw new Error("Invalid branch name");
-  return branch;
+  // Implemented in ./branch-name.ts (shared with src/deploy/engine.ts); this
+  // export keeps `apps.validateBranch` the entry-point guard the routes use.
+  return validateBranchName(branch);
 }
 
 export function clampLogLines(lines?: number): number {
@@ -456,6 +458,12 @@ async function rollbackAppInner(
   return { success: true, commitBefore, commitAfter };
 }
 
+// Bound for the read-only `docker compose logs` call in fetchLogs. Without
+// it the exec default step timeout (300 s) would hold a wedged compose/logs
+// process for minutes; 30 s is generous for a `--tail` fetch. Exported so
+// the tests can pin the option actually passed to runExec.
+export const FETCH_LOGS_TIMEOUT_MS = 30_000;
+
 export async function fetchLogs(name: string, lines?: number, service?: string) {
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
@@ -466,8 +474,12 @@ export async function fetchLogs(name: string, lines?: number, service?: string) 
     "docker",
     ["compose", "-f", config.compose_file, "logs", `--tail=${n}`, "--no-color", ...(svc ? [svc] : [])],
     dir,
+    { timeoutMs: FETCH_LOGS_TIMEOUT_MS },
   );
 
+  if (result.killReason === "timeout") {
+    throw new Error(`Failed to get logs: timed out after ${FETCH_LOGS_TIMEOUT_MS} ms`);
+  }
   if (result.exitCode !== 0) throw new Error("Failed to get logs: " + result.stderr);
   return { app: name, lines: n, logs: result.stdout };
 }

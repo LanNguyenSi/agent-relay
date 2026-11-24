@@ -124,7 +124,7 @@ export async function getUpstream(appDir: string): Promise<UpstreamInfo> {
   try {
     const local = { timeoutMs: upstreamTuning.localGitTimeoutMs };
     // The deploy engine pulls the checkout's current branch (`rev-parse
-    // --abbrev-ref HEAD`, falling back to "main" on empty output).
+    // --abbrev-ref HEAD`; the engine rejects an empty or detached result).
     const b = await runExec("git", ["rev-parse", "--abbrev-ref", "HEAD"], appDir, local);
     const branchRaw = b.exitCode === 0 ? b.stdout.trim() || "main" : "";
     const d = await runExec("git", ["rev-parse", "HEAD"], appDir, local);

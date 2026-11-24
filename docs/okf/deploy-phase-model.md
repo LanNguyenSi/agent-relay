@@ -52,11 +52,11 @@ Every `rollbackIfEnabled` call site passes the config captured **before** the mu
 
 This is deliberate, not an oversight: `rollback: boolean` is read from whichever config is passed to `rollbackIfEnabled` (`engine.ts:633`), and the engine always passes the pre-mutation one on purpose. A commit that ships a broken app **and** flips `rollback: false` in the same commit does not get to disable its own safety net — the pre-pull value of `rollback` (from the last-known-good commit) governs whether the *current* deploy's rollback fires; the new `rollback: false` only takes effect starting with the *next* deploy. Regression-pinned by `src/deploy/engine.test.ts` "rollback boolean honors pre-pull config, not post-pull" (`engine.test.ts:468`). The same reasoning is why `rollbackIfEnabled`'s rebuild/restart steps use the pre-pull `compose_file` too, and why the health check that closes the rollback (step `rollback: health check`, run after a successful `compose up` through the same `runHealthCheck` a deploy uses) probes the pre-pull `health`, `health_port` and `compose_file`, not the post-pull ones (pinned for every pull-path rollback trigger, reload failure, compose build, compose up, post_update and the forward health check, by the `it.each` "probes with the pre-deploy health path, port and compose_file" in `engine.test.ts`): `git reset --hard` restores the OLD tree, where the OLD `compose_file` is the one on disk — regression-pinned by a separate test, "rolls back using pre-pull compose_file when reload fails" (`engine.test.ts:439-466`, rationale comment at `engine.test.ts:455-457`).
 
-The standalone rollback (`rollbackApp`, `src/services/apps.ts:373-457#"return { success: true, commitBefore, commitAfter }"`, behind `POST /api/apps/:name/rollback` and the MCP `relay_rollback` tool) works the other way: after `git reset --hard` it re-reads `.relay.yml` from the target commit (`apps.ts:414-422#"const config = await loadRelayConfig(dir)"`) and uses that config for its preflight gate and for `compose build`/`up` (`apps.ts:437-453#"up.exitCode !== 0"`).
+The standalone rollback (`rollbackApp`, `src/services/apps.ts:375-459#"return { success: true, commitBefore, commitAfter }"`, behind `POST /api/apps/:name/rollback` and the MCP `relay_rollback` tool) works the other way: after `git reset --hard` it re-reads `.relay.yml` from the target commit (`apps.ts:416-424#"const config = await loadRelayConfig(dir)"`) and uses that config for its preflight gate and for `compose build`/`up` (`apps.ts:439-455#"up.exitCode !== 0"`).
 
 ## Rollback gates on `only` two checks, not `phase`'s whole battery
 
-Both rollback call sites — `rollbackApp` (`services/apps.ts:437-443`) and
+Both rollback call sites — `rollbackApp` (`services/apps.ts:439-445`) and
 the auto-rollback path `rollbackIfEnabled` (`engine.ts:645-650`) — pass
 `phase: "all", force: true` **and** `only: ROLLBACK_CRITICAL_CHECKS`
 (`preflight.ts:72-76`), where `ROLLBACK_CRITICAL_CHECKS` is exactly
@@ -89,7 +89,7 @@ report) and by the `only` assertions in both `apps.test.ts`'s and
 
 ## Command-mode deploys and the standalone/MCP preflight view
 
-Command-mode (`.relay.yml` with a `command:` field) has no natural pre/post-pull split — the command is opaque, so `customCommandDeploy` runs preflight once, pre-command, with no `phase` argument (`engine.ts:326`), which defaults to `"all"`. The same default applies to the two read-only entry points that inspect current disk state without deploying: `runPreflight` in `src/services/apps.ts:475-479` (backing both the standalone `GET /api/apps/:name/preflight` HTTP route and the MCP `relay_preflight` tool) calls `runPreflightChecks({ appDir, config })` with no `phase`, so it always runs the full 8-check battery against whatever is on disk right now.
+Command-mode (`.relay.yml` with a `command:` field) has no natural pre/post-pull split — the command is opaque, so `customCommandDeploy` runs preflight once, pre-command, with no `phase` argument (`engine.ts:326`), which defaults to `"all"`. The same default applies to the two read-only entry points that inspect current disk state without deploying: `runPreflight` in `src/services/apps.ts:487-491` (backing both the standalone `GET /api/apps/:name/preflight` HTTP route and the MCP `relay_preflight` tool) calls `runPreflightChecks({ appDir, config })` with no `phase`, so it always runs the full 8-check battery against whatever is on disk right now.
 
 ## What this doc does not restate
 

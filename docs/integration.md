@@ -33,8 +33,10 @@ rollback: true                      # auto-rollback when the re-read .relay.yml 
 | `health_port` | `number` | No | `3000, 3001, 4000, 5000, 8000, 8080` (tried in turn) | Container-internal port the probe requests on `localhost` |
 | `rollback` | `boolean` | No | `true` | Auto-rollback to previous commit on failure |
 | `step_timeout_seconds` | `integer` | No | `300` | Per-step exec timeout, in seconds (1-7200). Applies to `pre_update`, `git pull`, `compose build`/`up`, `post_update`, `command`, and rollback `compose build`/`up`. A step killed by this timeout, or by the fixed 16 MiB per-stream (stdout and stderr each) buffer cap, carries a `[relay] ...` reason line appended to its output. The stored step output itself is separately capped at 200,000 characters; a step that exceeds it keeps only the last 200,000 characters, with a `[relay] output truncated: ...` notice line prepended. |
+| `health_retries` | `integer` | No | `5` | Health-check attempts per deploy (1-30). The auto-rollback's `rollback: health check` step uses the same count from the pre-deploy config |
+| `health_interval_seconds` | `integer` | No | `5` | Seconds between health-check attempts (1-60) |
 
-Health check requirement: for each running compose service the relay runs `docker compose exec -T <service> node -e "fetch('http://localhost:<port><health>')"`, up to 5 attempts 5 s apart. At least one running service image must include Node.js 18 or later (global `fetch`) and answer `health` with a 2xx on `localhost`. An app without Node.js in any service fails every health check and is rolled back when `rollback` is true. After an auto-rollback the restored stack gets the same check against the pre-deploy `.relay.yml`; its result is the step `rollback: health check` (`status: "failure"` with an `output` starting `ROLLBACK UNHEALTHY` means the restored site is not answering and may be down). The deploy's `success` is `false` whichever way that check ends.
+Health check requirement: for each running compose service the relay runs `docker compose exec -T <service> node -e "fetch('http://localhost:<port><health>')"`, up to `health_retries` attempts (default 5) `health_interval_seconds` apart (default 5 s). At least one running service image must include Node.js 18 or later (global `fetch`) and answer `health` with a 2xx on `localhost`. An app without Node.js in any service fails every health check and is rolled back when `rollback` is true. After an auto-rollback the restored stack gets the same check against the pre-deploy `.relay.yml`; its result is the step `rollback: health check` (`status: "failure"` with an `output` starting `ROLLBACK UNHEALTHY` means the restored site is not answering and may be down). The deploy's `success` is `false` whichever way that check ends.
 
 The shell-exec fields (`command`, `pre_update`, `post_update`) and `health`, which is interpolated into an in-container `node -e` snippet, cross a real trust boundary: see [docs/security.md](security.md).
 
@@ -144,7 +146,7 @@ Trigger a deploy. Runs pre-flight checks, then git pull + compose build + compos
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `stream` (query) | `boolean` | `false` | When `true`, returns an SSE (Server-Sent Events) stream of deploy steps instead of a single JSON response |
-| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`), falling back to `main` only if that yields nothing. Must match `[A-Za-z0-9][A-Za-z0-9._/-]*` (the first character must be a letter or digit, so a value git could read as an option, e.g. `--prune`, is rejected); any other value (or a non-string) is rejected with `400` before the deploy starts, on both the regular and the `stream=true` path |
+| `branch` (body) | `string` | current branch | Git branch to pull. When omitted, the relay pulls the app's currently checked-out branch (`git rev-parse --abbrev-ref HEAD`). The detected value goes through the same validation as a supplied one: if it does not pass (a detached `HEAD`, an empty result, or a checkout name failing the pattern) the `git pull` step fails with `Invalid branch name` and nothing is pulled - there is no fallback to `main`, which could silently deploy code that is not checked out. A supplied value must match `[A-Za-z0-9][A-Za-z0-9._/-]*` (the first character must be a letter or digit, so a value git could read as an option, e.g. `--prune`, is rejected) and is never the literal `HEAD`; any other value (or a non-string) is rejected with `400` before the deploy starts, on both the regular and the `stream=true` path |
 | `force` (body) | `boolean` | `false` | Skip non-critical preflight checks. Warning: a forced deploy is not gated on uncommitted local changes, and if it then auto-rolls back (`git reset --hard`), uncommitted changes in the app checkout are lost. Commit or remove them first |
 | `X-Deploy-Id` (header) or `deployId` (body) | `string` | none | Optional caller-supplied correlation id, stored in the history entry as `deployId` and returned in `GET /api/deploys` and `recentDeploys`. 1-128 characters from `[A-Za-z0-9._:-]`. If both header and body carry one they must match. An invalid or mismatched id returns `400 { "error": "..." }` before anything is deployed (also in `stream=true` mode, as a plain JSON 400 and not an SSE stream). When absent, the history entry has no `deployId` field. A blocked deploy records no entry, so no `deployId` is stored for it |
 
@@ -182,6 +184,8 @@ Recent Docker Compose logs.
 ```json
 { "app": "my-app", "lines": 50, "logs": "..." }
 ```
+
+The `docker compose logs` call is bounded by a fixed 30 s timeout (independent of `step_timeout_seconds`, which governs deploy steps); if the command is killed at that bound the endpoint reports `Failed to get logs: timed out after 30000 ms`.
 
 ### `GET /api/apps/:name/preflight`
 
@@ -279,7 +283,7 @@ Deploy an app: git pull, compose build, compose up, health check. Auto-rollback 
 | Input | Type | Required | Description |
 |-------|------|----------|-------------|
 | `app` | `string` | Yes | App directory name under `APPS_DIR` |
-| `branch` | `string` | No | Git branch to pull. Defaults to the app's currently checked-out branch (falls back to `main`). Must match `[A-Za-z0-9][A-Za-z0-9._/-]*` (first character a letter or digit, so `--prune` and similar are rejected) |
+| `branch` | `string` | No | Git branch to pull. Defaults to the app's currently checked-out branch; a detected value that fails validation (including a detached `HEAD`) fails the deploy's `git pull` step instead of falling back to `main`. Must match `[A-Za-z0-9][A-Za-z0-9._/-]*` (first character a letter or digit, so `--prune` and similar are rejected) |
 | `force` | `boolean` | No | Skip non-critical preflight checks |
 
 ### `relay_status`

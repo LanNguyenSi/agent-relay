@@ -1,7 +1,7 @@
 import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "./preflight.js";
 import { runExec, runShell, type ExecOptions, type ExecResult } from "./exec.js";
-
+import { validateBranch } from "../services/branch-name.js";
 /**
  * Builds the ExecOptions for a long-running deploy step (git pull, compose
  * build/up, pre_update/post_update/command hooks) from the operator's
@@ -91,7 +91,7 @@ export async function deploy(
     let branch = options.branch;
     if (!branch) {
       const branchResult = await runExec("git", ["rev-parse", "--abbrev-ref", "HEAD"], appDir);
-      branch = branchResult.stdout.trim() || "main";
+      branch = branchResult.stdout.trim(); // no "main" fallback: the validated pull step rejects an unresolvable branch
     }
     const steps: DeployStep[] = [];
     const start = Date.now();
@@ -188,9 +188,9 @@ async function defaultFlowDeploy(
     }
   }
 
-  // Git pull
+  // Git pull (branch validated as argv builds: an invalid one fails this step, no pull runs)
   const pullStep = await runStep("git pull", () =>
-    runExec("git", ["pull", "origin", branch], appDir, stepExecOptions(prePullConfig)),
+    runExec("git", ["pull", "origin", validateBranch(branch)], appDir, stepExecOptions(prePullConfig)),
   );
   emit(pullStep);
   if (pullStep.status === "failure") {
@@ -451,8 +451,8 @@ async function runHealthCheck(
 
   // Try each running service with node fetch, with retries for startup time
   const healthStep = await runStep(stepName, async () => {
-    const maxRetries = 5;
-    const delayMs = healthCheckRetryDelayMs;
+    const maxRetries = config.health_retries ?? HEALTH_CHECK_RETRIES_DEFAULT;
+    const delayMs = healthRetryDelayMs(config);
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
@@ -513,17 +513,17 @@ async function runHealthCheck(
   return healthStep.status === "success";
 }
 
-// Health-check retry delay. Production always uses the default; the module-
-// level setter is the only override and is called from tests alone (a
-// parameter would widen the public DeployOptions surface for a test-only
-// concern, and runHealthCheck is module-private: the tests drive it through
-// deploy()). It used to be `process.env.NODE_ENV === "test" ? 0 : 5000`,
-// which made a NODE_ENV=test environment silently turn the deploy health
-// check's pause between attempts into 0; production code no longer reads
-// NODE_ENV. Declared after runHealthCheck (which reads it) to keep that
-// function's line span stable for the docs' line citations.
+// Health-check retry delay override. Production takes the interval from
+// `.relay.yml`'s `health_interval_seconds` (see healthRetryDelayMs below);
+// this module-level value is the test-only override set by
+// setHealthCheckRetryDelayMsForTests alone, and when set it STILL WINS over
+// the config - engine.test.ts drives the retry loop with a 0 delay whatever
+// the fixture config says (a parameter would widen the public DeployOptions
+// surface for that test-only concern). `undefined` means "no override", and
+// the default is HEALTH_CHECK_RETRY_DELAY_MS (5 s). Declared after
+// runHealthCheck (which reads it) to keep that function's line span stable.
 export const HEALTH_CHECK_RETRY_DELAY_MS = 5000;
-let healthCheckRetryDelayMs = HEALTH_CHECK_RETRY_DELAY_MS;
+let healthCheckRetryDelayMs: number | undefined;
 
 /** Test-only override for the health-check retry delay (0 to skip waiting). */
 export function setHealthCheckRetryDelayMsForTests(delayMs: number): void {
@@ -736,6 +736,29 @@ function capStepOutput(output: string): string {
  * `.relay.yml`'s `step_timeout_seconds` and is wrong for a step whose timeout
  * is fixed in code.
  */
+/** Health-check attempts when `.relay.yml` omits `health_retries` (unchanged
+ * default: 5). */
+export const HEALTH_CHECK_RETRIES_DEFAULT = 5;
+
+/** Health-check interval, in seconds, when `.relay.yml` omits
+ * `health_interval_seconds` (5 s, matching HEALTH_CHECK_RETRY_DELAY_MS). */
+export const HEALTH_CHECK_INTERVAL_SECONDS_DEFAULT = 5;
+
+/**
+ * Effective pause between health-check attempts, in ms. The test-only
+ * override (setHealthCheckRetryDelayMsForTests) still wins when set; the
+ * engine.test.ts suite relies on that to run its retry loops at 0 delay
+ * regardless of any `health_interval_seconds` in the fixture config.
+ * Otherwise `.relay.yml` governs (schema bounds it to integers 1-60 s),
+ * defaulting to HEALTH_CHECK_INTERVAL_SECONDS_DEFAULT.
+ */
+function healthRetryDelayMs(config: RelayConfig): number {
+  return (
+    healthCheckRetryDelayMs ??
+    (config.health_interval_seconds ?? HEALTH_CHECK_INTERVAL_SECONDS_DEFAULT) * 1000
+  );
+}
+
 async function runStep(name: string, fn: () => Promise<ExecResult>, timeoutNote?: string): Promise<DeployStep> {
   const start = Date.now();
   try {

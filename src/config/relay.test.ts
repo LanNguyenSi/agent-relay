@@ -267,6 +267,218 @@ step_timeout_seconds: 7201
     });
   });
 
+  // Same shape and message style as step_timeout_seconds. Bounds: retries
+  // 1-30, interval 1-60 s; the engine defaults (5 attempts, 5 s) apply when
+  // the field is absent (engine.test.ts and engine.health-delay.test.ts
+  // pin the defaults; here it must simply parse as undefined).
+  describe("health_retries", () => {
+    it("is undefined when absent", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+`);
+      expect(config.health_retries).toBeUndefined();
+    });
+
+    it("accepts a valid integer value", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+health_retries: 20
+`);
+      expect(config.health_retries).toBe(20);
+    });
+
+    it("accepts the lower boundary value 1", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+health_retries: 1
+`);
+      expect(config.health_retries).toBe(1);
+    });
+
+    it("accepts the upper boundary value 30", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+health_retries: 30
+`);
+      expect(config.health_retries).toBe(30);
+    });
+
+    it("rejects 0 with the custom min text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_retries: 0
+`),
+      ).toThrow("health_retries must be at least 1");
+    });
+
+    it("rejects a negative value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_retries: -1
+`),
+      ).toThrow(/health_retries/);
+    });
+
+    it("rejects 31, one past the upper boundary, with the custom max text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_retries: 31
+`),
+      ).toThrow("health_retries must be at most 30");
+    });
+
+    it("rejects a float value with the custom integer text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_retries: 1.5
+`),
+      ).toThrow("health_retries must be an integer");
+    });
+
+    it("rejects a string value with the custom wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_retries: "5"
+`),
+      ).toThrow("health_retries: health_retries must be a number");
+    });
+
+    it("rejects an infinite value with the custom wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_retries: .inf
+`),
+      ).toThrow("health_retries must be a number");
+    });
+  });
+
+  describe("health_interval_seconds", () => {
+    it("is undefined when absent", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+`);
+      expect(config.health_interval_seconds).toBeUndefined();
+    });
+
+    it("accepts a valid integer value", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: 30
+`);
+      expect(config.health_interval_seconds).toBe(30);
+    });
+
+    it("accepts the lower boundary value 1", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: 1
+`);
+      expect(config.health_interval_seconds).toBe(1);
+    });
+
+    it("accepts the upper boundary value 60", () => {
+      const config = parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: 60
+`);
+      expect(config.health_interval_seconds).toBe(60);
+    });
+
+    it("rejects 0 with the custom min text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: 0
+`),
+      ).toThrow("health_interval_seconds must be at least 1");
+    });
+
+    it("rejects a negative value", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: -1
+`),
+      ).toThrow(/health_interval_seconds/);
+    });
+
+    it("rejects 61, one past the upper boundary, with the custom max text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: 61
+`),
+      ).toThrow("health_interval_seconds must be at most 60");
+    });
+
+    it("rejects a float value with the custom integer text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: 1.5
+`),
+      ).toThrow("health_interval_seconds must be an integer");
+    });
+
+    it("rejects a string value with the custom wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: "5"
+`),
+      ).toThrow("health_interval_seconds: health_interval_seconds must be a number");
+    });
+
+    it("rejects an infinite value with the custom wrong-type text", () => {
+      expect(() =>
+        parseRelayConfig(`
+name: app
+health: /health
+health_interval_seconds: .inf
+`),
+      ).toThrow("health_interval_seconds must be a number");
+    });
+  });
+
+  // Both fields together parse independently (each keeps its own value).
+  it("parses health_retries and health_interval_seconds together", () => {
+    const config = parseRelayConfig(`
+name: app
+health: /health
+health_retries: 12
+health_interval_seconds: 10
+`);
+    expect(config.health_retries).toBe(12);
+    expect(config.health_interval_seconds).toBe(10);
+    // Absent step_timeout_seconds is untouched by the new fields.
+    expect(config.step_timeout_seconds).toBeUndefined();
+  });
+
   describe("issue texts reaching RelayConfigError (zod 4 migration pins)", () => {
     it("missing name uses the v4 default wrong-type text", () => {
       expect(() =>

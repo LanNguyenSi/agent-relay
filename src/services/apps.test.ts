@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { safeAppDir, validateBranch, validateServiceName, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf } from "./apps.js";
+import { safeAppDir, validateBranch, validateServiceName, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf, deployApp, FETCH_LOGS_TIMEOUT_MS } from "./apps.js";
 import { env } from "../config/env.js";
 import type { RelayConfig } from "../config/relay.js";
 
@@ -61,6 +61,18 @@ describe("validateBranch", () => {
     expect(() => validateBranch("--update-head-ok")).toThrow("Invalid branch name");
     expect(() => validateBranch("-v")).toThrow("Invalid branch name");
     expect(() => validateBranch("-")).toThrow("Invalid branch name");
+  });
+
+  // Detached checkouts report exactly "HEAD" from `rev-parse --abbrev-ref
+  // HEAD`; pulling the literal "HEAD" would fetch the remote's default
+  // branch (code that is not checked out), so the sentinel is rejected.
+  // The rejection is the exact string: branch names merely CONTAINING head
+  // stay valid.
+  it("rejects the detached-HEAD sentinel but not names that contain head", () => {
+    expect(() => validateBranch("HEAD")).toThrow("Invalid branch name");
+    expect(validateBranch("head")).toBe("head");
+    expect(validateBranch("HEADLINE")).toBe("HEADLINE");
+    expect(validateBranch("fix/head-detach")).toBe("fix/head-detach");
   });
 });
 
@@ -413,6 +425,71 @@ describe("fetchLogs — compose_file passed as literal arg-array element", () =>
     expect(args[dashFIdx + 1]).toBe("docker-compose.prod.yml");
     // Service name is the final element when provided
     expect(args.at(-1)).toBe("backend");
+  });
+
+  // Bounded exec: without an explicit option the call inherits exec.ts's
+  // 300 s step timeout, holding a wedged
+  // `docker compose logs` for minutes for a read-only API call.
+  it("passes the bounded FETCH_LOGS_TIMEOUT_MS (30 s) as the exec option", async () => {
+    await fetchLogs("myapp");
+    expect(FETCH_LOGS_TIMEOUT_MS).toBe(30_000);
+    expect(mockRunExec).toHaveBeenCalledOnce();
+    expect(mockRunExec.mock.calls[0]![3]).toEqual({ timeoutMs: FETCH_LOGS_TIMEOUT_MS });
+  });
+
+  it("names the timeout in the error when the exec is killed for timeout", async () => {
+    mockRunExec.mockResolvedValue({ stdout: "", stderr: "", exitCode: 1, killReason: "timeout" });
+    await expect(fetchLogs("myapp")).rejects.toThrow(
+      `Failed to get logs: timed out after ${FETCH_LOGS_TIMEOUT_MS} ms`,
+    );
+  });
+
+  it("keeps the plain stderr error for a non-timeout failure", async () => {
+    mockRunExec.mockResolvedValue({ stdout: "", stderr: "no such file", exitCode: 1 });
+    await expect(fetchLogs("myapp")).rejects.toThrow("Failed to get logs: no such file");
+  });
+});
+
+// The entry-point guard every HTTP/MCP deploy caller funnels through:
+// deployApp validates the branch before deploy() can reach the engine, so
+// an invalid value throws with NO exec at all. (The MCP `relay_deploy` and
+// the HTTP route both call deployApp, so this single seam plus the engine's
+// own guard in engine.test.ts closes every argv path.)
+describe("deployApp - invalid branch rejected before any exec", () => {
+  let tmpRoot: string;
+  let appsDir: string;
+  let originalAppsDir: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    tmpRoot = await mkdtemp(resolve(tmpdir(), "agent-relay-deployapp-guard-"));
+    appsDir = resolve(tmpRoot, "apps");
+    await mkdir(resolve(appsDir, "myapp"), { recursive: true });
+    originalAppsDir = env.APPS_DIR;
+    env.APPS_DIR = appsDir;
+    mockLoadRelayConfig.mockResolvedValue({
+      name: "myapp",
+      health: "/health",
+      compose_file: "docker-compose.yml",
+      pre_update: [],
+      post_update: [],
+      rollback: true,
+    });
+  });
+
+  afterEach(async () => {
+    env.APPS_DIR = originalAppsDir;
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("rejects a leading-dash branch with Invalid branch name and runs no exec", async () => {
+    await expect(deployApp("myapp", { branch: "--prune" })).rejects.toThrow("Invalid branch name");
+    expect(mockRunExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects a detached-HEAD branch value with Invalid branch name and runs no exec", async () => {
+    await expect(deployApp("myapp", { branch: "HEAD" })).rejects.toThrow("Invalid branch name");
+    expect(mockRunExec).not.toHaveBeenCalled();
   });
 });
 

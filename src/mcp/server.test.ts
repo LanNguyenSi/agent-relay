@@ -183,6 +183,29 @@ describe("relay_deploy", () => {
     expect(result.error).toBe("string error");
     expect(raw.isError).toBe(true);
   });
+
+  // A leading-dash (or detached-HEAD) branch must never reach an exec.
+  // The tool's only deploy path is apps.deployApp, which validates the
+  // branch before touching the engine - that rejection, with zero runExec
+  // calls, is pinned in src/services/apps.test.ts ("deployApp - invalid
+  // branch rejected before any exec"). Here we pin the MCP layer's view of
+  // it: the rejection surfaces as a tool error (isError), and recordDeploy
+  // stays silent. The engine's own guard covers any caller that bypasses
+  // deployApp (src/deploy/engine.test.ts).
+  for (const branch of ["--prune", "HEAD"]) {
+    it(`surfaces the Invalid branch name rejection for branch ${JSON.stringify(branch)} as a tool error`, async () => {
+      mockDeployApp.mockRejectedValue(new Error("Invalid branch name"));
+
+      const raw = await callTool("relay_deploy", { app: "myapp", branch });
+      const result = parseResult(raw) as { success: boolean; error: string };
+
+      expect(mockDeployApp).toHaveBeenCalledWith("myapp", { branch, force: undefined });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid branch name");
+      expect(raw.isError).toBe(true);
+      expect(mockRecordDeploy).not.toHaveBeenCalled();
+    });
+  }
 });
 
 // ── relay_status ─────────────────────────────────────────────────────────────
