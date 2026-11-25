@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **`docs/operations.md` gained a "Small VPS" subsection.** Relay builds run on the host through docker and an app build can use a lot of memory; on a 1 to 2 GB VPS the guidance is to add swap, cap the app with `mem_limit` in the app's own compose file, and run one deploy at a time, since the relay does not serialize deploys of different apps. The `PORT` row of the runtime environment variables table now states that an empty value counts as unset (default `8222`) and which values are rejected at start-up.
 
+- **Two docs claims now match the code they describe.** The `auto` row of the install modes table in `docs/operations.md` documents the re-run guard: a Traefik container on :80 gives `existing-traefik`, except the installer's own Traefik (container `traefik` with `/opt/traefik/docker-compose.yml`), which stays `greenfield` so a re-run keeps its compose shape. The `stream` query param of `POST /api/apps/:name/deploy` in `docs/integration.md` is typed `string`, not `boolean`: only the exact value `true` returns the SSE stream, any other value (`1`, `TRUE`, `yes`, empty) returns the JSON answer.
+
 ## [0.9.0] - 2026-11-17
 
 ### Added
