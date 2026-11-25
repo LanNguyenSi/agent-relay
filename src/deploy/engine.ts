@@ -729,7 +729,7 @@ export const STEP_OUTPUT_MAX_CHARS = 200_000;
  * much was dropped. Applied BEFORE a `[relay] ...` kill-reason line is
  * appended, so that line is never itself truncated away.
  */
-function capStepOutput(output: string): string {
+export function capStepOutput(output: string): string {
   if (output.length <= STEP_OUTPUT_MAX_CHARS) return output;
   const total = output.length;
   const tail = output.slice(-STEP_OUTPUT_MAX_CHARS);

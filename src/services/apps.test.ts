@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { safeAppDir, validateBranch, validateServiceName, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf, deployApp, getAppDetail, FETCH_LOGS_TIMEOUT_MS } from "./apps.js";
 import { env } from "../config/env.js";
+import { STEP_OUTPUT_MAX_CHARS } from "../deploy/engine.js";
 import type { RelayConfig } from "../config/relay.js";
 
 // Mock exec and relay so fetchLogs tests don't require a real docker + compose file on disk.
@@ -648,6 +649,83 @@ describe("rollbackApp — preflight gate", () => {
 
     expect((err as Error).message).toContain("Restart failed");
     expect(rollbackPhaseOf(err)).toBe("after_reset");
+  });
+
+  // The four rollback failure messages embed exec stderr, which exec.ts bounds
+  // only by its 16 MiB per-stream maxBuffer. deploy-panel reads non-2xx bodies
+  // up to 8 MiB, so each stderr here goes through the deploy engine's shared
+  // STEP_OUTPUT_MAX_CHARS cap (capStepOutput), keeping the answer far below
+  // that read cap. One test per message: each call site could regress alone.
+  const LONG_STDERR = "e".repeat(300_000);
+  const capNotice = (total: number) =>
+    `[relay] output truncated: showing the last ${STEP_OUTPUT_MAX_CHARS} of ${total} characters`;
+
+  function expectCappedMessage(message: string, prefix: string, stderr: string) {
+    expect(message.startsWith(prefix)).toBe(true);
+    expect(message).toContain(capNotice(stderr.length));
+    expect(message.endsWith(stderr.slice(-STEP_OUTPUT_MAX_CHARS))).toBe(true);
+    const notice = `${capNotice(stderr.length)}\n`;
+    expect(message.length).toBeLessThanOrEqual(
+      prefix.length + notice.length + STEP_OUTPUT_MAX_CHARS,
+    );
+  }
+
+  it("caps the git rev-parse --verify stderr in the unknown-commit message", async () => {
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "git" && args[0] === "rev-parse" && args[1] === "--verify") {
+        return { stdout: "", stderr: LONG_STDERR, exitCode: 128 };
+      }
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp", "abc1234").catch((e: unknown) => e);
+
+    expectCappedMessage(
+      (err as Error).message,
+      `Rollback failed: unknown commit 'abc1234': `,
+      LONG_STDERR,
+    );
+  });
+
+  it("caps the git reset --hard stderr in the rollback failure message", async () => {
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "git" && args[0] === "reset") {
+        return { stdout: "", stderr: LONG_STDERR, exitCode: 128 };
+      }
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp", "abc1234").catch((e: unknown) => e);
+
+    expectCappedMessage((err as Error).message, "Rollback failed: ", LONG_STDERR);
+  });
+
+  it("caps the compose build stderr in the rebuild failure message", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "docker" && args.includes("build")) {
+        return { stdout: "", stderr: LONG_STDERR, exitCode: 1 };
+      }
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp").catch((e: unknown) => e);
+
+    expectCappedMessage((err as Error).message, "Rebuild failed: ", LONG_STDERR);
+  });
+
+  it("caps the compose up stderr in the restart failure message", async () => {
+    mockRunPreflightChecks.mockResolvedValue({ passed: true, checks: [] });
+    mockRunExec.mockImplementation(async (cmd, args) => {
+      if (cmd === "docker" && args.includes("up")) {
+        return { stdout: "", stderr: LONG_STDERR, exitCode: 1 };
+      }
+      return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+    });
+
+    const err = await rollbackApp("myapp").catch((e: unknown) => e);
+
+    expectCappedMessage((err as Error).message, "Restart failed: ", LONG_STDERR);
   });
 
   it("tags an invalid .relay.yml at the rollback target (loaded after the reset) as phase after_reset", async () => {

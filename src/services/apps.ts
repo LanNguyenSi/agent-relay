@@ -2,7 +2,7 @@ import { resolve, sep, dirname, basename, isAbsolute } from "node:path";
 import { readdir, stat, lstat, readlink, realpath } from "node:fs/promises";
 import { env } from "../config/env.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
-import { deploy, stepExecOptions, DeployConflictError, acquireOperationLock, acquireOperationEntry, assertOperationAllowed, isOperationLocked, type ActiveOperation } from "../deploy/engine.js";
+import { deploy, stepExecOptions, capStepOutput, DeployConflictError, acquireOperationLock, acquireOperationEntry, assertOperationAllowed, isOperationLocked, type ActiveOperation } from "../deploy/engine.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
 import { COMPOSE_QUERY_TIMEOUT_MS } from "../deploy/timeouts.js";
@@ -410,7 +410,7 @@ async function rollbackAppInner(
   // unknown ref fails as before_reset with nothing modified.
   const verify = await runExec("git", ["rev-parse", "--verify", `${target}^{commit}`], dir);
   if (verify.exitCode !== 0) {
-    throw new Error(`Rollback failed: unknown commit '${target}': ` + verify.stderr);
+    throw new Error(`Rollback failed: unknown commit '${target}': ` + capStepOutput(verify.stderr));
   }
 
   // Mark the phase BEFORE the reset runs: a `git reset --hard` that exits
@@ -418,7 +418,7 @@ async function rollbackAppInner(
   // part of the working tree, so any failure from here on is after_reset.
   markReset();
   const checkout = await runExec("git", ["reset", "--hard", target], dir);
-  if (checkout.exitCode !== 0) throw new Error("Rollback failed: " + checkout.stderr);
+  if (checkout.exitCode !== 0) throw new Error("Rollback failed: " + capStepOutput(checkout.stderr));
 
   // Reload .relay.yml against the tree `git reset --hard` just moved to —
   // same rationale as deploy/engine.ts's "reload .relay.yml" step: the
@@ -456,10 +456,10 @@ async function rollbackAppInner(
   }
 
   const build = await runExec("docker", ["compose", "-f", config.compose_file, "build"], dir, stepExecOptions(config));
-  if (build.exitCode !== 0) throw new Error("Rebuild failed: " + build.stderr);
+  if (build.exitCode !== 0) throw new Error("Rebuild failed: " + capStepOutput(build.stderr));
 
   const up = await runExec("docker", ["compose", "-f", config.compose_file, "up", "-d"], dir, stepExecOptions(config));
-  if (up.exitCode !== 0) throw new Error("Restart failed: " + up.stderr);
+  if (up.exitCode !== 0) throw new Error("Restart failed: " + capStepOutput(up.stderr));
 
   const commitAfter = (await runExec("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
   return { success: true, commitBefore, commitAfter };
