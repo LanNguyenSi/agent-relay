@@ -5,6 +5,7 @@ import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import { deploy, stepExecOptions, DeployConflictError, acquireOperationLock, acquireOperationEntry, assertOperationAllowed, isOperationLocked, type ActiveOperation } from "../deploy/engine.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "../deploy/preflight.js";
 import { runExec } from "../deploy/exec.js";
+import { COMPOSE_QUERY_TIMEOUT_MS } from "../deploy/timeouts.js";
 import { getUpstreamWithin, upstreamTuning, type UpstreamInfo } from "./upstream.js";
 import { validateBranch as validateBranchName } from "./branch-name.js";
 // Preflight used to run here before git pull. That meant a commit that
@@ -285,8 +286,11 @@ export async function listApps(): Promise<Array<{ name: string; configured: bool
 export async function getAppDetail(name: string) {
   const dir = await safeAppDir(name);
   const config = await loadRelayConfig(dir);
-  const commit = await runExec("git", ["rev-parse", "--short", "HEAD"], dir);
-  const ps = await runExec("docker", ["compose", "-f", config.compose_file, "ps", "--format", "json"], dir);
+  // Both are read-only queries, bounded by the shared COMPOSE_QUERY_TIMEOUT_MS:
+  // unbounded they inherit the 300 s step default and a wedged git or docker
+  // daemon holds the operation lock for minutes on a detail read.
+  const commit = await runExec("git", ["rev-parse", "--short", "HEAD"], dir, { timeoutMs: COMPOSE_QUERY_TIMEOUT_MS });
+  const ps = await runExec("docker", ["compose", "-f", config.compose_file, "ps", "--format", "json"], dir, { timeoutMs: COMPOSE_QUERY_TIMEOUT_MS });
   const upstream = await getUpstreamWithin(dir, upstreamTuning.detailBudgetMs);
 
   return {
@@ -294,6 +298,9 @@ export async function getAppDetail(name: string) {
     config,
     commit: commit.stdout.trim(),
     upstream,
+    // A non-zero ps exit (a timeout kill included) keeps the existing contract
+    // of null, which the panel renders as an unhealthy app, as for any failed
+    // `compose ps` today.
     containers: ps.exitCode === 0 ? ps.stdout.trim() : null,
   };
 }
@@ -458,11 +465,11 @@ async function rollbackAppInner(
   return { success: true, commitBefore, commitAfter };
 }
 
-// Bound for the read-only `docker compose logs` call in fetchLogs. Without
-// it the exec default step timeout (300 s) would hold a wedged compose/logs
-// process for minutes; 30 s is generous for a `--tail` fetch. Exported so
-// the tests can pin the option actually passed to runExec.
-export const FETCH_LOGS_TIMEOUT_MS = 30_000;
+// Alias of the shared COMPOSE_QUERY_TIMEOUT_MS (deploy/timeouts.ts) for the
+// read-only `docker compose logs` call in fetchLogs: unbounded it would
+// inherit the 300 s step default and hold a wedged compose/logs process for
+// minutes. Kept exported so the tests still pin the option passed to runExec.
+export const FETCH_LOGS_TIMEOUT_MS = COMPOSE_QUERY_TIMEOUT_MS;
 
 export async function fetchLogs(name: string, lines?: number, service?: string) {
   const dir = await safeAppDir(name);

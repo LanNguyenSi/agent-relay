@@ -1,15 +1,15 @@
 /**
  * Tests for deploy history persistence in src/services/history.ts.
- * Covers: corrupt/missing JSON fallback, id-counter recovery,
- * MAX_RECORDS=100 truncation, and the app filter in getHistory.
+ * Covers: corrupt/missing JSON fallback, id-counter recovery, MAX_RECORDS=100
+ * truncation, the app filter in getHistory, and the atomic write in save().
  *
  * Each test uses a fresh temp directory AND resets the module to clear the
  * in-memory `records` cache (which is module-level state).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve, join } from "node:path";
+import { resolve, join, dirname, basename } from "node:path";
 
 // We control APPS_DIR via process.env because the `env` module reads from it
 // at load time. `vi.resetModules()` forces a fresh load so the new APPS_DIR
@@ -243,5 +243,84 @@ describe("recordDeploy — deployId", () => {
     const list = await getHistory();
     expect(list.map((r) => r.id)).toEqual(["d-8", "d-7"]);
     expect("deployId" in list[1]!).toBe(false);
+  });
+});
+
+// ── atomic write in save() ───────────────────────────────────────────────────
+
+// save() rewrites the whole file on every record. A plain writeFile that dies
+// halfway (crash, disk full, kill during a deploy) leaves a truncated file
+// behind, which the next load() reads as empty and overwrites, silently losing
+// every earlier record. So save() writes a uniquely named temp file in the
+// target's own directory and renames it over the target: either the old file
+// or the new one is on disk, never a half-written one.
+describe("save: atomic write", () => {
+  it("writes a uniquely named temp file in the target's directory, then renames it over the target", async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const renames: string[][] = [];
+    vi.doMock("node:fs/promises", () => ({
+      ...actual,
+      rename: vi.fn(async (from: string, to: string) => {
+        renames.push([from, to]);
+        await actual.rename(from, to);
+      }),
+    }));
+    try {
+      const { recordDeploy } = await freshHistory();
+      await recordDeploy("myapp", { success: true, commitBefore: "a", commitAfter: "b", durationMs: 1 }, "ci");
+    } finally {
+      vi.doUnmock("node:fs/promises");
+    }
+
+    expect(renames).toHaveLength(1);
+    const [from, to] = renames[0]!;
+    expect(to).toBe(join(tmpDir, ".relay-history.json"));
+    // Same directory, so the rename is atomic on the target's filesystem.
+    expect(dirname(from)).toBe(tmpDir);
+    expect(from).not.toBe(to);
+    expect(basename(from)).toMatch(/^\.relay-history\.json\.\d+\.[0-9a-f-]{36}\.tmp$/);
+    // The rename really landed: the target is valid JSON holding the record.
+    expect(JSON.parse(await readFile(to, "utf-8"))).toHaveLength(1);
+  });
+
+  // The failure that matters is the one between the temp write and the rename,
+  // so the rename is the call injected to fail (a real EACCES would need root
+  // or an immutable file, neither of which a test can portably create).
+  it("leaves the previous file intact and no temp file behind when the rename fails", async () => {
+    const historyFile = join(tmpDir, ".relay-history.json");
+    const existing = [
+      { id: "d-1", app: "a", status: "success", commitBefore: "x", commitAfter: "y", durationMs: 1, triggeredBy: "ci", createdAt: "2026-01-01T00:00:00.000Z" },
+    ];
+    await writeFile(historyFile, JSON.stringify(existing));
+
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.doMock("node:fs/promises", () => ({
+      ...actual,
+      rename: vi.fn(async () => {
+        throw Object.assign(new Error("EACCES: permission denied, rename"), { code: "EACCES" });
+      }),
+    }));
+    try {
+      const { recordDeploy } = await freshHistory();
+      await expect(
+        recordDeploy("myapp", { success: true, commitBefore: "b", commitAfter: "c", durationMs: 1 }, "ci"),
+      ).rejects.toThrow("EACCES: permission denied, rename");
+    } finally {
+      vi.doUnmock("node:fs/promises");
+    }
+
+    // The old content survives verbatim, which is the whole point.
+    expect(JSON.parse(await readFile(historyFile, "utf-8"))).toEqual(existing);
+    // The half-written temp file is removed best effort.
+    expect((await readdir(tmpDir)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("leaves no temp file behind after a successful save", async () => {
+    const { recordDeploy, getHistory } = await freshHistory();
+    await recordDeploy("myapp", { success: true, commitBefore: "a", commitAfter: "b", durationMs: 1 }, "ci");
+    await recordDeploy("myapp", { success: false, commitBefore: "b", commitAfter: "b", durationMs: 1 }, "ci");
+
+    expect((await readdir(tmpDir)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    expect(await getHistory()).toHaveLength(2);
   });
 });
