@@ -341,6 +341,62 @@ describe("POST /api/apps/:name/rollback — error mapping", () => {
     expect(await untagged.json()).toEqual({ error: "plain failure" });
   });
 
+  // `phase` must precede `error` in the serialised body: a caller that cuts
+  // the answer at its read cap still sees which phase failed. Checked on the
+  // raw text (not just the parsed object) because JSON key order is part of
+  // the contract.
+  async function rollbackBodyKeyOrder(rejection: Error, expectedStatus: number) {
+    mockRollbackApp.mockRejectedValue(rejection);
+    const res = await request("/apps/myapp/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(expectedStatus);
+    const text = await res.text();
+    expect(text.startsWith('{"phase"')).toBe(true);
+    expect(Object.keys(JSON.parse(text) as Record<string, unknown>)).toEqual(["phase", "error"]);
+  }
+
+  it("serialises phase before error on the 400 branch", async () => {
+    await rollbackBodyKeyOrder(
+      Object.assign(new Error("Rebuild failed: boom"), { rollbackPhase: "after_reset" }),
+      400,
+    );
+  });
+
+  it("serialises phase before error on the 404 branch", async () => {
+    await rollbackBodyKeyOrder(
+      Object.assign(new RelayConfigError("bad config at target"), { rollbackPhase: "after_reset" }),
+      404,
+    );
+  });
+
+  it("serialises phase before error on the 409 branch", async () => {
+    await rollbackBodyKeyOrder(
+      Object.assign(
+        new apps.DeployConflictError("rollback", { kind: "deploy", target: "myapp", startedAt: "earlier" }),
+        { rollbackPhase: "before_reset" },
+      ),
+      409,
+    );
+  });
+
+  it("keeps an untagged body free of the phase key and error first", async () => {
+    mockRollbackApp.mockRejectedValue(new Error("plain failure"));
+    const res = await request("/apps/myapp/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(text.startsWith('{"error"')).toBe(true);
+    const body = JSON.parse(text) as Record<string, unknown>;
+    expect("phase" in body).toBe(false);
+    expect(Object.keys(body)).toEqual(["error"]);
+  });
+
   it("calls recordDeploy and returns 200 on success", async () => {
     const rollbackResult = { success: true, commitBefore: "old", commitAfter: "new" };
     mockRollbackApp.mockResolvedValue(rollbackResult as never);
