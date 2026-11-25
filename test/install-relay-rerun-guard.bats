@@ -12,7 +12,7 @@
 # environment because install.sh records at source time whether RELAY_BIND was
 # set explicitly.
 
-bats_require_minimum_version 1.5.0
+bats_require_minimum_version 1.11.0
 
 INSTALL_SH="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/install.sh"
 
@@ -65,6 +65,29 @@ _guard() {
     [ "\${GUARD_ONLY:-}" = 1 ] || agent_relay_write_relay_compose '${RELAY_TEST_DIR}'
     echo GUARD_OK
   " 2>&1
+}
+
+# _guard_split <domain> <email> <ca> [env assignment...]: as _guard, but stdout
+# and stderr are captured apart ($output is stdout, $stderr is stderr). The
+# guard writes only GUARD_OK to stdout; its warning and its refusal text go to
+# stderr.
+_guard_split() {
+  local domain="$1" email="$2" ca="$3"
+  shift 3
+  run --separate-stderr env -u RELAY_BIND -u RELAY_REWRITE "$@" DOM="$domain" EML="$email" CA="$ca" bash -c "
+    INSTALL_SH_SOURCE_ONLY=1 . '${INSTALL_SH}'
+    RELAY_MODE=\"\${MODE_FOR-greenfield}\"
+    RELAY_DOMAIN=\"\$DOM\"
+    TRAEFIK_EMAIL=\"\$EML\"
+    TRAEFIK_CA=\"\$CA\"
+    APPS_DIR=/home/deploy/apps
+    RELAY_PORT=8222
+    TRAEFIK_NETWORK=traefik-public
+    TRAEFIK_CERTRESOLVER=letsencrypt
+    agent_relay_relay_compose_guard '${RELAY_TEST_DIR}'
+    [ \"\${GUARD_ONLY:-}\" = 1 ] || agent_relay_write_relay_compose '${RELAY_TEST_DIR}'
+    echo GUARD_OK
+  "
 }
 
 # ─── refusals: nothing changed ───────────────────────────────────────────────
@@ -399,6 +422,33 @@ _guard() {
   [[ "$output" != *"rewriting"* ]]
 }
 
+# ─── streams: warning and refusal on stderr, GUARD_OK on stdout ──────────────
+
+@test "guard streams: the RELAY_REWRITE=1 warning is on stderr and stdout is exactly GUARD_OK" {
+  _first_install relay.example.com "" self-signed
+  _guard_split "" "" letsencrypt RELAY_REWRITE=1 GUARD_ONLY=1
+  [ "$status" -eq 0 ]
+  [ "$output" = "GUARD_OK" ]
+  [[ "$stderr" == *"RELAY_REWRITE=1: rewriting"* ]]
+}
+
+@test "guard streams: a refusal writes its text to stderr and nothing to stdout" {
+  _first_install relay.example.com "" self-signed
+  _guard_split "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"would drop the TLS route for the relay"* ]]
+  [[ "$stderr" == *"RELAY_REWRITE=1"* ]]
+}
+
+@test "guard streams: a pass without a loss writes nothing to stderr" {
+  _first_install relay.example.com "" self-signed
+  _guard_split relay.example.com "" self-signed GUARD_ONLY=1
+  [ "$status" -eq 0 ]
+  [ "$output" = "GUARD_OK" ]
+  [ -z "$stderr" ]
+}
+
 # ─── hand-built files ────────────────────────────────────────────────────────
 
 @test "guard: commented-out TLS label and port line do not count" {
@@ -553,15 +603,18 @@ _hint() {
 # Row format (fields separated by "|"):
 #   id | marker | ports | form | domain | email | ca | bind | rewrite | mode | expect | texts
 # "-" is an empty or absent value (domain, email, bind, rewrite, ports), EMPTY
-# an empty-string value that is set. "ports" is bare, an address, "A+B" for
+# an empty-string value that is set. "ports" is bare, an address ("A@80" for
+# another published port), "A+B" for
 # several lines, or @missing @empty @comments @dir @unreadable @handwritten.
 # "texts" are " ;; "-free items separated by ";;": "+x" must appear in the
 # output, "-x" must not. A refusal row also asserts the file is byte-identical
 # and that GUARD_OK is not printed; an "ok" row asserts GUARD_OK.
 
 _port_line() {
-  local addr="$1" form="$2" spec
-  if [ "$addr" = "bare" ]; then spec="8222:8222"; else spec="${addr}:8222:8222"; fi
+  local addr="$1" form="$2" spec port=8222
+  # "addr@port" publishes another port than the default 8222.
+  if [ "${addr#*@}" != "$addr" ]; then port="${addr#*@}"; addr="${addr%@*}"; fi
+  if [ "$addr" = "bare" ]; then spec="${port}:${port}"; else spec="${addr}:${port}:${port}"; fi
   case "$form" in
     sq)  printf "      - '%s'\n" "$spec" ;;
     uq)  printf '      - %s\n' "$spec" ;;
@@ -651,16 +704,19 @@ _row_run() {
     skip "file stays readable (running as root)"
   fi
   if [ -f "$COMPOSE" ] && [ -r "$COMPOSE" ]; then cp "$COMPOSE" "${RELAY_TEST_DIR}/before"; fi
-  _guard "$dom" "$eml" "$ca" "${envs[@]}" GUARD_ONLY=1
+  _guard_split "$dom" "$eml" "$ca" "${envs[@]}" GUARD_ONLY=1
   if [ "$ports" = "@unreadable" ]; then chmod 600 "$COMPOSE"; fi
+  local out_stdout="$output"
   if [ "$expect" = "ok" ]; then
-    [ "$status" -eq 0 ] || { echo "row ${id}: expected a pass, got status ${status}"; echo "$output"; return 1; }
-    [[ "$output" == *GUARD_OK* ]] || { echo "row ${id}: no GUARD_OK"; echo "$output"; return 1; }
+    [ "$status" -eq 0 ] || { echo "row ${id}: expected a pass, got status ${status}"; echo "$stderr"; return 1; }
+    [ "$out_stdout" = "GUARD_OK" ] || { echo "row ${id}: stdout is not exactly GUARD_OK: ${out_stdout}"; return 1; }
   else
-    [ "$status" -ne 0 ] || { echo "row ${id}: expected a refusal, got a pass"; echo "$output"; return 1; }
-    [[ "$output" != *GUARD_OK* ]] || { echo "row ${id}: GUARD_OK printed on a refusal"; return 1; }
+    [ "$status" -ne 0 ] || { echo "row ${id}: expected a refusal, got a pass"; echo "$out_stdout"; return 1; }
+    [ -z "$out_stdout" ] || { echo "row ${id}: stdout not empty on a refusal: ${out_stdout}"; return 1; }
     cmp "$COMPOSE" "${RELAY_TEST_DIR}/before" || { echo "row ${id}: file changed on a refusal"; return 1; }
   fi
+  # Texts are checked against both streams (warnings and refusals are on stderr).
+  output="${out_stdout}"$'\n'"${stderr}"
   _check_texts "$texts"
 }
 
@@ -840,6 +896,13 @@ F cmt bare, bind absent|none|bare|cmt|-|-|letsencrypt|-|-|greenfield|ok|
 F cmt 0.0.0.0, bind absent|none|0.0.0.0|cmt|-|-|letsencrypt|-|-|greenfield|ok|
 F nosp 127.0.0.1, bind absent|none|127.0.0.1|nosp|-|-|letsencrypt|-|-|greenfield|refuse|+the existing bind 127.0.0.1 of the plain-HTTP port
 F nodash 127.0.0.1, bind absent (not a list item, not read)|none|127.0.0.1|nodash|-|-|letsencrypt|-|-|greenfield|ok
+F port 80 127.0.0.1@80, bind absent|none|127.0.0.1@80|dq|-|-|letsencrypt|-|-|greenfield|refuse|+the existing bind 127.0.0.1 of the plain-HTTP port;;+publish it on 0.0.0.0;;+Re-run with RELAY_BIND=127.0.0.1
+F port 80 127.0.0.1@80, same bind|none|127.0.0.1@80|dq|-|-|letsencrypt|127.0.0.1|-|greenfield|ok
+F port 18222 127.0.0.1@18222, bind absent|none|127.0.0.1@18222|dq|-|-|letsencrypt|-|-|greenfield|refuse|+the existing bind 127.0.0.1 of the plain-HTTP port;;+publish it on 0.0.0.0;;+Re-run with RELAY_BIND=127.0.0.1
+F port 18222 127.0.0.1@18222, same bind|none|127.0.0.1@18222|dq|-|-|letsencrypt|127.0.0.1|-|greenfield|ok
+F port 80 ::1@80, bind absent|none|::1@80|dq|-|-|letsencrypt|-|-|greenfield|refuse|+the existing bind ::1 of the plain-HTTP port
+F port 18222 10.0.0.5@18222, TLS route default bind|none|10.0.0.5@18222|dq|relay.example.com|admin@example.com|letsencrypt|-|-|greenfield|refuse|+the existing bind 10.0.0.5;;+publish it on 127.0.0.1
+F port 80 0.0.0.0@80, bind absent|none|0.0.0.0@80|dq|-|-|letsencrypt|-|-|greenfield|ok
 P 0.0.0.0 then 127.0.0.1|none|0.0.0.0+127.0.0.1|dq|-|-|letsencrypt|-|-|greenfield|refuse|+the existing bind 127.0.0.1 of the plain-HTTP port;;+publish it on 0.0.0.0;;+Re-run with RELAY_BIND=127.0.0.1, or with the RELAY_MODE of the first install if it was not greenfield;;-values of the first install;;-the TLS route;;+RELAY_REWRITE=1
 P 127.0.0.1 then 0.0.0.0|none|127.0.0.1+0.0.0.0|dq|-|-|letsencrypt|-|-|greenfield|refuse|+the existing bind 127.0.0.1 of the plain-HTTP port;;+publish it on 0.0.0.0;;+Re-run with RELAY_BIND=127.0.0.1, or with the RELAY_MODE of the first install if it was not greenfield;;-values of the first install;;-the TLS route;;+RELAY_REWRITE=1
 P 127.0.0.1 then 10.0.0.5, bind 127.0.0.1|none|127.0.0.1+10.0.0.5|dq|-|-|letsencrypt|127.0.0.1|-|greenfield|refuse|+the existing bind 10.0.0.5 of the plain-HTTP port;;+publish it on 127.0.0.1;;+Re-run with RELAY_BIND=10.0.0.5, or with the RELAY_MODE of the first install if it was not greenfield;;-values of the first install;;-the TLS route;;+RELAY_REWRITE=1
