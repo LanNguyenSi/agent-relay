@@ -109,9 +109,10 @@ _guard() {
   cp "$COMPOSE" "${RELAY_TEST_DIR}/before"
   _guard "" "" letsencrypt
   [ "$status" -ne 0 ]
-  [[ "$output" == *"loopback-only bind of the plain-HTTP port"* ]]
-  [[ "$output" == *"published on 0.0.0.0"* ]]
-  [[ "$output" == *"RELAY_BIND=127.0.0.1"* ]]
+  [[ "$output" == *"the existing bind 127.0.0.1 of the plain-HTTP port"* ]]
+  [[ "$output" == *"publish it on 0.0.0.0"* ]]
+  [[ "$output" == *"Re-run with RELAY_BIND=127.0.0.1, or with the RELAY_MODE of the first install if it was not greenfield"* ]]
+  [[ "$output" != *"values of the first install"* ]]
   [[ "$output" != *"TLS route for the relay"* ]]
   cmp "$COMPOSE" "${RELAY_TEST_DIR}/before"
 }
@@ -120,7 +121,7 @@ _guard() {
   _first_install relay.example.com admin@example.com letsencrypt
   _guard relay.example.com admin@example.com letsencrypt RELAY_BIND=0.0.0.0
   [ "$status" -ne 0 ]
-  [[ "$output" == *"loopback-only bind"* ]]
+  [[ "$output" == *"the existing bind 127.0.0.1"* ]]
   [[ "$output" != *"TLS route for the relay"* ]]
 }
 
@@ -129,8 +130,9 @@ _guard() {
   _guard "" "" letsencrypt
   [ "$status" -ne 0 ]
   [[ "$output" == *"the TLS route for the relay"* ]]
-  [[ "$output" == *"and the loopback-only bind"* ]]
-  [[ "$output" == *"RELAY_BIND=127.0.0.1"* ]]
+  [[ "$output" == *"and the existing bind 127.0.0.1"* ]]
+  [[ "$output" == *"values of the first install and RELAY_BIND=127.0.0.1"* ]]
+  [[ "$output" == *"the RELAY_MODE of the first install if it was not greenfield"* ]]
 }
 
 # ─── passes ──────────────────────────────────────────────────────────────────
@@ -204,6 +206,167 @@ _guard() {
   _guard "" "" letsencrypt MODE_FOR=existing-traefik
   [ "$status" -eq 0 ]
   [[ "$output" == *GUARD_OK* ]]
+}
+
+# ─── amended bind rule: any specific address is protected ────────────────────
+
+@test "guard: loopback compose + RELAY_BIND=10.0.0.5 -> refused, names both addresses" {
+  _first_install "" "" letsencrypt RELAY_BIND=127.0.0.1
+  cp "$COMPOSE" "${RELAY_TEST_DIR}/before"
+  _guard "" "" letsencrypt RELAY_BIND=10.0.0.5
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the existing bind 127.0.0.1"* ]]
+  [[ "$output" == *"publish it on 10.0.0.5"* ]]
+  cmp "$COMPOSE" "${RELAY_TEST_DIR}/before"
+}
+
+@test "guard: loopback compose + RELAY_BIND=:: -> refused (widening to all IPv6 interfaces)" {
+  _first_install "" "" letsencrypt RELAY_BIND=127.0.0.1
+  _guard "" "" letsencrypt RELAY_BIND=::
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"publish it on ::"* ]]
+}
+
+@test "guard: loopback compose + RELAY_BIND=0.0.0.0 -> refused" {
+  _first_install "" "" letsencrypt RELAY_BIND=127.0.0.1
+  _guard "" "" letsencrypt RELAY_BIND=0.0.0.0
+  [ "$status" -ne 0 ]
+}
+
+@test "guard: Tailscale-style bind 100.64.1.2 + bare re-run -> refused" {
+  _first_install "" "" letsencrypt RELAY_BIND=100.64.1.2
+  grep -q '"100.64.1.2:8222:8222"' "$COMPOSE"
+  cp "$COMPOSE" "${RELAY_TEST_DIR}/before"
+  _guard "" "" letsencrypt
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the existing bind 100.64.1.2"* ]]
+  [[ "$output" == *"RELAY_BIND=100.64.1.2"* ]]
+  cmp "$COMPOSE" "${RELAY_TEST_DIR}/before"
+}
+
+@test "guard: Tailscale-style bind 100.64.1.2 + same RELAY_BIND -> passes and rewrites" {
+  _first_install "" "" letsencrypt RELAY_BIND=100.64.1.2
+  _guard "" "" letsencrypt RELAY_BIND=100.64.1.2
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: IPv6 loopback bind ::1 (as the installer writes it) + bare re-run -> refused" {
+  _first_install "" "" letsencrypt RELAY_BIND=::1
+  grep -q '"::1:8222:8222"' "$COMPOSE"
+  cp "$COMPOSE" "${RELAY_TEST_DIR}/before"
+  _guard "" "" letsencrypt
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the existing bind ::1"* ]]
+  [[ "$output" == *"RELAY_BIND=::1"* ]]
+  cmp "$COMPOSE" "${RELAY_TEST_DIR}/before"
+}
+
+@test "guard: IPv6 loopback bind ::1 + same RELAY_BIND -> passes" {
+  _first_install "" "" letsencrypt RELAY_BIND=::1
+  _guard "" "" letsencrypt RELAY_BIND=::1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: IPv6 address compares case-insensitively" {
+  _first_install "" "" letsencrypt RELAY_BIND=FD00::A
+  _guard "" "" letsencrypt RELAY_BIND=fd00::a
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: bracketed IPv6 port line [::1]:8222:8222 + bare re-run -> refused" {
+  printf 'services:\n  relay:\n    ports:\n      - "[::1]:8222:8222"\n' > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the existing bind ::1"* ]]
+}
+
+@test "guard: bracketed IPv6 port line + same RELAY_BIND=::1 -> passes" {
+  printf 'services:\n  relay:\n    ports:\n      - "[::1]:8222:8222"\n' > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1 RELAY_BIND=::1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: existing 0.0.0.0 port line (explicit) + bare re-run -> passes" {
+  _first_install "" "" letsencrypt RELAY_BIND=0.0.0.0
+  grep -q '"0.0.0.0:8222:8222"' "$COMPOSE"
+  _guard "" "" letsencrypt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: existing 0.0.0.0 port line + RELAY_BIND=127.0.0.1 -> passes (narrowing)" {
+  _first_install "" "" letsencrypt RELAY_BIND=0.0.0.0
+  _guard "" "" letsencrypt RELAY_BIND=127.0.0.1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: existing :: port line + bare re-run -> passes" {
+  _first_install "" "" letsencrypt RELAY_BIND=::
+  grep -q '":::8222:8222"' "$COMPOSE"
+  _guard "" "" letsencrypt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: existing bare PORT:PORT line + bare re-run -> passes" {
+  printf 'services:\n  relay:\n    ports:\n      - "8222:8222"\n' > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: unquoted port line - 127.0.0.1:8222:8222 + bare re-run -> refused" {
+  printf 'services:\n  relay:\n    ports:\n      - 127.0.0.1:8222:8222\n' > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the existing bind 127.0.0.1"* ]]
+}
+
+@test "guard: single-quoted port line + bare re-run -> refused" {
+  printf "services:\n  relay:\n    ports:\n      - '127.0.0.1:8222:8222'\n" > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the existing bind 127.0.0.1"* ]]
+}
+
+@test "guard: port line with a /tcp suffix is recognised" {
+  printf 'services:\n  relay:\n    ports:\n      - "127.0.0.1:8222:8222/tcp"\n' > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -ne 0 ]
+}
+
+@test "guard: a volume line with colons is not read as a port line" {
+  printf 'services:\n  relay:\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - /home/deploy/apps:/apps\n' > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: empty compose file -> passes (no abort under set -e)" {
+  : > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: comment-only compose file -> passes (no abort under set -e)" {
+  printf '# nothing\n   # here\n' > "$COMPOSE"
+  _guard "" "" letsencrypt GUARD_ONLY=1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *GUARD_OK* ]]
+}
+
+@test "guard: refusal advice offers the RELAY_MODE of the first install" {
+  _first_install relay.example.com "" self-signed
+  _guard "" "" letsencrypt
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the RELAY_DOMAIN and TRAEFIK_EMAIL (or TRAEFIK_CA=self-signed) values of the first install"* ]]
+  [[ "$output" == *"or with the RELAY_MODE of the first install if it was not greenfield"* ]]
 }
 
 # ─── override ────────────────────────────────────────────────────────────────
@@ -340,6 +503,7 @@ _hint() {
 @test "hint: ufw allow line is offered only for a daemon with iptables integration off, one command per port" {
   _hint greenfield 127.0.0.1 8222 "80/tcp 443/tcp"
   [[ "$output" == *'"iptables": false'* ]]
+  [[ "$output" == *"Docker runs rootless, or the proxy uses host networking, UFW gates these ports"* ]]
   [[ "$output" == *"sudo ufw allow 80/tcp; sudo ufw allow 443/tcp;"* ]]
   iptables_line="$(printf '%s\n' "$output" | grep -n 'iptables": false' | head -1 | cut -d: -f1)"
   allow_line="$(printf '%s\n' "$output" | grep -n 'sudo ufw allow' | head -1 | cut -d: -f1)"
