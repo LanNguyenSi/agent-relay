@@ -50,6 +50,11 @@
 #   TRAEFIK_REWRITE=1      Greenfield re-run: let the installer rewrite an existing /opt/traefik/docker-compose.yml
 #                          that has an ACME resolver even though this run would write none (TRAEFIK_EMAIL empty
 #                          or TRAEFIK_CA=self-signed). Without it that re-run stops before changing the Traefik compose file.
+#   RELAY_REWRITE=1        Greenfield re-run: let the installer rewrite an existing <RELAY_DIR>/docker-compose.yml
+#                          that has a TLS route for the relay (traefik.http.routers.relay.tls...) although this
+#                          run would write none, or that binds the plain-HTTP port to a specific address (not
+#                          0.0.0.0 or ::) although this run would bind another one. Without it that re-run stops
+#                          before anything is changed.
 #   RELAY_FORCE_RECREATE=1 Remove an existing agent-relay container before `docker compose up` (use after a failed or conflicting earlier install)
 
 set -euo pipefail
@@ -259,6 +264,75 @@ agent_relay_relay_bind() {
   else
     printf '0.0.0.0'
   fi
+}
+
+# Refuse a greenfield re-run that would silently downgrade an existing relay
+# compose file written by an earlier run: <relay_dir>/docker-compose.yml is
+# rewritten unconditionally, and the file is generated from the variables of the
+# run, so a bare re-run (no RELAY_DOMAIN, TRAEFIK_EMAIL, TRAEFIK_CA, RELAY_BIND)
+# drops the TLS labels and can change the bind of the plain-HTTP port, for
+# example from 127.0.0.1 to all interfaces. Two losses are detected, both by
+# line-level matching of the `- key=value` label and `- "addr:port:port"` port
+# forms the installer writes (comment lines are ignored; a hand-edited file in
+# another YAML form, such as a label map or an environment-variable port, is
+# not recognised):
+#   (a) the file has a TLS router for the relay (traefik.http.routers.relay.tls=true
+#       or traefik.http.routers.relay.tls.certresolver=) and this run writes no
+#       TLS route (agent_relay_greenfield_tls_route fails);
+#   (b) the file has a bind-qualified port line (quoted, single-quoted or
+#       unquoted; IPv4, plain or bracketed IPv6) whose address is neither
+#       0.0.0.0 nor :: and the effective bind of this run
+#       (agent_relay_relay_bind) differs from that address. A bare PORT:PORT
+#       line and a 0.0.0.0 or :: line already publish on all interfaces, so
+#       nothing narrower can be lost there.
+# RELAY_REWRITE=1 lets the rewrite proceed (with a warning naming the loss). No
+# refusal for another mode, no file, a file that is not readable or a file
+# without either marker. Writes nothing; err exits before any file or network
+# is changed. Uses globals: RELAY_MODE, RELAY_DOMAIN, TRAEFIK_EMAIL, TRAEFIK_CA,
+# RELAY_BIND, RELAY_BIND_SET, RELAY_REWRITE.
+agent_relay_relay_compose_guard() {
+  local relay_dir="$1"
+  local compose_file="${relay_dir}/docker-compose.yml"
+  local content bind line addr addr_lc bind_lc lost="" advice=""
+  local port_re='^[[:space:]]*-[[:space:]]*["'"'"']?([][0-9a-fA-F:.]+):[0-9]+:[0-9]+'
+
+  [ "$RELAY_MODE" = "greenfield" ] || return 0
+  [ -f "$compose_file" ] && [ -r "$compose_file" ] || return 0
+  # Comment lines out first so a commented-out label or port never counts.
+  # grep exits 1 for an empty or comment-only file; that is not an error here.
+  content="$(grep -v '^[[:space:]]*#' "$compose_file" || true)"
+
+  if ! agent_relay_greenfield_tls_route \
+    && grep -Eq 'traefik\.http\.routers\.relay\.tls(=true|\.certresolver=)' <<<"$content"; then
+    lost="the TLS route for the relay (HTTPS on its domain)"
+    advice="the RELAY_DOMAIN and TRAEFIK_EMAIL (or TRAEFIK_CA=self-signed) values of the first install"
+  fi
+  bind="$(agent_relay_relay_bind)"
+  bind_lc="$(printf '%s' "$bind" | tr 'A-F' 'a-f')"
+  addr=""
+  while IFS= read -r line; do
+    if [[ "$line" =~ $port_re ]]; then
+      addr="${BASH_REMATCH[1]}"
+      addr="${addr#[}"
+      addr="${addr%]}"
+      addr_lc="$(printf '%s' "$addr" | tr 'A-F' 'a-f')"
+      if [ "$addr" != "0.0.0.0" ] && [ "$addr" != "::" ] && [ "$addr_lc" != "$bind_lc" ]; then
+        break
+      fi
+    fi
+    addr=""
+  done <<<"$content"
+  if [ -n "$addr" ]; then
+    lost="${lost:+${lost} and }the existing bind ${addr} of the plain-HTTP port (this run would publish it on ${bind})"
+    advice="${advice:+${advice} and }RELAY_BIND=${addr}"
+  fi
+  [ -n "$lost" ] || return 0
+
+  if [ "${RELAY_REWRITE:-}" = "1" ]; then
+    warn "RELAY_REWRITE=1: rewriting ${compose_file} although this run drops ${lost}."
+    return 0
+  fi
+  err "${compose_file} exists and this run (RELAY_DOMAIN='${RELAY_DOMAIN}', TRAEFIK_EMAIL='${TRAEFIK_EMAIL}', TRAEFIK_CA='${TRAEFIK_CA}', effective bind ${bind}) would drop ${lost}. Re-run with ${advice}, or with the RELAY_MODE of the first install if it was not greenfield, or set RELAY_REWRITE=1 to rewrite it anyway. Nothing was changed."
 }
 
 # Bring the greenfield Traefik to the state the installer describes.
@@ -650,6 +724,42 @@ agent_relay_ufw_ports() {
   return 0
 }
 
+# The UFW hint text for the ports agent_relay_ufw_ports named that UFW does not
+# list. Every port the installer publishes (Traefik 80/443, the plain RELAY_PORT)
+# is published by Docker, and with Docker's default iptables integration those
+# packets are NAT-forwarded in the FORWARD path and never reach UFW's INPUT
+# rules, so a missing `ufw allow` does not close them and `ufw allow` does not
+# open or restrict them. The text therefore leads with that, names the ways to
+# restrict the plain port when it is published on a non-loopback bind (RELAY_BIND
+# and the DOCKER-USER chain), and offers `ufw allow` only for the cases where
+# UFW does gate the ports (Docker iptables integration off, rootless Docker,
+# host networking). Prints to stderr through warn; always exits 0.
+#   $1 mode     resolved RELAY_MODE
+#   $2 bind     effective bind from agent_relay_relay_bind
+#   $3 port     RELAY_PORT
+#   $4 missing  space-separated port specs UFW does not list (non-empty)
+# Defined above the source-only guard so tests can drive every row.
+agent_relay_ufw_hint() {
+  local mode="$1" bind="$2" port="$3" missing="$4"
+  local allow_cmd="" port_spec
+  warn "UFW is active and does not list these port(s): ${missing}"
+  warn "Docker publishes them through its own iptables rules, which bypass UFW's INPUT rules: with Docker's default settings they are reachable from the network whether or not UFW allows them, and UFW rules do not restrict them."
+  case "$mode" in
+    greenfield|port-only)
+      if [ "$bind" != "127.0.0.1" ]; then
+        warn "The plain-HTTP port ${port}/tcp is published on ${bind}. To restrict it, re-run with RELAY_BIND=127.0.0.1 (use the HTTPS route or a local reverse proxy as the way in), or add rules to Docker's DOCKER-USER iptables chain (they see the container port after NAT; see Docker's packet filtering and firewalls documentation)."
+      fi
+      ;;
+  esac
+  for port_spec in $missing; do
+    allow_cmd="${allow_cmd}sudo ufw allow ${port_spec}; "
+  done
+  warn "Only if Docker's iptables integration is off (\"iptables\": false in daemon.json), Docker runs rootless, or the proxy uses host networking, UFW gates these ports; then run this to open them:"
+  echo -e "    ${YELLOW}${allow_cmd% }${NC}" >&2
+  echo "" >&2
+  return 0
+}
+
 # The post-install HTTPS route probe decision as data, so the call site holds
 # no condition of its own. Prints one word: "skip" (no TLS route was created,
 # do not probe), or the insecure flag "0" / "1" for agent_relay_probe_https_route.
@@ -948,6 +1058,7 @@ esac
 # ── Step 5: Traefik bootstrap (greenfield only) ────────────────────────────
 if [ "$RELAY_MODE" = "greenfield" ]; then
   agent_relay_check_greenfield_compat
+  agent_relay_relay_compose_guard "$RELAY_DIR"
   agent_relay_bootstrap_traefik "/opt/traefik"
 fi
 
@@ -1201,22 +1312,27 @@ echo -e "    Relay URL:  ${RELAY_URL}"
 printf '    Relay Token: %s\n' "$(agent_relay_display_token "$AUTH_TOKEN")"
 echo ""
 
-# Firewall preflight (v0.3.0). Many fresh VPS images ship with UFW
-# enabled + default-deny. install.sh succeeds, but the relay is
-# unreachable from outside because port 80/443/RELAY_PORT aren't
-# allowed. Detect the common case (active ufw) and print the exact
-# allow command the operator needs. Never auto-run — a root installer
-# mutating firewall policy without explicit consent is too aggressive.
+# Firewall hint (v0.3.0). Many fresh VPS images ship with UFW enabled +
+# default-deny, so an operator expects a missing `ufw allow` to keep a port
+# closed. That does not hold for the ports this installer publishes: Docker
+# publishes them with its own iptables rules, which bypass UFW's INPUT rules,
+# so they are reachable whether or not UFW allows them (see
+# agent_relay_ufw_hint for the wording and the ways to restrict the plain
+# port). The hint is printed when UFW is active and does not list a port the
+# installer publishes; it never changes firewall policy itself, a root
+# installer mutating firewall policy without explicit consent is too aggressive.
 #
 # firewalld / iptables detection is out of scope here; those will hit
 # different failure shapes and the warning would drift from the
 # actual fix. File as follow-up if needed.
 if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
-  # Ports the host firewall must open so the relay is actually reachable: a TLS
-  # route fronts it on 80/443; a non-loopback plain-HTTP bind needs RELAY_PORT; a
-  # loopback-only relay needs nothing. Empty list means skip the hint. The bind
-  # argument is agent_relay_relay_bind, the single rule shared with the compose
-  # port line in agent_relay_write_relay_compose.
+  # Ports the installer publishes on the host, checked against UFW's rules: a TLS
+  # route is published on 80/443; a non-loopback plain-HTTP bind publishes
+  # RELAY_PORT; a loopback-only relay publishes nothing reachable. Empty list
+  # means skip the hint. These are Docker-published ports: UFW's INPUT rules do
+  # not gate them (see agent_relay_ufw_hint). The bind argument is
+  # agent_relay_relay_bind, the single rule shared with the compose port line in
+  # agent_relay_write_relay_compose.
   ports_needed="$(agent_relay_ufw_ports "$RELAY_MODE" "${GREENFIELD_TLS_ROUTE:-}" "$(agent_relay_relay_bind)" "$RELAY_PORT")"
 
   if [ -n "$ports_needed" ]; then
@@ -1230,14 +1346,7 @@ if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: acti
       fi
     done
     if [ -n "$missing" ]; then
-      warn "UFW is active and the following port(s) are not allowed: ${missing% }"
-      warn "Run this to open them:"
-      allow_cmd=""
-      for port_spec in $missing; do
-        allow_cmd="${allow_cmd}sudo ufw allow ${port_spec}; "
-      done
-      echo -e "    ${YELLOW}${allow_cmd% ; }${NC}" >&2
-      echo "" >&2
+      agent_relay_ufw_hint "$RELAY_MODE" "$(agent_relay_relay_bind)" "$RELAY_PORT" "${missing% }"
     fi
   fi
 fi
