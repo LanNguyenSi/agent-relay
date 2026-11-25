@@ -2071,6 +2071,76 @@ describe("health probe bounds", () => {
     // then surfaced the timeout as the last probe's detail.
     expect(healthStep?.output).toContain("exec timed out after 15000 ms");
   });
+
+  // The failure log tail runs right before the rollback decision, so an
+  // unbounded call inherits the 300 s step default and keeps holding the
+  // deploy lock after the whole retry loop. It also goes through the same
+  // shared bound as the other read-only compose queries, and `--no-color`
+  // keeps the excerpt plain text in the deploy record.
+  it("bounds the failure log tail with the shared compose-query timeout and --no-color", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "HTTP_STATUS=503", stderr: "", exitCode: 1 };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        return { stdout: "app  | Error: could not connect to db\n", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+    expect(result.success).toBe(false);
+
+    const logsCall = mockRunExec.mock.calls.find(
+      ([cmd, callArgs]) => cmd === "docker" && callArgs.includes("logs"),
+    );
+    expect(logsCall).toBeDefined();
+    expect(logsCall?.[1]).toEqual(
+      expect.arrayContaining(["logs", "--tail", "50", "--no-color", "app"]),
+    );
+    expect(logsCall?.[3]).toEqual({ timeoutMs: 30_000 }); // COMPOSE_QUERY_TIMEOUT_MS
+  });
+
+  it("names the log-fetch timeout in the failure output when the tail exec is killed", async () => {
+    mockRunExec.mockImplementation(async (command, args) => {
+      if (command === "git" && args.includes("rev-parse") && !args.includes("--abbrev-ref")) {
+        return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "git" && args.includes("--abbrev-ref")) {
+        return { stdout: "main\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("--status")) {
+        return { stdout: "app\n", stderr: "", exitCode: 0 };
+      }
+      if (command === "docker" && args.includes("node") && args.includes("-e")) {
+        return { stdout: "HTTP_STATUS=503", stderr: "", exitCode: 1 };
+      }
+      if (command === "docker" && args.includes("logs")) {
+        // execFile killed the log fetch: partial output, non-zero exit.
+        return { stdout: "app  | partial output line\n", stderr: "", exitCode: 1, killReason: "timeout" as const };
+      }
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    });
+
+    const result = await deploy({ appDir: "/app", config: baseConfig });
+
+    const healthStep = result.steps.find((s) => s.name === "health check");
+    expect(healthStep?.status).toBe("failure");
+    expect(healthStep?.output).toContain(
+      "Container logs: log fetch timed out after 30000 ms", // COMPOSE_QUERY_TIMEOUT_MS
+    );
+    // Whatever compose had already written still ships, capped as before.
+    expect(healthStep?.output).toContain("partial output line");
+  });
 });
 
 // The auto-detected branch (`git rev-parse --abbrev-ref HEAD`) reaches

@@ -1,6 +1,7 @@
 import { loadRelayConfig, RelayConfigError, type RelayConfig } from "../config/relay.js";
 import { runPreflightChecks, ROLLBACK_CRITICAL_CHECKS, type PreflightReport } from "./preflight.js";
 import { runExec, runShell, type ExecOptions, type ExecResult } from "./exec.js";
+import { COMPOSE_QUERY_TIMEOUT_MS } from "./timeouts.js";
 import { validateBranch } from "../services/branch-name.js";
 /**
  * Builds the ExecOptions for a long-running deploy step (git pull, compose
@@ -552,15 +553,21 @@ async function captureContainerLogsTail(
   // trigger.
   const logs = await runExec(
     "docker",
-    ["compose", "-f", composeFile, "logs", "--tail", String(HEALTH_FAILURE_LOG_TAIL_LINES), ...services],
+    ["compose", "-f", composeFile, "logs", "--tail", String(HEALTH_FAILURE_LOG_TAIL_LINES), "--no-color", ...services],
     appDir,
+    // Read-only: bounded so a wedged compose cannot hold the deploy lock for
+    // the 300 s step default right before the rollback decision.
+    { timeoutMs: COMPOSE_QUERY_TIMEOUT_MS },
   );
   const combined = (logs.stdout + "\n" + logs.stderr).trim();
   const capped =
     combined.length > HEALTH_FAILURE_LOG_MAX_CHARS
       ? `...[truncated]...\n${combined.slice(-HEALTH_FAILURE_LOG_MAX_CHARS)}`
       : combined;
-  return `Container logs (last ${HEALTH_FAILURE_LOG_TAIL_LINES} lines, ${services.join(", ")}):\n${capped || "(empty)"}`;
+  const heading = logs.killReason === "timeout"
+    ? `Container logs: log fetch timed out after ${COMPOSE_QUERY_TIMEOUT_MS} ms (partial tail of the last ${HEALTH_FAILURE_LOG_TAIL_LINES} lines, ${services.join(", ")})`
+    : `Container logs (last ${HEALTH_FAILURE_LOG_TAIL_LINES} lines, ${services.join(", ")}):`;
+  return `${heading}\n${capped || "(empty)"}`;
 }
 
 /**

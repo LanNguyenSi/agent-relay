@@ -1,4 +1,5 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import { env } from "../config/env.js";
 
@@ -63,7 +64,18 @@ async function save(): Promise<void> {
   if (!records) return;
   const path = historyPath();
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(records, null, 2));
+  // Atomic replace (same idiom as writeSelfUpdateState in deploy/self-update.ts):
+  // write a uniquely named temp file in the target's own directory and rename
+  // it over the target, so a crash mid-write leaves the previous file intact
+  // instead of a truncated file that load() would read as empty and overwrite.
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, JSON.stringify(records, null, 2), "utf-8");
+    await rename(tmp, path);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {}); // best effort, never mask err
+    throw err;
+  }
 }
 
 export async function recordDeploy(

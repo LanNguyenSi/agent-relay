@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { safeAppDir, validateBranch, validateServiceName, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf, deployApp, FETCH_LOGS_TIMEOUT_MS } from "./apps.js";
+import { safeAppDir, validateBranch, validateServiceName, fetchLogs, clampLogLines, rollbackApp, rollbackPhaseOf, deployApp, getAppDetail, FETCH_LOGS_TIMEOUT_MS } from "./apps.js";
 import { env } from "../config/env.js";
 import type { RelayConfig } from "../config/relay.js";
 
@@ -28,6 +28,7 @@ vi.mock("../deploy/preflight.js", async () => {
 });
 
 import { runExec } from "../deploy/exec.js";
+import { COMPOSE_QUERY_TIMEOUT_MS } from "../deploy/timeouts.js";
 import { loadRelayConfig } from "../config/relay.js";
 import { runPreflightChecks } from "../deploy/preflight.js";
 
@@ -760,5 +761,79 @@ describe("rollbackApp — preflight gate", () => {
     const loadOrder = mockLoadRelayConfig.mock.invocationCallOrder[0]!;
 
     expect(loadOrder).toBeGreaterThan(resetOrder);
+  });
+});
+
+// One bound for every read-only compose/git query, so the deploy engine's log
+// tail and services/apps.ts cannot drift apart on the value.
+describe("the shared read-only query timeout", () => {
+  it("keeps FETCH_LOGS_TIMEOUT_MS as an alias of COMPOSE_QUERY_TIMEOUT_MS", () => {
+    expect(COMPOSE_QUERY_TIMEOUT_MS).toBe(30_000);
+    expect(FETCH_LOGS_TIMEOUT_MS).toBe(COMPOSE_QUERY_TIMEOUT_MS);
+  });
+});
+
+// getAppDetail is the panel's status read: a wedged git or docker daemon must
+// not hold the operation lock for the 300 s step default while the detail is
+// being assembled, so both read-only queries carry the shared bound.
+describe("getAppDetail: bounded read-only queries", () => {
+  let tmpRoot: string;
+  let appsDir: string;
+  let originalAppsDir: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    tmpRoot = await mkdtemp(resolve(tmpdir(), "agent-relay-detail-"));
+    appsDir = resolve(tmpRoot, "apps");
+    await mkdir(resolve(appsDir, "myapp"), { recursive: true });
+    originalAppsDir = env.APPS_DIR;
+    env.APPS_DIR = appsDir;
+    mockLoadRelayConfig.mockResolvedValue({
+      name: "myapp",
+      health: "/health",
+      compose_file: "docker-compose.prod.yml",
+      pre_update: [],
+      post_update: [],
+      rollback: true,
+    });
+    mockRunExec.mockImplementation(async (_cmd, args) => {
+      if (args.includes("--short")) return { stdout: "abc1234\n", stderr: "", exitCode: 0 };
+      if (args.includes("ps")) return { stdout: '{"Name":"myapp-web-1"}\n', stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+  });
+
+  afterEach(async () => {
+    env.APPS_DIR = originalAppsDir;
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("passes the shared read-only timeout to both compose ps and git rev-parse", async () => {
+    const detail = await getAppDetail("myapp");
+    expect(detail.commit).toBe("abc1234");
+    expect(detail.containers).toBe('{"Name":"myapp-web-1"}');
+
+    const gitCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "git" && args.includes("--short"));
+    const psCall = mockRunExec.mock.calls.find(([cmd, args]) => cmd === "docker" && args.includes("ps"));
+    expect(gitCall).toBeDefined();
+    expect(psCall).toBeDefined();
+    expect(COMPOSE_QUERY_TIMEOUT_MS).toBe(30_000);
+    expect(gitCall?.[3]).toEqual({ timeoutMs: COMPOSE_QUERY_TIMEOUT_MS });
+    expect(psCall?.[3]).toEqual({ timeoutMs: COMPOSE_QUERY_TIMEOUT_MS });
+  });
+
+  // A ps killed at its timeout keeps the contract the panel already handles:
+  // null containers, which the panel renders as an unhealthy app, as for any
+  // failed `compose ps`.
+  it("returns containers: null when compose ps is killed by the timeout", async () => {
+    mockRunExec.mockImplementation(async (_cmd, args) => {
+      if (args.includes("--short")) return { stdout: "abc1234\n", stderr: "", exitCode: 0 };
+      if (args.includes("ps")) return { stdout: "", stderr: "", exitCode: 1, killReason: "timeout" as const };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+
+    const detail = await getAppDetail("myapp");
+    expect(detail.containers).toBeNull();
+    expect(detail.commit).toBe("abc1234");
   });
 });
