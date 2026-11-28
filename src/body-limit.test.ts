@@ -17,6 +17,10 @@ vi.mock("./services/apps.js", async () => {
   const actual = await vi.importActual<typeof import("./services/apps.js")>("./services/apps.js");
   return { ...actual, deployApp: vi.fn(), safeAppDir: vi.fn() };
 });
+vi.mock("./services/env.js", async () => {
+  const actual = await vi.importActual<typeof import("./services/env.js")>("./services/env.js");
+  return { ...actual, readAppEnv: vi.fn().mockResolvedValue([]), writeAppEnv: vi.fn().mockResolvedValue(undefined) };
+});
 vi.mock("./services/history.js", () => ({ recordDeploy: vi.fn(), getHistory: vi.fn() }));
 vi.mock("./deploy/self-update.js", async () => {
   const actual = await vi.importActual<typeof import("./deploy/self-update.js")>("./deploy/self-update.js");
@@ -24,12 +28,20 @@ vi.mock("./deploy/self-update.js", async () => {
 });
 
 import { createApp } from "./server.js";
-import { API_MAX_BODY_BYTES } from "./api/body-limit.js";
+import {
+  API_MAX_BODY_BYTES,
+  ENV_MAX_ENTRIES,
+  ENV_MAX_KEY,
+  ENV_MAX_VALUE,
+  ENV_PUT_MAX_BODY_BYTES,
+} from "./api/body-limit.js";
+import * as appEnv from "./services/env.js";
 import * as apps from "./services/apps.js";
 import * as historyMod from "./services/history.js";
 import { env } from "./config/env.js";
 
 const mockDeployApp = vi.mocked(apps.deployApp);
+const mockWriteAppEnv = vi.mocked(appEnv.writeAppEnv);
 const mockRecordDeploy = vi.mocked(historyMod.recordDeploy);
 const AUTH = `Bearer ${env.AUTH_TOKEN}`;
 
@@ -52,7 +64,9 @@ function overLimitStream(): ReadableStream<Uint8Array> {
   });
 }
 
-function post(
+function send(
+  method: string,
+  path: string,
   body: string | ReadableStream<Uint8Array>,
   opts: { authorized?: boolean; contentLength?: boolean } = {},
 ) {
@@ -66,13 +80,20 @@ function post(
     headers["Content-Length"] = String(length);
   }
   return createApp().fetch(
-    new Request("http://test/api/apps/demo/deploy", {
-      method: "POST",
+    new Request(`http://test${path}`, {
+      method,
       headers,
       body,
       ...(body instanceof ReadableStream ? { duplex: "half" as const } : {}),
     }),
   );
+}
+
+function post(
+  body: string | ReadableStream<Uint8Array>,
+  opts: { authorized?: boolean; contentLength?: boolean } = {},
+) {
+  return send("POST", "/api/apps/demo/deploy", body, opts);
 }
 
 beforeEach(() => {
@@ -82,8 +103,8 @@ beforeEach(() => {
 });
 
 describe("bodyLimit on /api", () => {
-  it("caps at 16 MiB (the smallest power of two above the largest legitimate env PUT)", () => {
-    expect(API_MAX_BODY_BYTES).toBe(16 * 1024 * 1024);
+  it("caps small routes at 1 MiB", () => {
+    expect(API_MAX_BODY_BYTES).toBe(1024 * 1024);
   });
 
   it("rejects a body one byte over the cap with 413 JSON and never calls the handler", async () => {
@@ -137,5 +158,91 @@ describe("bodyLimit on /api", () => {
 
     expect(res.status).not.toBe(413);
     expect(mockDeployApp).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The largest body the env PUT's per-field limits admit: every key and value
+// character spelled as a 6-byte `\uXXXX` escape. Keys differ in their last
+// two units so the entries stay distinct.
+function hex2(n: number): string {
+  return n.toString(16).padStart(2, "0");
+}
+function maximalEnvBody(): string {
+  const value = "\\u0001".repeat(ENV_MAX_VALUE);
+  const rows: string[] = [];
+  for (let i = 0; i < ENV_MAX_ENTRIES; i++) {
+    const key = "\\u0001".repeat(ENV_MAX_KEY - 2) + `\\u00${hex2(i & 255)}` + `\\u00${hex2(i >> 8)}`;
+    rows.push(`{"key":"${key}","value":"${value}"}`);
+  }
+  return `{"entries":[${rows.join(",")}]}`;
+}
+const ENV_PATH = "/api/apps/demo/env";
+
+describe("bodyLimit selection per route", () => {
+  it("computes the env PUT cap from the per-field limits (6 bytes per character)", () => {
+    expect(ENV_PUT_MAX_BODY_BYTES).toBe(
+      ENV_MAX_ENTRIES * (22 + 6 * (ENV_MAX_KEY + ENV_MAX_VALUE)) + 13,
+    );
+    expect(ENV_PUT_MAX_BODY_BYTES).toBe(98_699_013);
+  });
+
+  it("the maximal escaped env body is exactly the cap and is accepted", async () => {
+    const body = maximalEnvBody();
+    expect(body.length).toBe(ENV_PUT_MAX_BODY_BYTES);
+
+    const res = await send("PUT", ENV_PATH, body);
+
+    expect(res.status).toBe(200);
+    expect(mockWriteAppEnv).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an env PUT one byte over its cap with 413 and never calls the handler", async () => {
+    const res = await send("PUT", ENV_PATH, maximalEnvBody() + " ");
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "Request body too large" });
+    expect(mockWriteAppEnv).not.toHaveBeenCalled();
+  });
+
+  it("gives the env PUT with a trailing slash the same cap", async () => {
+    const res = await send("PUT", `${ENV_PATH}/`, maximalEnvBody());
+
+    expect(res.status).not.toBe(413);
+  });
+
+  it("answers GET of the env path normally (a GET has no body for the cap to apply to)", async () => {
+    const res = await createApp().fetch(
+      new Request(`http://test${ENV_PATH}`, { method: "GET", headers: { Authorization: AUTH } }),
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses a 1 MiB + 1 body on DELETE of the env path with 413", async () => {
+    const res = await send("DELETE", ENV_PATH, "a".repeat(API_MAX_BODY_BYTES + 1));
+
+    expect(res.status).toBe(413);
+  });
+
+  it("refuses a 1 MiB + 1 body on POST to the env path with 413", async () => {
+    const res = await send("POST", ENV_PATH, "a".repeat(API_MAX_BODY_BYTES + 1));
+
+    expect(res.status).toBe(413);
+  });
+
+  it("refuses a 1 MiB + 1 body on PUT to a deeper path under env with 413", async () => {
+    const res = await send("PUT", `${ENV_PATH}/extra`, "a".repeat(API_MAX_BODY_BYTES + 1));
+
+    expect(res.status).toBe(413);
+  });
+
+  it("answers 401 to an unauthenticated oversized env PUT", async () => {
+    const res = await send("PUT", ENV_PATH, "a".repeat(API_MAX_BODY_BYTES + 1), {
+      authorized: false,
+      contentLength: true,
+    });
+
+    expect(res.status).toBe(401);
+    expect(mockWriteAppEnv).not.toHaveBeenCalled();
   });
 });
