@@ -372,7 +372,8 @@ api.get("/deploys", async (c) => {
 // boundary that decides what users see. A human operator who can call the
 // relay directly already has Bearer-token access to the whole VPS.
 
-// Strict upper bounds to keep the relay from being DoS'd by a runaway client.
+// Strict upper bounds to keep the relay from being DoS'd by a runaway client
+// (ENV_MAX_* in ./body-limit.ts, which also sizes the body cap from them).
 
 api.get("/apps/:name/env", async (c) => {
   try {

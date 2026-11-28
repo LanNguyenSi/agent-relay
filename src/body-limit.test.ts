@@ -204,11 +204,20 @@ describe("bodyLimit selection per route", () => {
     expect(mockWriteAppEnv).not.toHaveBeenCalled();
   });
 
-  it("gives the env PUT with a trailing slash the same cap", async () => {
-    const res = await send("PUT", `${ENV_PATH}/`, maximalEnvBody());
+  it("gives an env PUT with a trailing slash (an unrouted path) only 1 MiB", async () => {
+    const res = await send("PUT", `${ENV_PATH}/`, "a".repeat(API_MAX_BODY_BYTES + 1));
 
-    expect(res.status).not.toBe(413);
+    expect(res.status).toBe(413);
   });
+
+  it.each(["/api/apps/a/b/env", "/api/apps//env", "/api/x/api/apps/a/env"])(
+    "gives an env-shaped PUT to %s only 1 MiB",
+    async (path) => {
+      const res = await send("PUT", path, "a".repeat(API_MAX_BODY_BYTES + 1));
+
+      expect(res.status).toBe(413);
+    },
+  );
 
   it("answers GET of the env path normally (a GET has no body for the cap to apply to)", async () => {
     const res = await createApp().fetch(
