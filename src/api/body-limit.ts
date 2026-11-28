@@ -10,8 +10,9 @@
  * limits the route validates (below). The cap is the size of the largest
  * compact JSON body (no insignificant whitespace, only `key` and `value`
  * members) those limits admit, so every entry set that passes validation in
- * that form is accepted and nothing larger is read. The worst case is every character of a key or
- * value spelled as a `\uXXXX` JSON escape, 6 bytes per UTF-16 unit.
+ * that form is accepted and nothing larger is read. The worst case is every
+ * character of a key or value spelled as a `\uXXXX` JSON escape, 6 bytes per
+ * UTF-16 unit.
  */
 
 /** Cap for every `/api` route except the env PUT: 1 MiB. */
@@ -36,7 +37,8 @@ const ENV_ENVELOPE_BYTES = 13;
 
 export const ENV_PUT_MAX_BODY_BYTES =
   ENV_MAX_ENTRIES *
-    (ENV_ENTRY_FRAMING_BYTES + JSON_BYTES_PER_UNIT * (ENV_MAX_KEY + ENV_MAX_VALUE)) +
+    (ENV_ENTRY_FRAMING_BYTES +
+      JSON_BYTES_PER_UNIT * (ENV_MAX_KEY + ENV_MAX_VALUE)) +
   ENV_ENVELOPE_BYTES;
 
 // `PUT /api/apps/:name/env`: exactly one non-empty path segment for the app
@@ -45,5 +47,7 @@ const ENV_PUT_PATH = /^\/api\/apps\/[^/]+\/env$/;
 
 /** Body cap for a request: the env PUT's own cap, 1 MiB for everything else. */
 export function bodyLimitFor(method: string, path: string): number {
-  return method === "PUT" && ENV_PUT_PATH.test(path) ? ENV_PUT_MAX_BODY_BYTES : API_MAX_BODY_BYTES;
+  return method === "PUT" && ENV_PUT_PATH.test(path)
+    ? ENV_PUT_MAX_BODY_BYTES
+    : API_MAX_BODY_BYTES;
 }
