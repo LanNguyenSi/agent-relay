@@ -1,7 +1,14 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { isAuthorized } from "../config/auth.js";
-import { API_MAX_BODY_BYTES } from "./body-limit.js";
+import {
+  API_MAX_BODY_BYTES,
+  ENV_MAX_ENTRIES,
+  ENV_MAX_KEY,
+  ENV_MAX_VALUE,
+  ENV_PUT_MAX_BODY_BYTES,
+  bodyLimitFor,
+} from "./body-limit.js";
 import { getRelayRevision, RELAY_VERSION } from "../config/version.js";
 import { loadRelayConfig, RelayConfigError } from "../config/relay.js";
 import * as apps from "../services/apps.js";
@@ -80,16 +87,18 @@ api.use("*", async (c, next) => {
 // Body cap, registered AFTER auth on purpose: for a chunked body (no
 // Content-Length) bodyLimit buffers the stream up to the limit before
 // next(), so registering it before auth would let an unauthenticated
-// client pin ~16 MiB per open connection before the 401. After auth, an
-// unauthorized request is answered before any of its body is read, and an
+// client pin up to the cap per open connection before the 401. After auth,
+// an unauthorized request is answered before any of its body is read, and an
 // authorized oversized body is answered with 413 JSON before a route
-// handler parses it.
-api.use(
-  "*",
-  bodyLimit({
-    maxSize: API_MAX_BODY_BYTES,
-    onError: (c) => c.json({ error: "Request body too large" }, 413),
-  }),
+// handler parses it. Every route gets 1 MiB except the env PUT, which has its
+// own cap derived from its per-field limits (see ./body-limit.ts).
+const tooLarge = (c: Context) => c.json({ error: "Request body too large" }, 413);
+const smallBodyLimit = bodyLimit({ maxSize: API_MAX_BODY_BYTES, onError: tooLarge });
+const envPutBodyLimit = bodyLimit({ maxSize: ENV_PUT_MAX_BODY_BYTES, onError: tooLarge });
+api.use("*", (c, next) =>
+  bodyLimitFor(c.req.method, c.req.path) === ENV_PUT_MAX_BODY_BYTES
+    ? envPutBodyLimit(c, next)
+    : smallBodyLimit(c, next),
 );
 
 // ── GET /api/health ─────────────────────────────────────────────────────────
@@ -363,10 +372,8 @@ api.get("/deploys", async (c) => {
 // boundary that decides what users see. A human operator who can call the
 // relay directly already has Bearer-token access to the whole VPS.
 
-// Strict upper bounds to keep the relay from being DoS'd by a runaway client.
-const ENV_MAX_ENTRIES = 500;
-const ENV_MAX_KEY = 128;
-const ENV_MAX_VALUE = 32_768;
+// Strict upper bounds to keep the relay from being DoS'd by a runaway client
+// (ENV_MAX_* in ./body-limit.ts, which also sizes the body cap from them).
 
 api.get("/apps/:name/env", async (c) => {
   try {
